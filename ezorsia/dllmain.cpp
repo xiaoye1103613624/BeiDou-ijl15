@@ -8,6 +8,7 @@
 #include "BossHP.h"
 #include "HpMpAlert.h"
 #include "SelectCharMacFix.h"
+#include "compat/ModRegistry.h"
 #pragma comment(lib, "ws2_32.lib")
 
 // config.ini can use IP or hostname (ServerIP_Address=...).
@@ -113,7 +114,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		Hook_StringPool__GetString(true); //hook stringpool modification //ty !! popcorn //ty darter
 		Hook_lpfn_NextLevel(true);
 		HookSaveGlobal(true);
-		HookHpMpAlertRecv(true);
+		ModRegistry::Initialize();
 		HookSelectCharMacFix(true);
 		//Hook_get_unknown(true);
 		//Hook_get_resource_object(true); //helper function hooks  //ty teto for helping me get started

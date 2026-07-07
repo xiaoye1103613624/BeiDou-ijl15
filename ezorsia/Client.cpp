@@ -969,6 +969,36 @@ void Client::WorldMap()
 
 #include "detours.h"
 
+namespace {
+constexpr DWORD kScreenRefreshRatePtr = 0x00BF14EC;
+constexpr int kRefreshRateFieldOffset = 0x84;
+constexpr unsigned char kRefreshRateCap = 0x3C; // 60 Hz
+
+void PatchRefreshRateTo60() {
+	__try {
+		int screen_refresh_rate = 0;
+		memcpy((void*)&screen_refresh_rate, (void*)kScreenRefreshRatePtr, sizeof(int));
+		if (screen_refresh_rate == 0) {
+			return;
+		}
+
+		unsigned char* p = reinterpret_cast<unsigned char*>(screen_refresh_rate);
+		if (p[kRefreshRateFieldOffset] > kRefreshRateCap) {
+			p[kRefreshRateFieldOffset] = kRefreshRateCap;
+		}
+	} __except (EXCEPTION_EXECUTE_HANDLER) {
+	}
+}
+
+DWORD WINAPI RefreshRatePatchWorker(LPVOID) {
+	for (int i = 0; i < 300; ++i) {
+		PatchRefreshRateTo60();
+		Sleep(50);
+	}
+	return 0;
+}
+} // namespace
+
 typedef void(_cdecl* pfunPcCreateObject_IWzPackage)(int param1, DWORD param2, DWORD param3);
 pfunPcCreateObject_IWzPackage g_PcCreateObject_IWzPackage = nullptr;
 
@@ -979,19 +1009,16 @@ HookPcCreateObject_IWzPackage(
 	, DWORD param2
 	, DWORD param3)
 {
+	PatchRefreshRateTo60();
 	g_PcCreateObject_IWzPackage(param1, param2, param3);
-
-	int screen_refresh_rate = 0; 
-	memcpy((void*)&screen_refresh_rate, (void*)0x00BF14EC, sizeof(int));
-	if (screen_refresh_rate != 0)
-	{
-		unsigned char* p = (unsigned char*)screen_refresh_rate;
-		p[0x84] = 0x3C;
-	}
+	PatchRefreshRateTo60();
 }
 void Client::RefreshRate()
 {
 	//屏幕刷新率大于60客户端无法启动
+
+	PatchRefreshRateTo60();
+	CreateThread(nullptr, 0, RefreshRatePatchWorker, nullptr, 0, nullptr);
 
 	g_PcCreateObject_IWzPackage = (pfunPcCreateObject_IWzPackage)0x009FB0E9;
 	DetourTransactionBegin();

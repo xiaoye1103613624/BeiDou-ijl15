@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "BossHP.h"
+#include "compat/ModRegistry.h"
 
 const DWORD dw_TSingleton_CUIMiniMap___ms_pInstance = 0x00BED788;
 const DWORD dwCField__ShowMobHpTag = 0x005336CA;
@@ -33,6 +34,7 @@ void BossHP::HookUpdate() {
 	{
 		_UserLocal__Update(pThis, edx);
 		DrawBossHpNumberIfNeed();
+		ModRegistry::OnClientTick();
 	};
 
 	Memory::SetHook(true, reinterpret_cast<void**>(&_UserLocal__Update), Hook);
