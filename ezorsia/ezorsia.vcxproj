@@ -105,7 +105,7 @@
       <PreprocessorDefinitions>WIN32;_DEBUG;EZORSIA_EXPORTS;_WINDOWS;_USRDLL;_CRT_NON_CONFORMING_SWPRINTFS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <UndefinePreprocessorDefinitions>%(UndefinePreprocessorDefinitions)</UndefinePreprocessorDefinitions>
       <AdditionalOptions>-D _CRT_SECURE_NO_WARNINGS %(AdditionalOptions)</AdditionalOptions>
@@ -150,7 +150,7 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -196,6 +196,18 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
     <ClInclude Include="compat\WzBridge.h" />
     <ClInclude Include="compat\wvs\Packet.h" />
     <ClInclude Include="compat\ztl\ztl.h" />
+    <ClInclude Include="damagerank\DamageRank.h" />
+    <ClInclude Include="damagerank\DamageRankApi.h" />
+    <ClInclude Include="damagerank\DamageRankNet.h" />
+    <ClInclude Include="damagerank\F12test.h" />
+    <ClInclude Include="damagerank\uiDamageRank.h" />
+    <ClInclude Include="damagerank\DamageRankHud.h" />
+    <ClInclude Include="damagerank\DamageRankInput.h" />
+    <ClInclude Include="damagerank\DamageRankStage.h" />
+    <ClInclude Include="compat\wvs\field.h" />
+    <ClInclude Include="compat\wvs\wndman.h" />
+    <ClInclude Include="compat\wvs\stage.h" />
+    <ClInclude Include="compat\wvs\wnd.h" />
     <ClInclude Include="WorldMapInfo.h" />
     <ClInclude Include="worldmap\WorldMapInfoBridge.h" />
     <ClInclude Include="worldmap\getwzinfo.h" />
@@ -245,6 +257,21 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
     <ClCompile Include="compat\PacketDispatcher.cpp" />
     <ClCompile Include="compat\WzBridge.cpp" />
     <ClCompile Include="compat\ztl\zalloctex.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="damagerank\DamageRankHud.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="damagerank\DamageRankInput.cpp" />
+    <ClCompile Include="damagerank\DamageRankStage.cpp" />
+    <ClCompile Include="damagerank\DamageRankBridge.cpp" />
+    <ClCompile Include="damagerank\F12test.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="damagerank\uiDamageRank.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
     </ClCompile>

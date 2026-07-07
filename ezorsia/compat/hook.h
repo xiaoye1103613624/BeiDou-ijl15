@@ -34,3 +34,7 @@ constexpr void* CastHook(T fn) {
     u.fn = fn;
     return u.p;
 }
+
+#define MEMBER_HOOK(T, ADDRESS, NAME, ...) \
+    inline static auto NAME = reinterpret_cast<T(__thiscall*)(void*, __VA_ARGS__)>(ADDRESS); \
+    T NAME##_hook(__VA_ARGS__);
