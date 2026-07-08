@@ -54,6 +54,7 @@ public:
     bool IsScreenPointInside(int screenX, int screenY) const;
     bool IsInputCaptured() const;
     void ResetOnStageChange();
+    void OnMapTransition();
 
     enum class Mode {
         Player = 0,

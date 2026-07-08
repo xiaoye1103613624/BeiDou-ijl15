@@ -120,9 +120,6 @@ bool CreateFontObject(IWzFontPtr& outFont, const wchar_t* face, unsigned long co
     return SUCCEEDED(fnCreate(outFont, Ztl_bstr_t(face), 12, color, style));
 }
 
-void AppendDptUiLog(const char* /*fmt*/, ...) {
-    // Logging disabled.
-}
 
 std::string TrimName(const std::string& value, size_t maxLen = 12) {
     if (value.empty()) {
@@ -480,8 +477,6 @@ void CUIDamageRank::PlayUISound(const wchar_t* soundName) {
         return;
     }
 
-    AppendDptUiLog("[PlayUISound] request");
-
     using PlayUISoundRawFn = void(__cdecl*)(const wchar_t*);
     auto fnPlayUISound = reinterpret_cast<PlayUISoundRawFn>(0x00989588);
     fnPlayUISound(soundName);
@@ -529,26 +524,19 @@ bool CUIDamageRank::EnsureCreated() {
         m_created = false;
     }
 
-    AppendDptUiLog("[EnsureCreated] begin");
-
     if (!EnsureFonts()) {
-        AppendDptUiLog("[EnsureCreated] EnsureFonts failed");
         return false;
     }
 
     if (!EnsureAssetsLoaded()) {
-        AppendDptUiLog("[EnsureCreated] assets not fully loaded");
     }
 
     if (!CreateLayer()) {
-        AppendDptUiLog("[EnsureCreated] CreateLayer failed");
         return false;
     }
 
     m_created = true;
     SetVisible(false);
-
-    AppendDptUiLog("[EnsureCreated] done");
     return true;
 }
 
@@ -560,13 +548,6 @@ bool CUIDamageRank::EnsureFonts() {
     const bool outlineOk = CreateFontObject(m_fontOutline, L"Arial", 0xFF000000);
     const bool mainOk = CreateFontObject(m_fontMain, L"Arial", 0xFFFFFFFF);
 
-    AppendDptUiLog(
-            "[EnsureFonts] outlineOk=%d mainOk=%d outline=%p main=%p",
-            outlineOk ? 1 : 0,
-            mainOk ? 1 : 0,
-            (void*)m_fontOutline.GetInterfacePtr(),
-            (void*)m_fontMain.GetInterfacePtr());
-
     return outlineOk && mainOk;
 }
 
@@ -575,7 +556,6 @@ bool CUIDamageRank::LoadCanvasByUol(const char* uol, IWzCanvasPtr& outCanvas) {
 
     auto rm = get_rm();
     if (!rm || !uol || !*uol) {
-        AppendDptUiLog("[LoadCanvasByUol] invalid uol=%s", uol ? uol : "(null)");
         return false;
     }
 
@@ -586,14 +566,12 @@ bool CUIDamageRank::LoadCanvasByUol(const char* uol, IWzCanvasPtr& outCanvas) {
 
         IUnknown* unk = obj.GetUnknown(false, false);
         if (!unk) {
-            AppendDptUiLog("[LoadCanvasByUol] GetUnknown null uol=%s", uol);
             return false;
         }
 
         IWzCanvas* rawCanvas = nullptr;
         const HRESULT hr = unk->QueryInterface(__uuidof(IWzCanvas), reinterpret_cast<void**>(&rawCanvas));
         if (FAILED(hr) || !rawCanvas) {
-            AppendDptUiLog("[LoadCanvasByUol] QI failed hr=%08X uol=%s", static_cast<unsigned int>(hr), uol);
             return false;
         }
 
@@ -601,7 +579,6 @@ bool CUIDamageRank::LoadCanvasByUol(const char* uol, IWzCanvasPtr& outCanvas) {
         rawCanvas->Release();
         return (outCanvas != nullptr);
     } catch (...) {
-        AppendDptUiLog("[LoadCanvasByUol] exception uol=%s", uol);
         return false;
     }
 }
@@ -615,7 +592,6 @@ bool CUIDamageRank::LoadCanvasByAnyUol(
         IWzCanvasPtr canvas;
         if (LoadCanvasByUol(uol, canvas) && canvas) {
             outCanvas = canvas;
-            AppendDptUiLog("[LoadCanvasByAnyUol] hit uol=%s", uol);
             return true;
         }
     }
@@ -625,16 +601,13 @@ bool CUIDamageRank::LoadCanvasByAnyUol(
 
 void CUIDamageRank::LogCanvasInfo(const char* tag, const IWzCanvasPtr& canvas) {
     if (!canvas) {
-        AppendDptUiLog("[Asset] %s = null", tag);
         return;
     }
 
     try {
         const unsigned int w = canvas->Getwidth();
         const unsigned int h = canvas->Getheight();
-        AppendDptUiLog("[Asset] %s = %p (%u x %u)", tag, (void*)canvas.GetInterfacePtr(), w, h);
     } catch (...) {
-        AppendDptUiLog("[Asset] %s = %p (size read failed)", tag, (void*)canvas.GetInterfacePtr());
     }
 }
 
@@ -759,14 +732,11 @@ IWzCanvasPtr CUIDamageRank::GetSkillIconCanvas(int skillId) {
     sprintf_s(uol, "Skill/%d.img/skill/%d/icon", skillRoot, skillId);
 
     if (!LoadCanvasByUol(uol, icon) || !icon) {
-        AppendDptUiLog("[GetSkillIconCanvas] miss skillId=%d uol=%s", skillId, uol);
 
         // Cache fallback too, so we don't retry every redraw.
         m_skillIconCache[skillId] = IWzCanvasPtr();
         return m_iconUnknownSkill;
     }
-
-    AppendDptUiLog("[GetSkillIconCanvas] hit skillId=%d uol=%s", skillId, uol);
     m_skillIconCache[skillId] = icon;
     return icon;
 }
@@ -812,13 +782,6 @@ bool CUIDamageRank::CreateLayer() {
 
     // Position relative to HUD origin, not world.
     m_layer->RelMove(m_posX, m_posY);
-
-    AppendDptUiLog(
-            "[CreateLayer] layer=%p origin=%p pos=(%d,%d)",
-            (void*)m_layer.GetInterfacePtr(),
-            (void*)hudOrigin.GetInterfacePtr(),
-            m_posX,
-            m_posY);
 
     SyncDamageRankHitShell(m_posX, m_posY, kLayerWidth, GetCurrentLayerHeight(), m_visible);
     return true;
@@ -894,6 +857,44 @@ void CUIDamageRank::ResetOnStageChange() {
     }
     m_layer = nullptr;
     m_created = false;
+}
+
+void CUIDamageRank::OnMapTransition() {
+    if (!m_visible) {
+        return;
+    }
+
+    const bool wasMinimized = m_minimized;
+    const Mode savedMode = m_mode;
+
+    m_dragging = false;
+    m_bottomRollDragging = false;
+    m_bottomRollHover = false;
+    m_scrollThumbDragging = false;
+    m_scrollPressedArmed = false;
+    m_hoveredScrollPart = ScrollPart::None;
+    m_pressedScrollPart = ScrollPart::None;
+    m_pressedButtonArmed = false;
+
+    ClearPlayerGaugeLayers();
+    if (m_layer) {
+        m_layer->visible = 0;
+    }
+    m_layer = nullptr;
+    m_created = false;
+
+    DamageRankHud::RefreshOrigin();
+
+    if (!EnsureCreated()) {
+        m_visible = false;
+        SyncDamageRankHitShell(0, 0, 0, 0, false);
+        return;
+    }
+
+    m_minimized = wasMinimized;
+    SetMode(savedMode);
+    SetVisible(true);
+    Redraw();
 }
 
 void CUIDamageRank::SetMode(Mode mode) {
@@ -1829,12 +1830,6 @@ IWzGr2DLayerPtr CUIDamageRank::CreateChildLayerFromCanvas(
 
         layer->RelMove(x, y);
     } catch (...) {
-        AppendDptUiLog("[CreateChildLayerFromCanvas] exception x=%d y=%d w=%d h=%d z=%d",
-                x,
-                y,
-                width,
-                height,
-                z);
 
         if (layer) {
             layer->visible = 0;
@@ -1842,15 +1837,6 @@ IWzGr2DLayerPtr CUIDamageRank::CreateChildLayerFromCanvas(
 
         return IWzGr2DLayerPtr();
     }
-
-    AppendDptUiLog(
-            "[CreateChildLayerFromCanvas] ok layer=%p x=%d y=%d w=%d h=%d z=%d",
-            (void*)layer.GetInterfacePtr(),
-            x,
-            y,
-            width,
-            height,
-            z);
 
     return layer;
 }
@@ -1898,7 +1884,6 @@ void CUIDamageRank::UpdateTextLayerCanvas(
         const int width = static_cast<int>(canvas->Getwidth());
         DrawTextCanvasContent(canvas, width, height, text, selfStyle);
     } catch (...) {
-        AppendDptUiLog("[UpdateTextLayerCanvas] exception");
     }
 }
 
@@ -1975,7 +1960,6 @@ void CUIDamageRank::ClearPlayerGaugeLayers() {
     m_playerGaugeLayers.clear();
 }
 void CUIDamageRank::SyncPlayerGaugeLayers() {
-    AppendDptUiLog("[SyncPlayerGaugeLayers] begin");
     if (!m_layer || !m_visible || m_minimized || m_mode != Mode::Player) {
         SetPlayerGaugeLayersVisible(false);
         return;
@@ -2032,11 +2016,6 @@ void CUIDamageRank::SyncPlayerGaugeLayers() {
 
     for (size_t row = 0; row < count; ++row) {
         const auto& entry = players[startIndex + row];
-        AppendDptUiLog(
-                "[SyncPlayerGaugeLayers] row=%d charId=%d damage=%llu",
-                static_cast<int>(row),
-                entry.charId,
-                entry.totalDamage);
         active[entry.charId] = true;
 
         const int y = kRowsStartY + static_cast<int>(row) * rowPitch;
@@ -2475,11 +2454,6 @@ void CUIDamageRank::UpdateLayerPlacement() {
     // Those are likely being interpreted in world/map space.
     m_layer->RelMove(m_posX, m_posY);
 
-    AppendDptUiLog(
-            "[UpdateLayerPlacement] pos=(%d,%d)",
-            m_posX,
-            m_posY);
-
     SyncDamageRankHitShell(m_posX, m_posY, kLayerWidth, GetCurrentLayerHeight(), m_visible);
 }
 
@@ -2770,12 +2744,6 @@ bool CUIDamageRank::HandleMouseLButtonDown(int screenX, int screenY) {
 
         UpdateBottomRollCursor();
 
-        AppendDptUiLog(
-                "[BottomRoll] start mode=%d rows=%d itemCount=%d",
-                static_cast<int>(m_mode),
-                m_rollDragStartRows,
-                itemCount);
-
         Redraw();
         return true;
     }
@@ -2874,13 +2842,6 @@ bool CUIDamageRank::HandleMouseMove(int screenX, int screenY) {
             ClampCurrentRollRows();
             ClampCurrentScrollOffset();
 
-            AppendDptUiLog(
-                    "[BottomRoll] move mode=%d rows=%d deltaY=%d rowDelta=%d",
-                    static_cast<int>(m_mode),
-                    GetCurrentRollRows(),
-                    deltaY,
-                    rowDelta);
-
             Redraw();
         }
 
@@ -2949,23 +2910,8 @@ bool CUIDamageRank::HandleMouseMove(int screenX, int screenY) {
 }
 
 bool CUIDamageRank::HandleMouseWheel(int screenX, int screenY, int wheelDelta) {
-    AppendDptUiLog(
-            "[HandleMouseWheel] enter screen=(%d,%d) wheel=%d visible=%d minimized=%d auto=%d scroll=%d mode=%d rows=%d items=%d offset=%d max=%d",
-            screenX,
-            screenY,
-            wheelDelta,
-            m_visible ? 1 : 0,
-            m_minimized ? 1 : 0,
-            m_autoMode ? 1 : 0,
-            HasCurrentScroll() ? 1 : 0,
-            static_cast<int>(m_mode),
-            GetCurrentRollRows(),
-            GetCurrentRollItemCount(),
-            GetCurrentScrollOffset(),
-            GetCurrentMaxScrollOffset());
 
     if (!m_visible || m_minimized || !HasCurrentScroll()) {
-        AppendDptUiLog("[HandleMouseWheel] reject state");
         return false;
     }
 
@@ -2973,17 +2919,10 @@ bool CUIDamageRank::HandleMouseWheel(int screenX, int screenY, int wheelDelta) {
     const int localY = screenY - m_posY;
     const int height = GetCurrentLayerHeight();
 
-    AppendDptUiLog(
-            "[HandleMouseWheel] local=(%d,%d) height=%d",
-            localX,
-            localY,
-            height);
-
     if (localX < 0 ||
             localX >= kLayerWidth ||
             localY < 0 ||
             localY >= height) {
-        AppendDptUiLog("[HandleMouseWheel] reject bounds");
         return false;
     }
 
@@ -2996,12 +2935,6 @@ bool CUIDamageRank::HandleMouseWheel(int screenX, int screenY, int wheelDelta) {
 
     SetCurrentScrollOffset(oldOffset - steps);
     ClampCurrentScrollOffset();
-
-    AppendDptUiLog(
-            "[HandleMouseWheel] steps=%d old=%d new=%d",
-            steps,
-            oldOffset,
-            GetCurrentScrollOffset());
 
     if (GetCurrentScrollOffset() != oldOffset) {
         Redraw();
@@ -3042,10 +2975,6 @@ bool CUIDamageRank::HandleMouseLButtonUp(int screenX, int screenY) {
         m_bottomRollHover = HitTestBottomRollArea(localX, localY);
 
         handled = true;
-
-        AppendDptUiLog("[BottomRoll] end mode=%d rows=%d",
-                static_cast<int>(m_mode),
-                GetCurrentRollRows());
 
         UpdateBottomRollCursor();
         Redraw();
@@ -3110,12 +3039,6 @@ void CUIDamageRank::OnTrackerPlayer(
         int jobId,
         const std::string& name,
         unsigned long long totalDamage) {
-    AppendDptUiLog(
-            "[OnTrackerPlayer] charId=%d job=%d name=%s totalDamage=%llu",
-            charId,
-            jobId,
-            name.c_str(),
-            totalDamage);
 
     CDamageRankData::GetInstance().UpsertPlayer(
             charId,
@@ -3148,7 +3071,6 @@ void CUIDamageRank::OnTrackerSkill(
 
     if (m_visible && !m_minimized) {
         ClampCurrentScrollOffset();
-        AppendDptUiLog("[OnTrackerSkill] redraw skillId=%d", skillId);
         Redraw();
     }
 }
