@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <string>
 
@@ -38,6 +38,9 @@ public:
 	static bool SwitchChinese;
 	static bool debug;
 	static bool noPassword;
+	static bool disablePacketHook;
+	static bool disableBossHP;
+	static bool disableWorldMap;
 	static bool climbSpeedAuto;
 	static float climbSpeed;
 	static int speedMovementCap;

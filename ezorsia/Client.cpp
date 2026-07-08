@@ -1,4 +1,4 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "AddyLocations.h"
 #include "codecaves.h"
 #include "FixIme.h"
@@ -30,10 +30,9 @@ std::string Client::ServerIP_AddressFromINI = "127.0.0.1"; // 服务器IP地址
 int Client::serverIP_Port = 8484; // 服务器端口
 bool Client::talkRepeat = false; // 重复说话
 int Client::talkTime = 2000; // 说话间隔时间
-bool Client::expandItem = false;
-bool Client::expandItemUI = false;
-bool Client::expandItemSlotLimits = false;
-bool Client::expandItemSort2 = false;
+bool Client::disablePacketHook = false;
+bool Client::disableBossHP = false;
+bool Client::disableWorldMap = false;
 
 void Client::UpdateGameStartup() {
 	//Memory::CodeCave(cc0x0044E550, dw0x0044E550, dw0x0044E550Nops); //run from packed client //skip //sub_44E546
@@ -917,55 +916,6 @@ void Client::NoPassword() {
 	{
 		Memory::WriteInt(0x00620F2F + 2, 0);
 	}
-}
-
-void Client::ExpandItem() {
-	if (!expandItem) {
-		return;
-	}
-	if (expandItemUI) {
-		ExpandItemUI();
-	}
-	if (expandItemSlotLimits) {
-		ExpandItemSlotLimits();
-	}
-	// IDA-verified BeiDou.exe: decode at 0xA1EC22 only. Do NOT patch 0xA1EC52/0xA1EC29.
-	if (expandItemSort2) {
-		ExpandItemSort2();
-	}
-}
-
-void Client::ExpandItemUI() {
-	Memory::WriteInt(CUIItemHeight + 1, newFullItemHeight);
-	Memory::WriteInt(CUIItemExpandItemHeight + 1, newFullItemHeight);
-	Memory::WriteInt(CUIItemBtCashShopPosY + 1, 0x10A + diffFullItemHeight);
-	Memory::CodeCave(getItemSlotRectNew, getItemSlotRectNewAddress, 5);
-	Memory::CodeCave(updateItemSlotRectVal, updateItemSlotRectValAddress, 13);
-	Memory::CodeCave(CUIItemCoinPosY, CUIItemCoinPosYAddress, 5);
-	Memory::CodeCave(CUIItemBtCoinPosY, CUIItemBtCoinPosYAddress, 5);
-}
-
-void Client::ExpandItemSlotLimits() {
-	Memory::CodeCave(itemSlotLimitExpandedA, itemSlotLimitExpandedAAddress, 6);
-	Memory::CodeCave(itemSlotLimitExpandedB, itemSlotLimitExpandedBAddress, 7);
-	Memory::CodeCave(itemSlotLimitExpandedC, itemSlotLimitExpandedCAddress, 5);
-	Memory::CodeCave(itemSlotLimitExpandedD1, itemSlotLimitExpandedD1Address, 6);
-	Memory::CodeCave(itemSlotLimitExpandedD2, itemSlotLimitExpandedD2Address, 6);
-	Memory::CodeCave(itemSlotLimitExpandedD3, itemSlotLimitExpandedD3Address, 6);
-	Memory::CodeCave(itemSlotLimitExpandedD4, itemSlotLimitExpandedD4Address, 6);
-	Memory::CodeCave(itemSlotLimitExpandedE, itemSlotLimitExpandedEAddress, 5);
-	Memory::CodeCave(itemSlotLimitExpandedF, itemSlotLimitExpandedFAddress, 5);
-	Memory::CodeCave(itemSlotLimitExpandedG, itemSlotLimitExpandedGAddress, 5);
-	// F and H share 0x470912 in reference; patch once only.
-	Memory::CodeCave(itemSlotLimitExpandedI, itemSlotLimitExpandedIAddress, 6);
-}
-
-// Verified BeiDou.exe bytes at 0xA1EC22: E8 CC 79 9E FF | 0F B6 C0 | 3B C3 ...
-// Patch rel32 at +1 to 0xFFA05AE5 and byte at +6 (0xA1EC28) from B6 to B7.
-// Do NOT use 0xA1EC52 (+1) or 0xA1EC29 — those lie inside other instructions.
-void Client::ExpandItemSort2() {
-	Memory::WriteInt(COnPacketItemSort2_DecodeSize + 1, 0xFFA05AE5);
-	Memory::WriteByte(COnPacketItemSort2_DecodeSize + 6, 0xB7);
 }
 
 void Client::MoreHook() {

@@ -87,6 +87,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 			Client::jumpCap = reader.GetInteger("optional", "jumpCap", 123);
 			Client::debug = reader.GetBoolean("debug", "debug", false);
 			Client::noPassword = reader.GetBoolean("debug", "noPassword", false);
+			Client::disablePacketHook = reader.GetBoolean("debug", "disablePacketHook", false);
+			Client::disableBossHP = reader.GetBoolean("debug", "disableBossHP", false);
+			Client::disableWorldMap = reader.GetBoolean("debug", "disableWorldMap", false);
 			Client::imeType = reader.GetInteger("general", "imeType", 1);
 			ownLoginFrame = reader.GetBoolean("optional", "ownLoginFrame", false);
 			ownCashShopFrame = reader.GetBoolean("optional", "ownCashShopFrame", false);
@@ -134,7 +137,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		Client::FixChatPosHook();
 		Client::NoPassword();
 		Client::MoreHook();
-		BossHP::Hook();
+		if (!Client::disableBossHP) {
+			BossHP::Hook();
+		}
 		Client::WorldMap();
 		Client::RefreshRate(); 
 		Client::DeleteChar();
