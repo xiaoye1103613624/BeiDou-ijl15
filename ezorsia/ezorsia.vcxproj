@@ -71,7 +71,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <BeiDouClientDir>E:\mxd_soft\2.客户端\083\beidou_client_xiaoye\BeiDou-Client\</BeiDouClientDir>
+    <BeiDouClientDir>E:\mxd_soft\2.客户端\083\beidou_client_xiaoye\BeiDou-Client_1\</BeiDouClientDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <LinkIncremental>true</LinkIncremental>
