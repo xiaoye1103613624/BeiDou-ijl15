@@ -995,7 +995,7 @@ __declspec(naked) void fixMouseWheelHook() {
 	}
 }
 
-// ARRAYS ---- ³¤¼üÅÌ¿ªÊ¼
+// ARRAYS ---- Â³Â¤Â¼Ã¼Ã…ÃŒÂ¿ÂªÃŠÂ¼
 unsigned char Array_aDefaultQKM[] = {
 	42, 0, 0, 0,
 	82, 0, 0, 0,
@@ -1315,7 +1315,7 @@ _declspec(naked) void Restore_Array_Expanded() //Thank you Max
 		ret;
 	}
 }
-// ³¤¼üÅÌ½áÊø
+// Â³Â¤Â¼Ã¼Ã…ÃŒÂ½Ã¡ÃŠÃ¸
 
 
 DWORD fixDateFormatRtnAddr = 0x008EBF65;
@@ -1454,14 +1454,14 @@ __declspec(naked) void chatTextPos()
 		cmp[edi + 0D00h], 2
 		jz label_type2
 
-		label_type1 :        // ×´Ì¬1 ÊÕËõ
+		label_type1 :        // Ã—Â´ÃŒÂ¬1 ÃŠÃ•Ã‹Ãµ
 		sub eax, 1
 		jmp label_rtn
 
-		label_type2 :        // ×´Ì¬2 ÊÕËõ + ÊäÈë
+		label_type2 :        // Ã—Â´ÃŒÂ¬2 ÃŠÃ•Ã‹Ãµ + ÃŠÃ¤ÃˆÃ«
 		jmp label_rtn
 
-		label_type3 :        // ×´Ì¬3 Õ¹¿ª
+		label_type3 :        // Ã—Â´ÃŒÂ¬3 Ã•Â¹Â¿Âª
 		sub eax, 2
 
 		label_rtn :
@@ -1594,7 +1594,7 @@ __declspec(naked) void wordMapUIcc()
 	}
 }
 
-/* ÐÞ¸´¼¼ÄÜÃèÊöÖÐÎÄ»»ÐÐÂÒÂëµÄÎÊÌâ */
+/* ÃÃžÂ¸Â´Â¼Â¼Ã„ÃœÃƒÃ¨ÃŠÃ¶Ã–ÃÃŽÃ„Â»Â»ÃÃÃ‚Ã’Ã‚Ã«ÂµÃ„ÃŽÃŠÃŒÃ¢ */
 constexpr int kSkillTooltipLineBytes = 55;
 constexpr int kSkillTooltipScanBytes = 60;
 
@@ -1662,5 +1662,257 @@ __declspec(naked) void skillToolTipNew()
 		mov[ebp - 1Ch], eax
 		lea eax, [ebp - 30h]
 		jmp skillToolTipNewRtn
+	}
+}
+
+// --- ExpandedItem (cash inventory 96 -> 192 slots) ---
+
+const unsigned int newFullItemHeight = 0x1F6;
+constexpr unsigned int diffFullItemHeight = newFullItemHeight - 0x121;
+const DWORD CUIItemHeight = 0x0081C512;
+const DWORD CUIItemBtCashShopPosY = 0x0081CEFE;
+const DWORD CUIItemExpandItemHeight = 0x0081E5BC;
+bool isItemSlotIDover96 = false;
+const DWORD getItemSlotRectNewAddress = 0x0081E2C8;
+const DWORD updateItemSlotRectValAddress = 0x0081E387;
+const DWORD itemSlotLimitExpandedAAddress = 0x0081DF74;
+const DWORD itemSlotLimitExpandedBAddress = 0x0081E01E;
+const DWORD itemSlotLimitExpandedCAddress = 0x0081DBD0;
+const DWORD itemSlotLimitExpandedD1Address = 0x004B162E;
+const DWORD itemSlotLimitExpandedD2Address = 0x004B1656;
+const DWORD itemSlotLimitExpandedD3Address = 0x004B167E;
+const DWORD itemSlotLimitExpandedD4Address = 0x004B16A3;
+const DWORD itemSlotLimitExpandedEAddress = 0x0047AA6F;
+const DWORD itemSlotLimitExpandedFAddress = 0x00470912;
+const DWORD itemSlotLimitExpandedGAddress = 0x0081D346;
+const DWORD itemSlotLimitExpandedHAddress = 0x00470912;
+const DWORD itemSlotLimitExpandedIAddress = 0x0046C2DA;
+const DWORD CUIItemCoinPosYAddress = 0x0081DD5F;
+const DWORD CUIItemBtCoinPosYAddress = 0x0081CD67;
+// BeiDou.exe verified (IDA): decode call at 0xA1EC22 = E8 CC 79 9E FF, movzx at +5 = 0F B6 C0.
+// Patch rel32 at +1 -> 0xFFA05AE5 and byte at +6 (0xA1EC28) B6 -> B7.
+// WRONG (corrupts other instructions): 0xA1EC52 decode, 0xA1EC29 movzx byte.
+const DWORD COnPacketItemSort2_DecodeSize = 0x00A1EC22;
+
+DWORD getItemSlotRectNewRtn = 0x0081E2CD;
+__declspec(naked) void getItemSlotRectNew()
+{
+	__asm {
+		push ebp
+		mov ebp, esp
+		push ecx
+		push ecx
+		pushad
+		pushfd
+		mov [isItemSlotIDover96], 0
+		cmp [ecx+604h], 0
+		jz skip_sub
+		mov eax, [ebp + 8]
+		cmp eax, 60h
+		setg byte ptr[isItemSlotIDover96]
+		jle skip_sub
+		sub eax, 60h
+		mov[ebp + 8], eax
+		skip_sub :
+		popfd
+		popad
+		jmp getItemSlotRectNewRtn
+	}
+}
+
+DWORD updateItemSlotRectValRtn = 0x0081E394;
+DWORD updateItemSlotRectTemp = 0xFFFFFFFF;
+__declspec(naked) void updateItemSlotRectVal()
+{
+	__asm {
+		mov dword ptr[updateItemSlotRectTemp], ebx
+		mov bl, byte ptr[isItemSlotIDover96]
+		test bl, bl
+		jz sub_notOver1
+		add edx, dword ptr[diffFullItemHeight]
+		sub_notOver1 :
+		push edx
+		lea edx, dword ptr[ecx + 28h]
+		push edx
+		add eax, 32h
+		test bl, bl
+		jz sub_notOver2
+		add eax, dword ptr[diffFullItemHeight]
+		sub_notOver2 :
+		push eax
+		add ecx, 8
+		push ecx
+		mov ebx, dword ptr[updateItemSlotRectTemp]
+		jmp updateItemSlotRectValRtn
+	}
+}
+
+DWORD itemSlotLimitExpandedARtn = 0x0081DF7A;
+__declspec(naked) void itemSlotLimitExpandedA()
+{
+	__asm {
+		cmp edx, 0xC0
+		mov dword ptr[ebp+8], edx
+		jmp itemSlotLimitExpandedARtn
+	}
+}
+
+DWORD itemSlotLimitExpandedBRtn = 0x0081E025;
+__declspec(naked) void itemSlotLimitExpandedB()
+{
+	__asm {
+		inc dword ptr[ebp + 8]
+		cmp dword ptr[ebp + 8], 0xC0
+		jmp itemSlotLimitExpandedBRtn
+	}
+}
+
+DWORD itemSlotLimitExpandedCRtn = 0x0081DBE6;
+__declspec(naked) void itemSlotLimitExpandedC()
+{
+	__asm {
+		push 0xC1
+		pop ebx
+		jmp itemSlotLimitExpandedCRtn
+	}
+}
+
+DWORD itemSlotLimitExpandedD1Rtn = 0x004B1634;
+__declspec(naked) void itemSlotLimitExpandedD1()
+{
+	__asm {
+		cmp eax, 0xC0
+		setle bl
+		jmp itemSlotLimitExpandedD1Rtn
+	}
+}
+
+DWORD itemSlotLimitExpandedD2Rtn = 0x004B165C;
+__declspec(naked) void itemSlotLimitExpandedD2()
+{
+	__asm {
+		cmp eax, 0xC0
+		setle bl
+		jmp itemSlotLimitExpandedD2Rtn
+	}
+}
+
+DWORD itemSlotLimitExpandedD3Rtn = 0x004B1684;
+__declspec(naked) void itemSlotLimitExpandedD3()
+{
+	__asm {
+		cmp eax, 0xC0
+		setle bl
+		jmp itemSlotLimitExpandedD3Rtn
+	}
+}
+
+DWORD itemSlotLimitExpandedD4Rtn = 0x004B16A9;
+__declspec(naked) void itemSlotLimitExpandedD4()
+{
+	__asm {
+		cmp esi, 0xC0
+		setle dl
+		jmp itemSlotLimitExpandedD4Rtn
+	}
+}
+
+DWORD itemSlotLimitExpandedERtn = 0x0047AA74;
+__declspec(naked) void itemSlotLimitExpandedE()
+{
+	__asm {
+		cmp ebx, 0xC0
+		jle skip_sub
+		push eax
+		mov eax, 0x0047AAD1
+		mov dword ptr[itemSlotLimitExpandedERtn], eax
+		pop eax
+		skip_sub:
+		jmp itemSlotLimitExpandedERtn
+	}
+}
+
+DWORD itemSlotLimitExpandedFRtn = 0x00470917;
+__declspec(naked) void itemSlotLimitExpandedF()
+{
+	__asm {
+		add ecx, eax
+		cmp ecx, 0xC0
+		jmp itemSlotLimitExpandedFRtn
+	}
+}
+
+DWORD itemSlotLimitExpandedGRtn = 0x0081D34B;
+__declspec(naked) void itemSlotLimitExpandedG()
+{
+	__asm {
+		push eax
+		mov eax, 0x0081D34B
+		mov dword ptr[itemSlotLimitExpandedGRtn], eax
+		pop eax
+		cmp eax, 0xC0
+		jge skip_sub
+		push eax
+		mov eax, 0x0081D35A
+		mov dword ptr[itemSlotLimitExpandedGRtn], eax
+		pop eax
+		skip_sub:
+		jmp itemSlotLimitExpandedGRtn
+	}
+}
+
+DWORD itemSlotLimitExpandedHRtn = 0x00470917;
+__declspec(naked) void itemSlotLimitExpandedH()
+{
+	__asm {
+		add ecx, eax
+		cmp ecx, 0xC0
+		jmp itemSlotLimitExpandedHRtn
+	}
+}
+
+DWORD itemSlotLimitExpandedIRtn = 0x0046C2E0;
+__declspec(naked) void itemSlotLimitExpandedI()
+{
+	__asm {
+		add eax, 3
+		cmp eax, 0xC0
+		jmp itemSlotLimitExpandedIRtn
+	}
+}
+
+DWORD CUIItemCoinPosYRtn = 0x0081DD64;
+__declspec(naked) void CUIItemCoinPosY()
+{
+	__asm {
+		cmp dword ptr [ebx+604h], 0
+		jz skip_isSmallItem
+		mov eax, dword ptr[diffFullItemHeight]
+		add eax, 0x10A
+		push eax
+		mov eax, esp
+		jmp skip_step
+		skip_isSmallItem:
+		push 0x10A
+		skip_step:
+		jmp CUIItemCoinPosYRtn
+	}
+}
+
+DWORD CUIItemBtCoinPosYRtn = 0x0081CD6C;
+__declspec(naked) void CUIItemBtCoinPosY()
+{
+	__asm {
+		cmp dword ptr[esi + 604h], 0
+		jz skip_isSmallItem
+		mov ebx, dword ptr[diffFullItemHeight]
+		add ebx, 0x10A
+		push ebx
+		xor ebx, ebx
+		jmp skip_step
+		skip_isSmallItem :
+		push 0x10A
+		skip_step :
+		jmp CUIItemBtCoinPosYRtn
 	}
 }
