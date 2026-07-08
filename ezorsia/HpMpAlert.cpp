@@ -107,11 +107,11 @@ static bool HandleHpMpAlertPacket(CompatInPacket* packet, unsigned short /*opcod
     }
 }
 
-using SaveGlobal_t = void(__fastcall*)(void* pThis, void* edx);
+using SaveGlobal_t = void(__thiscall*)(void* pThis);
 static SaveGlobal_t s_SaveGlobal = reinterpret_cast<SaveGlobal_t>(ClientAddresses::kSaveGlobal);
 
-static void __fastcall SaveGlobal_Hook(void* pThis, void* edx) {
-    s_SaveGlobal(pThis, edx);
+static void __fastcall SaveGlobal_Hook(void* pThis, void* /*edx*/) {
+    s_SaveGlobal(pThis);
     SendHpMpAlertFromStatusBar();
 }
 } // namespace
