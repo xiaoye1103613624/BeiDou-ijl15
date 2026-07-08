@@ -15,6 +15,10 @@ const DWORD dwCUserLocal__Update = 0x0094A144;
 char BossHP::aBossHpUIToolTip[1304];
 double BossHP::dBossHpPercentage = 0;
 
+namespace {
+bool g_bossHpToolTipReady = false;
+}
+
 void BossHP::Hook() { // main method
 	HookInternal();
 }
@@ -58,11 +62,18 @@ void BossHP::HookInitField() {
 
 	Field__Init_Type Hook = [](void* pThis, void* edx) -> void
 	{
+		// CField::CField already constructs its own tooltip at this+144.
+		// Never run ~CUIToolTip/ctor on the static boss-HP buffer here: on the
+		// second map load that double-lifecycle corrupts the object and crashes.
 		if (dBossHpPercentage > 0) {
 			BossHP::DisposeBossHpNumber();
 		}
-		BossHP::DisposeToolTip((int)&aBossHpUIToolTip);
-		BossHP::CreateToolTip((int)&aBossHpUIToolTip);
+		if (!g_bossHpToolTipReady) {
+			BossHP::CreateToolTip((int)&aBossHpUIToolTip);
+			g_bossHpToolTipReady = true;
+		} else {
+			BossHP::ClearToolTip((int)&aBossHpUIToolTip);
+		}
 		_Field__Init(pThis, edx);
 	};
 	Memory::SetHook(true, reinterpret_cast<void**>(&_Field__Init), Hook);
@@ -75,6 +86,9 @@ void BossHP::HookDisposeField() {
 	Field__Dispose_Type Hook = [](void* pThis, void* edx) -> void
 	{
 		DisposeBossHpNumber();
+		if (g_bossHpToolTipReady) {
+			BossHP::ClearToolTip((int)&aBossHpUIToolTip);
+		}
 		_Field__Dispose(pThis, edx);
 	};
 	Memory::SetHook(true, reinterpret_cast<void**>(&_Field__Dispose), Hook);
