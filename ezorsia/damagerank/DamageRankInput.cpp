@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "DamageRankInput.h"
+#include "../storagebag/StorageBagApi.h"
 #include "compat/hook.h"
 #include "compat/wvs/wndman.h"
 
@@ -22,6 +23,8 @@ int CWndMan::TranslateMessageImpl_hook(
         LRESULT* plResult) {
     const bool damageRankMouse =
             DamageRank_HandleMouseMessage(msg, wParam, lParam, plResult);
+    const bool storageBagMouse =
+            StorageBag_HandleMouseMessage(msg, wParam, lParam, plResult);
 
     const int result =
             CWndMan::TranslateMessageImpl(this, msg, wParam, lParam, plResult);
