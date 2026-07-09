@@ -1,4 +1,5 @@
 #pragma once
+#include "Client.h"
 #include "ztl/ztl.h"
 
 inline IWzGr2DPtr& get_gr() {
@@ -27,4 +28,15 @@ inline IUnknownPtr get_unknown(Ztl_variant_t v) {
     Ztl_variant_t mutableV = v;
     get_unknown_hook(std::addressof(pUnk), mutableV);
     return pUnk;
+}
+
+// Resolution lives in Client::m_nGameWidth/Height (patched at startup).
+// Do NOT read 0x009F707E/7082 — those are code-section immediates; the old
+// get_screen_height() used 0x009F7082 (width+4) and returned garbage Y.
+inline int get_screen_width() {
+    return Client::m_nGameWidth;
+}
+
+inline int get_screen_height() {
+    return Client::m_nGameHeight;
 }

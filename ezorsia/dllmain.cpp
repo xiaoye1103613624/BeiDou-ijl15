@@ -5,10 +5,14 @@
 #include "INIReader.h"
 #include "ReplacementFuncs.h"
 #include <comutil.h>
+#ifndef BEIDOU_MINIMAL_PLUGIN
 #include "BossHP.h"
+#endif
 #include "HpMpAlert.h"
 #include "SelectCharMacFix.h"
-#include "compat/ModRegistry.h"
+#ifndef BEIDOU_MINIMAL_PLUGIN
+#include "compat/LazyCompatInit.h"
+#endif
 #pragma comment(lib, "ws2_32.lib")
 
 // config.ini can use IP or hostname (ServerIP_Address=...).
@@ -117,7 +121,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		Hook_StringPool__GetString(true); //hook stringpool modification //ty !! popcorn //ty darter
 		Hook_lpfn_NextLevel(true);
 		HookSaveGlobal(true);
-		ModRegistry::Initialize();
 		HookSelectCharMacFix(true);
 		//Hook_get_unknown(true);
 		//Hook_get_resource_object(true); //helper function hooks  //ty teto for helping me get started
@@ -137,12 +140,14 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		Client::FixChatPosHook();
 		Client::NoPassword();
 		Client::MoreHook();
-		if (!Client::disableBossHP) {
-			BossHP::Hook();
-		}
-		Client::WorldMap();
-		Client::RefreshRate(); 
 		Client::DeleteChar();
+#ifndef BEIDOU_MINIMAL_PLUGIN
+		// Defer ModRegistry / BossHP / WorldMap / DamageRank / DamageSkin / RefreshRate
+		// until first CField::CField — DllMain path matches ultra-minimal startup.
+		LazyCompatInit::InstallBootstrapHook();
+#else
+		// Ultra-minimal: ijl15 proxy + IP/res hooks only — no feature hooks at DllMain.
+#endif
 		std::cout << "GetModuleFileName hook created" << std::endl;
 		ijl15::CreateHook(); //NMCO::CreateHook();
 

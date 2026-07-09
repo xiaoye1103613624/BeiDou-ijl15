@@ -1,6 +1,8 @@
 #include "stdafx.h"
 #include "BossHP.h"
+#ifndef BEIDOU_MINIMAL_PLUGIN
 #include "compat/ModRegistry.h"
+#endif
 
 const DWORD dw_TSingleton_CUIMiniMap___ms_pInstance = 0x00BED788;
 const DWORD dwCField__ShowMobHpTag = 0x005336CA;
@@ -38,7 +40,9 @@ void BossHP::HookUpdate() {
 	{
 		_UserLocal__Update(pThis, edx);
 		DrawBossHpNumberIfNeed();
+#ifndef BEIDOU_MINIMAL_PLUGIN
 		ModRegistry::OnClientTick();
+#endif
 	};
 
 	Memory::SetHook(true, reinterpret_cast<void**>(&_UserLocal__Update), Hook);

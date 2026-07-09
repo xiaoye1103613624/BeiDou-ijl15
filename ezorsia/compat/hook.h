@@ -35,6 +35,33 @@ constexpr void* CastHook(T fn) {
     return u.p;
 }
 
+template <typename U>
+inline void PatchJmp(uintptr_t pAddress, U pDestination) {
+    Memory::WriteByte(pAddress, 0xE9);
+    Memory::WriteInt(pAddress + 1, static_cast<int>(
+        reinterpret_cast<uintptr_t>(pDestination) - pAddress - 5));
+}
+
+template <typename T, typename U>
+inline void PatchJmp(T pAddress, U pDestination) {
+    PatchJmp(reinterpret_cast<uintptr_t>(pAddress), pDestination);
+}
+
+template <typename U>
+inline void PatchCall(uintptr_t pAddress, U pDestination, size_t uSize = 5) {
+    Memory::WriteByte(pAddress, 0xE8);
+    Memory::WriteInt(pAddress + 1, static_cast<int>(
+        reinterpret_cast<uintptr_t>(pDestination) - pAddress - 5));
+    for (size_t i = 5; i < uSize; ++i) {
+        Memory::WriteByte(pAddress + i, 0x90);
+    }
+}
+
+template <typename T, typename U>
+inline void PatchCall(T pAddress, U pDestination, size_t uSize = 5) {
+    PatchCall(reinterpret_cast<uintptr_t>(pAddress), pDestination, uSize);
+}
+
 #define MEMBER_HOOK(T, ADDRESS, NAME, ...) \
     inline static auto NAME = reinterpret_cast<T(__thiscall*)(void*, __VA_ARGS__)>(ADDRESS); \
     T NAME##_hook(__VA_ARGS__);

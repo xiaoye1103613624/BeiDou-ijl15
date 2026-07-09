@@ -34,7 +34,7 @@ public:
         int nWidth,
         int bSetFadeOut,
         int bLogin) {
-        // v83 entry @ 0x008E7150 (NOT 0x008E7317 — mid-function, will crash)
+        // v83 entry @ 0x008E7150 (NOT 0x008E7317 鈥?mid-function, will crash)
         reinterpret_cast<void(__thiscall*)(CUIToolTip*, int, int, ZXString<char>, ZXString<char>, int, int, int, int, int, int)>(
             0x008E7150)(
             this,

@@ -9,6 +9,10 @@
       <Configuration>Release</Configuration>
       <Platform>Win32</Platform>
     </ProjectConfiguration>
+    <ProjectConfiguration Include="ReleaseMinimal|Win32">
+      <Configuration>ReleaseMinimal</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
     <ProjectConfiguration Include="Debug|x64">
       <Configuration>Debug</Configuration>
       <Platform>x64</Platform>
@@ -39,6 +43,13 @@
     <WholeProgramOptimization>false</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v142</PlatformToolset>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
@@ -61,6 +72,9 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -93,6 +107,11 @@
     <TargetName>ijl15</TargetName>
     <OutDir>$(SolutionDir)\out\$(Configuration)\</OutDir>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">
+    <LinkIncremental>false</LinkIncremental>
+    <TargetName>ijl15</TargetName>
+    <OutDir>$(SolutionDir)\out\$(Configuration)\</OutDir>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <LinkIncremental>false</LinkIncremental>
   </PropertyGroup>
@@ -105,7 +124,7 @@
       <PreprocessorDefinitions>WIN32;_DEBUG;EZORSIA_EXPORTS;_WINDOWS;_USRDLL;_CRT_NON_CONFORMING_SWPRINTFS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <UndefinePreprocessorDefinitions>%(UndefinePreprocessorDefinitions)</UndefinePreprocessorDefinitions>
       <AdditionalOptions>-D _CRT_SECURE_NO_WARNINGS %(AdditionalOptions)</AdditionalOptions>
@@ -150,7 +169,7 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -166,6 +185,35 @@ xcopy /Y /Q "$(TargetPath)" "$(BeiDouClientDir)"
 if exist "$(ProjectDir)config.ini" xcopy /Y /Q "$(ProjectDir)config.ini" "$(BeiDouClientDir)"
 echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
       <Message>Deploy ijl15.dll to BeiDou client directory</Message>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">
+    <ClCompile>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;NDEBUG;BEIDOU_MINIMAL_PLUGIN;EZORSIA_EXPORTS;_WINDOWS;_USRDLL;_CRT_NON_CONFORMING_SWPRINTFS;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>detours.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(SolutionDir)\detours;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
+    <PostBuildEvent>
+      <Command>if not exist "$(BeiDouClientDir)" mkdir "$(BeiDouClientDir)"
+copy /Y "$(TargetPath)" "$(BeiDouClientDir)ijl15.minimal.dll"
+echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)ijl15.minimal.dll</Command>
+      <Message>Deploy minimal ijl15.dll to BeiDou client directory</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -191,6 +239,7 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
       <FileType>CppHeader</FileType>
     </ClInclude>
     <ClInclude Include="compat\ClientAddresses.h" />
+    <ClInclude Include="compat\LazyCompatInit.h" />
     <ClInclude Include="compat\ModRegistry.h" />
     <ClInclude Include="compat\PacketDispatcher.h" />
     <ClInclude Include="compat\WzBridge.h" />
@@ -203,7 +252,9 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
     <ClInclude Include="damagerank\uiDamageRank.h" />
     <ClInclude Include="damagerank\DamageRankHud.h" />
     <ClInclude Include="damagerank\DamageRankInput.h" />
-    <ClInclude Include="damagerank\DamageRankStage.h" />
+    <ClInclude Include="damageskin\DamageSkinApi.h" />
+    <ClInclude Include="damageskin\DamageSkinData.h" />
+    <ClInclude Include="damageskin\debug.h" />
     <ClInclude Include="compat\wvs\field.h" />
     <ClInclude Include="compat\wvs\wndman.h" />
     <ClInclude Include="compat\wvs\stage.h" />
@@ -253,46 +304,82 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
     <ClInclude Include="targetver.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="compat\ModRegistry.cpp" />
-    <ClCompile Include="compat\PacketDispatcher.cpp" />
-    <ClCompile Include="compat\WzBridge.cpp" />
+    <ClCompile Include="compat\LazyCompatInit.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="compat\ModRegistry.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="compat\PacketDispatcher.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="compat\WzBridge.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="compat\ztl\zalloctex.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="damagerank\DamageRankHud.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
-    <ClCompile Include="damagerank\DamageRankInput.cpp" />
-    <ClCompile Include="damagerank\DamageRankStage.cpp" />
-    <ClCompile Include="damagerank\DamageRankBridge.cpp" />
+    <ClCompile Include="damagerank\DamageRankInput.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="damagerank\DamageRankStage.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="damageskin\DamageSkinBridge.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="damageskin\damageskin.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="damageskin\damageskinpicker.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="damagerank\DamageRankBridge.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="damagerank\F12test.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="damagerank\uiDamageRank.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
-    <ClCompile Include="worldmap\WorldMapInfoBridge.cpp" />
+    <ClCompile Include="worldmap\WorldMapInfoBridge.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="worldmap\worldmapinfo.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="worldmap\getwzinfo.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="worldmap\iconprovider.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="compat\wvs\util.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
-    <ClCompile Include="BossHP.cpp" />
+    <ClCompile Include="BossHP.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="HpMpAlert.cpp" />
     <ClCompile Include="Client.cpp" />
     <ClCompile Include="ijl15.cpp" />
@@ -305,6 +392,7 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
   </ItemGroup>
