@@ -3,6 +3,7 @@
 #include "compat/hook.h"
 #include "debug.h"
 #include "DamageSkinData.h"
+#include "BeautyShopApi.h"
 #include "compat/wvs/iteminfo.h"
 #include "compat/wvs/util.h"
 #include "compat/wvs/wnd.h"
@@ -86,9 +87,11 @@ static void PickerLogAlways(const char* fmt, ...) {
 // v83 addresses + constants
 // ---------------------------------------------------------------------------
 static constexpr int32_t kCashItem_DamageSkin = 5910000;
+static constexpr int32_t kCashItem_BeautyUnlock = 5920000;
 static constexpr int32_t kInvType_Cash       = 5;
 
 static constexpr uintptr_t kAddr_SendConsumeCash    = 0x00A0A63F;
+static constexpr uintptr_t kAddr_SendEtcCash        = 0x00A1DC5B;
 static constexpr uintptr_t kAddr_get_consume_type   = 0x004863D5;
 static constexpr uintptr_t kAddr_OnDoubleClick      = 0x004EFD25;
 static constexpr uintptr_t kAddr_CWvsContext        = 0x00BE7918;
@@ -1483,9 +1486,28 @@ void OpenDamageSkinPicker() {
     OpenDamageSkinPickerWindow();
 }
 
+static auto CWvsContext__SendEtcCashItemUseRequest =
+    reinterpret_cast<void(__thiscall*)(CWvsContext*, int, int)>(kAddr_SendEtcCash);
+
+void __fastcall CWvsContext__SendEtcCashItemUseRequest_hook_picker(
+    CWvsContext* pThis, void* /*edx*/, int nPOS, int nItemID)
+{
+    if (nItemID == kCashItem_BeautyUnlock) {
+        PickerLogAlways("SendEtcCash intercept: beauty unlock item=%d pos=%d", nItemID, nPOS);
+        BeautyShop_SendUnlockSlot(nPOS);
+        return;
+    }
+    CWvsContext__SendEtcCashItemUseRequest(pThis, nPOS, nItemID);
+}
+
 void __fastcall CWvsContext__SendConsumeCashItemUseRequest_hook_picker(
     CWvsContext* pThis, void* /*edx*/, int nPOS, int nItemID, int a4, ZXString<char> a5)
 {
+    if (nItemID == kCashItem_BeautyUnlock) {
+        PickerLogAlways("SendConsumeCash intercept: beauty unlock item=%d pos=%d", nItemID, nPOS);
+        BeautyShop_SendUnlockSlot(nPOS);
+        return;
+    }
     if (nItemID != kCashItem_DamageSkin) {
         CWvsContext__SendConsumeCashItemUseRequest(pThis, nPOS, nItemID, a4, a5);
         return;
@@ -1578,7 +1600,7 @@ int __fastcall CWndMan__ProcessKey_hook(
 }
 
 int32_t __cdecl get_consume_cash_item_type_hook_picker(int32_t nItemID) {
-    if (nItemID == kCashItem_DamageSkin) {
+    if (nItemID == kCashItem_DamageSkin || nItemID == kCashItem_BeautyUnlock) {
         PickerLogAlways("get_consume hook: item=%d -> 1", nItemID);
         return 1;
     }
@@ -1601,6 +1623,14 @@ int __fastcall CDraggableItem__OnDoubleClick_hook(
     const int nPOS = pThis->m_nSlotPosition;
     void* pItem = FetchInventoryItem(nTI, nPOS);
     const int nItemID = DecodeItemID(pItem);
+
+    if (nItemID == kCashItem_BeautyUnlock && nTI == kInvType_Cash) {
+        PickerLogAlways(
+            "OnDoubleClick intercept: beauty unlock item=%d ti=%d pos=%d",
+            nItemID, nTI, nPOS);
+        BeautyShop_SendUnlockSlot(nPOS);
+        return 1;
+    }
 
     if (nItemID == kCashItem_DamageSkin && nTI == kInvType_Cash) {
         PickerLogAlways(
@@ -1643,6 +1673,9 @@ void AttachDamageSkinPickerMod() {
     AttachPickerHook("SendConsume",
                      reinterpret_cast<void**>(&CWvsContext__SendConsumeCashItemUseRequest),
                      CastHook(&CWvsContext__SendConsumeCashItemUseRequest_hook_picker));
+    AttachPickerHook("SendEtcCash",
+                     reinterpret_cast<void**>(&CWvsContext__SendEtcCashItemUseRequest),
+                     CastHook(&CWvsContext__SendEtcCashItemUseRequest_hook_picker));
     AttachPickerHook("get_consume",
                      reinterpret_cast<void**>(&get_consume_cash_item_type_picker),
                      CastHook(&get_consume_cash_item_type_hook_picker));
