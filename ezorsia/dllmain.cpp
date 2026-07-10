@@ -12,6 +12,7 @@
 #include "SelectCharMacFix.h"
 #ifndef BEIDOU_MINIMAL_PLUGIN
 #include "compat/LazyCompatInit.h"
+#include "higherstoragelist/HigherStorageListApi.h"
 #endif
 #pragma comment(lib, "ws2_32.lib")
 
@@ -142,6 +143,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		Client::MoreHook();
 		Client::DeleteChar();
 #ifndef BEIDOU_MINIMAL_PLUGIN
+		// Trunk merchant row patches are pure WriteByte — safe at DllMain (before any UI).
+		HigherStorageList::ApplyPatches();
 		// Defer ModRegistry / BossHP / WorldMap / DamageRank / DamageSkin / RefreshRate
 		// until first CField::CField — DllMain path matches ultra-minimal startup.
 		LazyCompatInit::InstallBootstrapHook();
