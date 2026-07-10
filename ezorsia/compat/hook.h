@@ -17,6 +17,12 @@
         *reinterpret_cast<T*>(reinterpret_cast<uintptr_t>(this) + OFFSET) = value; \
     }
 
+#define MEMBER_ARRAY_AT(T, OFFSET, NAME, N) \
+    __declspec(property(get = get_##NAME)) T(&NAME)[N]; \
+    __forceinline T(&get_##NAME())[N] { \
+        return *reinterpret_cast<T(*)[N]>(reinterpret_cast<uintptr_t>(this) + OFFSET); \
+    }
+
 #ifdef _DEBUG
 #define ATTACH_HOOK(TARGET, DETOUR) \
     Memory::SetHook(true, reinterpret_cast<void**>(&TARGET), CastHook(&DETOUR))
