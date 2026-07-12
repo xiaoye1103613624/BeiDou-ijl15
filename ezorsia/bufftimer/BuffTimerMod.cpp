@@ -1,0 +1,856 @@
+#include "stdafx.h"
+#include "BuffTimerApi.h"
+#include "INIReader.h"
+#include "compat/hook.h"
+#include "compat/wvs/statusbar.h"
+#include "compat/wvs/util.h"
+#include "compat/ztl/ztl.h"
+
+#include <algorithm>
+#include <cstdarg>
+#include <cstdio>
+#include <string>
+#include <vector>
+
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "user32.lib")
+
+namespace {
+
+constexpr uintptr_t kDrawSkillCooltimeHook = 0x008E085B;
+constexpr uintptr_t kDrawSkillCooltimeRet = 0x008E0990;
+constexpr uintptr_t kDrawNumberByImage = 0x00988345;
+constexpr uintptr_t kCWvsContextInst = 0x00BE7918;
+constexpr int kCtxTempStatViewOff = 0x2EA8;
+constexpr int kTempStatListHeadOff = 0x10;
+constexpr int kStatusBarNumberFontOff = 0xE0;
+constexpr DWORD kStartupDelayMs = 3000;
+constexpr DWORD kOverlayTimerMs = 250;
+constexpr DWORD kDiagLogIntervalMs = 10000;
+constexpr int kOverlayTextTop = 37;
+constexpr int kOverlayTextBottom = 59;
+constexpr COLORREF kOverlayColorKey = RGB(1, 0, 1);
+constexpr COLORREF kBuffTimerTextColor = RGB(255, 224, 96);
+
+using DrawNumberByImageFn = int(__cdecl*)(void*, int, int, int, void*, int);
+
+struct BuffTimerEntry {
+    int leftMs = 0;
+    int id = 0;
+};
+
+HMODULE g_module = nullptr;
+HWND g_overlay = nullptr;
+HFONT g_timerFont = nullptr;
+bool g_hooksAttached = false;
+bool g_overlayReady = false;
+bool g_loggedActiveTimers = false;
+DWORD g_lastDiagLogTick = 0;
+FILE* g_log = nullptr;
+
+void Log(const char* fmt, ...) {
+    if (!g_log) {
+        wchar_t exePath[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        std::wstring logPath = exePath;
+        const auto slash = logPath.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) {
+            logPath.resize(slash + 1);
+        }
+        logPath += L"bufftimer.log";
+        _wfopen_s(&g_log, logPath.c_str(), L"a");
+    }
+    if (!g_log) {
+        return;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(g_log, fmt, ap);
+    va_end(ap);
+    fprintf(g_log, "\n");
+    fflush(g_log);
+}
+
+uint8_t* GetTemporaryStatViewBase() {
+    void* ctx = *reinterpret_cast<void**>(kCWvsContextInst);
+    if (!ctx) {
+        return nullptr;
+    }
+    return reinterpret_cast<uint8_t*>(ctx) + kCtxTempStatViewOff;
+}
+
+void AttachHooksOnce();
+
+std::vector<BuffTimerEntry> CollectBuffTimers();
+std::wstring FormatBuffTime(int leftMs);
+
+struct TemporaryStat {
+    unsigned char pad0[0x1C];
+    int nType;
+    int nID;
+    unsigned char pad1[4];
+    IWzGr2DLayerPtr pLayer;
+    IWzGr2DLayerPtr pLayerShadow;
+    int nIndexShadow;
+    int bNoShadow;
+    int tLeft;
+    int tLeftUnit;
+};
+
+void RefreshBuffShadow(TemporaryStat* pThis);
+
+static auto TEMPORARY_STAT__UpdateShadowIndex =
+    reinterpret_cast<void(__thiscall*)(TemporaryStat*)>(0x007B44F4);
+
+bool IsDurabilityBuff(int skillId) {
+    return skillId == 5221006;
+}
+
+bool ShouldDrawBuffOverlay(const BuffTimerEntry& entry) {
+    return entry.leftMs > 0 && !IsDurabilityBuff(entry.id);
+}
+
+static IWzPropertyPtr g_pBuffNumberFont;
+static IWzPropertyPtr g_pSkillNumberFont;
+static HWND g_cachedGameWindow = nullptr;
+static HWND g_overlayParent = nullptr;
+static int g_shadowRefreshLogCount = 0;
+static bool g_loggedSkillCooldown = false;
+static bool g_loggedOverlayShow = false;
+
+struct OverlayPaintState {
+    int width = 0;
+    int height = 0;
+    int startX = 0;
+    std::vector<std::wstring> labels;
+};
+
+static OverlayPaintState g_paintState;
+
+RECT MakeSlotRect(int startX, size_t index) {
+    return RECT{
+        startX + static_cast<int>(index) * 32,
+        kOverlayTextTop,
+        startX + static_cast<int>(index + 1) * 32,
+        kOverlayTextBottom};
+}
+
+RECT MakeTimerBarRect(int startX, size_t slotCount) {
+    if (slotCount == 0) {
+        return RECT{0, 0, 0, 0};
+    }
+    return RECT{
+        startX,
+        kOverlayTextTop,
+        startX + static_cast<int>(slotCount) * 32,
+        kOverlayTextBottom};
+}
+
+bool RectsIntersect(const RECT& a, const RECT& b) {
+    return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+
+void FillColorKey(HDC dc, const RECT& rect) {
+    HBRUSH background = CreateSolidBrush(kOverlayColorKey);
+    FillRect(dc, &rect, background);
+    DeleteObject(background);
+}
+
+void BuildCharRects(HDC dc, const std::wstring& text, const RECT& slotRect, std::vector<RECT>& out) {
+    out.clear();
+    if (text.empty()) {
+        return;
+    }
+
+    SIZE total{};
+    GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &total);
+    const int slotW = slotRect.right - slotRect.left;
+    const int slotH = slotRect.bottom - slotRect.top;
+    int x = slotRect.left + (slotW - total.cx) / 2;
+    const int y = slotRect.top + (slotH - total.cy) / 2;
+
+    for (wchar_t ch : text) {
+        wchar_t glyph[2] = {ch, 0};
+        SIZE charSize{};
+        GetTextExtentPoint32W(dc, glyph, 1, &charSize);
+        out.push_back(RECT{x, y, x + charSize.cx, y + charSize.cy});
+        x += charSize.cx;
+    }
+}
+
+void InvalidateLabelDiff(HWND hwnd, HDC dc, const RECT& slotRect, const std::wstring& oldLabel, const std::wstring& newLabel) {
+    if (oldLabel == newLabel) {
+        return;
+    }
+    if (oldLabel.empty() || newLabel.empty() || oldLabel.size() != newLabel.size()) {
+        InvalidateRect(hwnd, &slotRect, FALSE);
+        return;
+    }
+
+    SIZE oldSize{};
+    SIZE newSize{};
+    GetTextExtentPoint32W(dc, oldLabel.c_str(), static_cast<int>(oldLabel.size()), &oldSize);
+    GetTextExtentPoint32W(dc, newLabel.c_str(), static_cast<int>(newLabel.size()), &newSize);
+    if (oldSize.cx != newSize.cx) {
+        InvalidateRect(hwnd, &slotRect, FALSE);
+        return;
+    }
+
+    std::vector<RECT> charRects;
+    BuildCharRects(dc, newLabel, slotRect, charRects);
+    for (size_t i = 0; i < newLabel.size() && i < charRects.size(); ++i) {
+        if (oldLabel[i] != newLabel[i]) {
+            RECT dirty = charRects[i];
+            InflateRect(&dirty, 2, 2);
+            InvalidateRect(hwnd, &dirty, FALSE);
+        }
+    }
+}
+
+std::vector<BuffTimerEntry> CollectVisibleBuffTimers() {
+    std::vector<BuffTimerEntry> visible;
+    const auto timers = CollectBuffTimers();
+    visible.reserve(timers.size());
+    for (const auto& entry : timers) {
+        if (ShouldDrawBuffOverlay(entry)) {
+            visible.push_back(entry);
+        }
+    }
+    return visible;
+}
+
+bool BuildOverlayLabels(int clientWidth, int& startX, std::vector<std::wstring>& labels) {
+    const auto visible = CollectVisibleBuffTimers();
+    labels.clear();
+    labels.reserve(visible.size());
+    for (const auto& entry : visible) {
+        labels.push_back(FormatBuffTime(entry.leftMs));
+    }
+    startX = (std::max)(0, clientWidth - static_cast<int>(visible.size()) * 32 - 3);
+    return !labels.empty();
+}
+
+void SyncOverlayPaint(int clientWidth, int clientHeight, bool forceFullBar) {
+    int startX = 0;
+    std::vector<std::wstring> labels;
+    if (!BuildOverlayLabels(clientWidth, startX, labels)) {
+        if (!g_paintState.labels.empty()) {
+            RECT bar = MakeTimerBarRect(g_paintState.startX, g_paintState.labels.size());
+            InvalidateRect(g_overlay, &bar, FALSE);
+        }
+        g_paintState = {};
+        return;
+    }
+
+    const bool layoutChanged = forceFullBar || clientWidth != g_paintState.width || clientHeight != g_paintState.height ||
+        startX != g_paintState.startX || labels.size() != g_paintState.labels.size();
+
+    if (layoutChanged) {
+        RECT dirty = MakeTimerBarRect(startX, labels.size());
+        if (!g_paintState.labels.empty()) {
+            RECT previous = MakeTimerBarRect(g_paintState.startX, g_paintState.labels.size());
+            UnionRect(&dirty, &dirty, &previous);
+        }
+        InvalidateRect(g_overlay, &dirty, FALSE);
+    } else if (g_timerFont) {
+        HDC dc = GetDC(g_overlay);
+        if (dc) {
+            SelectObject(dc, g_timerFont);
+            const size_t shared = (std::min)(labels.size(), g_paintState.labels.size());
+            for (size_t i = 0; i < shared; ++i) {
+                if (labels[i] != g_paintState.labels[i]) {
+                    RECT slot = MakeSlotRect(startX, i);
+                    InvalidateLabelDiff(g_overlay, dc, slot, g_paintState.labels[i], labels[i]);
+                }
+            }
+            ReleaseDC(g_overlay, dc);
+        }
+    }
+
+    g_paintState.width = clientWidth;
+    g_paintState.height = clientHeight;
+    g_paintState.startX = startX;
+    g_paintState.labels = std::move(labels);
+}
+
+void DrawBuffDurationOnCanvas(IWzCanvasPtr pCanvas, int nSeconds) {
+    if (!pCanvas || nSeconds <= 0 || nSeconds >= 999) {
+        return;
+    }
+    if (!g_pBuffNumberFont) {
+        g_pBuffNumberFont = get_rm()->GetObjectA(L"UI/Basic.img/LevelNo/number").GetUnknown();
+        if (g_pBuffNumberFont) {
+            Log("buff font loaded from UI/Basic.img/LevelNo/number");
+        }
+    }
+    if (!g_pBuffNumberFont) {
+        return;
+    }
+
+    int nValue = nSeconds;
+    int offsetX = nValue >= 100 ? 4 : nValue >= 10 ? 8 : 12;
+    int offsetY = 10;
+    if (nSeconds >= 60) {
+        nValue = nSeconds / 60;
+        offsetX = 2;
+        offsetY = 19;
+    }
+
+    auto drawNumber = reinterpret_cast<DrawNumberByImageFn>(kDrawNumberByImage);
+    drawNumber(pCanvas, offsetX, offsetY, nValue, g_pBuffNumberFont.GetInterfacePtr(), -1);
+}
+
+void RefreshAllBuffShadows(void* view) {
+    if (!view) {
+        return;
+    }
+
+    const int count = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(view) + 0xC);
+    void* pos = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(view) + kTempStatListHeadOff);
+    const int limit = (std::min)(count > 0 ? count : 64, 64);
+    for (int i = 0; pos && i < limit; ++i) {
+        auto* stat = *reinterpret_cast<TemporaryStat**>(reinterpret_cast<uint8_t*>(pos) + sizeof(void*));
+        if (stat && stat->nID != 5221006) {
+            RefreshBuffShadow(stat);
+        }
+        auto* link = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(pos) - 0x10 + sizeof(void*));
+        pos = link ? reinterpret_cast<uint8_t*>(link) + 0x10 : nullptr;
+    }
+}
+
+std::vector<BuffTimerEntry> CollectBuffTimers() {
+    std::vector<BuffTimerEntry> timers;
+    auto* view = GetTemporaryStatViewBase();
+    if (!view) {
+        return timers;
+    }
+
+    const int count = *reinterpret_cast<int*>(view + 0xC);
+    void* pos = *reinterpret_cast<void**>(view + kTempStatListHeadOff);
+    const int limit = (std::min)(count > 0 ? count : 64, 64);
+    for (int i = 0; pos && i < limit; ++i) {
+        auto* stat = *reinterpret_cast<TemporaryStat**>(reinterpret_cast<uint8_t*>(pos) + sizeof(void*));
+        if (stat && stat->tLeft > 0) {
+            BuffTimerEntry entry{};
+            entry.leftMs = stat->tLeft;
+            entry.id = stat->nID;
+            timers.push_back(entry);
+        }
+
+        auto* link = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(pos) - 0x10 + sizeof(void*));
+        pos = link ? reinterpret_cast<uint8_t*>(link) + 0x10 : nullptr;
+    }
+    return timers;
+}
+
+void LogActiveTimersIfNeeded(const char* reason) {
+    const DWORD now = GetTickCount();
+    const auto timers = CollectBuffTimers();
+    if (!timers.empty() && !g_loggedActiveTimers) {
+        g_loggedActiveTimers = true;
+        Log("%s timers=%zu firstId=%d firstLeft=%d", reason, timers.size(), timers[0].id, timers[0].leftMs);
+        return;
+    }
+    if (now - g_lastDiagLogTick < kDiagLogIntervalMs) {
+        return;
+    }
+    g_lastDiagLogTick = now;
+    void* ctx = *reinterpret_cast<void**>(kCWvsContextInst);
+    Log("%s ctx=%p view=%p listCount=%d timers=%zu overlay=%p", reason, ctx, GetTemporaryStatViewBase(),
+        GetTemporaryStatViewBase() ? *reinterpret_cast<int*>(GetTemporaryStatViewBase() + 0xC) : -1,
+        timers.size(), g_overlay);
+}
+
+std::wstring FormatBuffTime(int leftMs) {
+    const int seconds = (std::max)(1, (leftMs + 999) / 1000);
+    if (seconds >= 3600) {
+        return std::to_wstring((seconds + 3599) / 3600) + L"h";
+    }
+    if (seconds >= 60) {
+        wchar_t buffer[16]{};
+        swprintf_s(buffer, L"%d:%02d", seconds / 60, seconds % 60);
+        return buffer;
+    }
+    return std::to_wstring(seconds);
+}
+
+bool IsOverlayWindow(HWND hwnd) {
+    wchar_t className[128]{};
+    GetClassNameW(hwnd, className, 128);
+    return wcscmp(className, L"BeiDouBuffTimerOverlay") == 0;
+}
+
+HWND FindGameWindow() {
+    if (g_cachedGameWindow && IsWindow(g_cachedGameWindow)) {
+        return g_cachedGameWindow;
+    }
+
+    HWND hwnd = FindWindowW(L"MapleStoryClass", nullptr);
+    if (hwnd) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (pid == GetCurrentProcessId()) {
+            g_cachedGameWindow = hwnd;
+            return hwnd;
+        }
+    }
+
+    struct Search {
+        DWORD pid = GetCurrentProcessId();
+        HWND hwnd = nullptr;
+    } search;
+
+    EnumWindows(
+        [](HWND hWnd, LPARAM lParam) -> BOOL {
+            auto* search = reinterpret_cast<Search*>(lParam);
+            DWORD pid = 0;
+            GetWindowThreadProcessId(hWnd, &pid);
+            if (pid != search->pid || IsOverlayWindow(hWnd)) {
+                return TRUE;
+            }
+            if (!IsWindowVisible(hWnd)) {
+                return TRUE;
+            }
+
+            RECT rc{};
+            if (!GetWindowRect(hWnd, &rc) || rc.right - rc.left < 200 || rc.bottom - rc.top < 200) {
+                return TRUE;
+            }
+
+            search->hwnd = hWnd;
+            return FALSE;
+        },
+        reinterpret_cast<LPARAM>(&search));
+
+    g_cachedGameWindow = search.hwnd;
+    return search.hwnd;
+}
+
+void DrawOutlinedText(HDC dc, const RECT& rect, const std::wstring& text, COLORREF color) {
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(0, 0, 0));
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dy == 0) {
+                continue;
+            }
+            RECT shadow = rect;
+            OffsetRect(&shadow, dx, dy);
+            DrawTextW(dc, text.c_str(), -1, &shadow, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+        }
+    }
+
+    SetTextColor(dc, color);
+    RECT foreground = rect;
+    DrawTextW(dc, text.c_str(), -1, &foreground, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+}
+
+void DrawOutlinedChar(HDC dc, const RECT& rect, wchar_t ch, COLORREF color) {
+    wchar_t glyph[2] = {ch, 0};
+    DrawOutlinedText(dc, rect, glyph, color);
+}
+
+void PaintOverlay(HDC dc, const RECT& paintRect) {
+    FillColorKey(dc, paintRect);
+
+    if (g_paintState.labels.empty() || !g_timerFont) {
+        return;
+    }
+
+    SelectObject(dc, g_timerFont);
+    for (size_t i = 0; i < g_paintState.labels.size(); ++i) {
+        const RECT slotRect = MakeSlotRect(g_paintState.startX, i);
+        if (!RectsIntersect(slotRect, paintRect)) {
+            continue;
+        }
+
+        const std::wstring& text = g_paintState.labels[i];
+        std::vector<RECT> charRects;
+        BuildCharRects(dc, text, slotRect, charRects);
+        for (size_t c = 0; c < text.size() && c < charRects.size(); ++c) {
+            if (!RectsIntersect(charRects[c], paintRect)) {
+                continue;
+            }
+            RECT eraseRect = charRects[c];
+            InflateRect(&eraseRect, 2, 2);
+            FillColorKey(dc, eraseRect);
+            DrawOutlinedChar(dc, charRects[c], text[c], kBuffTimerTextColor);
+        }
+    }
+}
+
+void AttachOverlayToGame(HWND game) {
+    if (!g_overlay || !game) {
+        return;
+    }
+    if (g_overlayParent == game) {
+        return;
+    }
+
+    LONG_PTR style = GetWindowLongPtr(g_overlay, GWL_STYLE);
+    style &= ~(WS_POPUP | WS_CAPTION | WS_BORDER);
+    style |= WS_CHILD;
+    SetWindowLongPtr(g_overlay, GWL_STYLE, style);
+    SetWindowLongPtr(
+        g_overlay,
+        GWL_EXSTYLE,
+        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE);
+    SetParent(g_overlay, game);
+    g_overlayParent = game;
+    g_cachedGameWindow = game;
+}
+
+void UpdateOverlayWindow() {
+    if (!g_overlay) {
+        return;
+    }
+
+    const auto timers = CollectBuffTimers();
+    bool hasTimer = false;
+    for (const auto& entry : timers) {
+        if (ShouldDrawBuffOverlay(entry)) {
+            hasTimer = true;
+            break;
+        }
+    }
+
+    HWND game = FindGameWindow();
+    if (!game || !hasTimer) {
+        if (hasTimer && !g_loggedOverlayShow) {
+            Log("overlay hidden: game=%p hasTimer=%d", game, hasTimer ? 1 : 0);
+        }
+        g_paintState = {};
+        ShowWindow(g_overlay, SW_HIDE);
+        return;
+    }
+
+    AttachOverlayToGame(game);
+
+    RECT client{};
+    if (!GetClientRect(game, &client)) {
+        g_paintState = {};
+        ShowWindow(g_overlay, SW_HIDE);
+        return;
+    }
+
+    const int width = client.right - client.left;
+    const int height = client.bottom - client.top;
+    const bool sizeChanged = width != g_paintState.width || height != g_paintState.height;
+    if (sizeChanged) {
+        SetWindowPos(
+            g_overlay,
+            HWND_TOP,
+            0,
+            0,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    } else {
+        ShowWindow(g_overlay, SW_SHOWNA);
+    }
+
+    SyncOverlayPaint(width, height, sizeChanged);
+
+    if (!g_loggedOverlayShow) {
+        g_loggedOverlayShow = true;
+        Log("overlay show game=%p size=%dx%d timers=%zu", game, client.right, client.bottom, timers.size());
+    }
+}
+
+LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_CREATE:
+        g_timerFont = CreateFontW(
+            -10, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, NONANTIALIASED_QUALITY,
+            DEFAULT_PITCH, L"Tahoma");
+        SetLayeredWindowAttributes(hwnd, kOverlayColorKey, 0, LWA_COLORKEY);
+        SetTimer(hwnd, 1, kOverlayTimerMs, nullptr);
+        g_overlayReady = true;
+        return 0;
+    case WM_TIMER:
+        if (!g_hooksAttached) {
+            AttachHooksOnce();
+        }
+        LogActiveTimersIfNeeded("overlay-tick");
+        UpdateOverlayWindow();
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(hwnd, &ps);
+        PaintOverlay(dc, ps.rcPaint);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_DESTROY:
+        KillTimer(hwnd, 1);
+        if (g_timerFont) {
+            DeleteObject(g_timerFont);
+            g_timerFont = nullptr;
+        }
+        g_overlayReady = false;
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+DWORD WINAPI OverlayThreadProc(LPVOID) {
+    const HINSTANCE module = GetModuleHandleW(nullptr);
+
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = OverlayWndProc;
+    wc.hInstance = module;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.lpszClassName = L"BeiDouBuffTimerOverlay";
+    RegisterClassExW(&wc);
+
+    g_overlay = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+        wc.lpszClassName,
+        L"",
+        WS_POPUP,
+        0,
+        0,
+        1,
+        1,
+        nullptr,
+        nullptr,
+        module,
+        nullptr);
+    if (g_overlay) {
+        ShowWindow(g_overlay, SW_HIDE);
+        Log("overlay created hwnd=%p", g_overlay);
+    } else {
+        Log("overlay create failed err=%lu", GetLastError());
+    }
+
+    MSG msg{};
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    return 0;
+}
+
+void StartOverlayThread() {
+    HANDLE thread = CreateThread(nullptr, 0, OverlayThreadProc, nullptr, 0, nullptr);
+    if (thread) {
+        CloseHandle(thread);
+    }
+}
+
+void RefreshBuffShadow(TemporaryStat* pThis) {
+    if (!pThis || pThis->bNoShadow || !pThis->pLayerShadow) {
+        if (g_shadowRefreshLogCount < 3) {
+            Log("shadow skip id=%d bNoShadow=%d pLayerShadow=%p", pThis ? pThis->nID : -1,
+                pThis ? pThis->bNoShadow : -1, pThis ? pThis->pLayerShadow.GetInterfacePtr() : nullptr);
+            ++g_shadowRefreshLogCount;
+        }
+        return;
+    }
+
+    const int nSeconds = pThis->tLeft / 1000;
+    if (nSeconds == pThis->nIndexShadow) {
+        return;
+    }
+    pThis->nIndexShadow = nSeconds;
+
+    int nShadowIndex = 0;
+    if (pThis->tLeftUnit) {
+        nShadowIndex = pThis->tLeft / pThis->tLeftUnit;
+        nShadowIndex = zclamp(nShadowIndex, 0, 15);
+    }
+
+    auto* statusBar = CUIStatusBar::GetInstance();
+    if (!statusBar) {
+        return;
+    }
+
+    pThis->pLayerShadow->RemoveCanvas(-2);
+    IWzCanvasPtr pCanvas;
+    PcCreateObject<IWzCanvasPtr>(L"Canvas", pCanvas, nullptr);
+    pCanvas->Create(32, 32);
+    pCanvas->Copy(0, 0, statusBar->m_aCanvasSkillCooltime[nShadowIndex]);
+    if (pThis->nID != 5221006) {
+        DrawBuffDurationOnCanvas(pCanvas, nSeconds);
+    }
+    pThis->pLayerShadow->InsertCanvas(pCanvas, 500, 210, 64);
+
+    if (g_shadowRefreshLogCount < 5) {
+        Log("shadow drawn id=%d sec=%d idx=%d tLeft=%d", pThis->nID, nSeconds, nShadowIndex, pThis->tLeft);
+        ++g_shadowRefreshLogCount;
+    }
+}
+
+void __fastcall TEMPORARY_STAT__UpdateShadowIndex_hook(TemporaryStat* pThis, void* /*edx*/) {
+    RefreshBuffShadow(pThis);
+}
+
+static auto CTemporaryStatView__Update =
+    reinterpret_cast<void*(__thiscall*)(void*)>(0x007B2829);
+
+void* __fastcall CTemporaryStatView__Update_hook(void* pThis, void* /*edx*/) {
+    void* result = CTemporaryStatView__Update(pThis);
+    RefreshAllBuffShadows(pThis);
+    LogActiveTimersIfNeeded("view-update");
+    return result;
+}
+
+void* GetStatusBarNumberFont(CUIStatusBar* /*statusBar*/) {
+    if (g_pSkillNumberFont) {
+        return g_pSkillNumberFont.GetInterfacePtr();
+    }
+
+    g_pSkillNumberFont = get_rm()->GetObjectA(L"UI/Basic.img/LevelNo/number").GetUnknown();
+    if (g_pSkillNumberFont) {
+        Log("skill font loaded from UI/Basic.img/LevelNo/number");
+    }
+    return g_pSkillNumberFont ? g_pSkillNumberFont.GetInterfacePtr() : nullptr;
+}
+
+static void DrawSkillCooldownNumberSafe(DrawNumberByImageFn drawNumber, IWzCanvas* canvas, int left, int top, int seconds, void* font) {
+    __try {
+        drawNumber(canvas, left, top, seconds, font, -1);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+void DrawSkillCooldownNumber(IWzCanvas* canvas, int x, int y, int seconds, CUIStatusBar* statusBar) {
+    if (!canvas || seconds <= 0 || seconds > 999) {
+        return;
+    }
+
+    void* font = GetStatusBarNumberFont(statusBar);
+    if (!font) {
+        return;
+    }
+
+    const int left = x + (seconds >= 100 ? 4 : seconds >= 10 ? 8 : 12);
+    const int top = y + 11;
+    auto drawNumber = reinterpret_cast<DrawNumberByImageFn>(kDrawNumberByImage);
+    DrawSkillCooldownNumberSafe(drawNumber, canvas, left, top, seconds, font);
+}
+
+struct CUIStatusBar__DrawSkillCooltime_stack {
+    MEMBER_AT(int, 0x64, nCanvasX)
+    MEMBER_AT(int, 0x68, nCanvasY)
+    MEMBER_AT(int*, 0x74, pnLastIndex)
+    MEMBER_AT(IWzCanvas*, 0x7C, pCanvas)
+    MEMBER_AT(CUIStatusBar*, 0xF8, pStatusBar)
+};
+
+void __stdcall CUIStatusBar__DrawSkillCooltime_helper(
+    CUIStatusBar__DrawSkillCooltime_stack* stack, int nSeconds, int nIndex) {
+    if (!stack || !stack->pCanvas || nIndex < 0 || !stack->pnLastIndex || *stack->pnLastIndex == nSeconds) {
+        return;
+    }
+
+    if (!g_loggedSkillCooldown && nSeconds > 0) {
+        g_loggedSkillCooldown = true;
+        Log("skill cooltime draw sec=%d idx=%d canvas=%p", nSeconds, nIndex, stack->pCanvas);
+    }
+
+    *stack->pnLastIndex = nSeconds;
+    stack->pCanvas->Copy(
+        stack->nCanvasX,
+        stack->nCanvasY,
+        CUIStatusBar::GetInstance()->m_aCanvasSkillCooltime[nIndex]);
+    DrawSkillCooldownNumber(
+        stack->pCanvas,
+        stack->nCanvasX,
+        stack->nCanvasY,
+        nSeconds,
+        stack->pStatusBar ? stack->pStatusBar : CUIStatusBar::GetInstance());
+}
+
+static const uintptr_t kDrawSkillCooltimeReturn = kDrawSkillCooltimeRet;
+
+void __declspec(naked) CUIStatusBar__DrawSkillCooltime_hook() {
+    __asm {
+        push    esi
+        push    ebx
+        lea     eax, [ebp - 0x8C]
+        push    eax
+        call    CUIStatusBar__DrawSkillCooltime_helper
+        jmp     dword ptr [kDrawSkillCooltimeReturn]
+    }
+}
+
+bool IsEnabledByConfig() {
+    INIReader reader("config.ini");
+    if (reader.ParseError() != 0) {
+        return true;
+    }
+    return reader.GetBoolean("optional", "enableBuffTimer", true);
+}
+
+void AttachHooksOnce() {
+    if (g_hooksAttached) {
+        return;
+    }
+    if (!IsEnabledByConfig()) {
+        Log("disabled by config optional.enableBuffTimer=false");
+        return;
+    }
+
+    g_module = GetModuleHandleW(L"ijl15.dll");
+    if (!g_module) {
+        g_module = GetModuleHandleW(nullptr);
+    }
+
+    const bool shadowHook = Memory::SetHook(
+        true,
+        reinterpret_cast<void**>(&TEMPORARY_STAT__UpdateShadowIndex),
+        CastHook(&TEMPORARY_STAT__UpdateShadowIndex_hook));
+    const bool updateHook = Memory::SetHook(
+        true,
+        reinterpret_cast<void**>(&CTemporaryStatView__Update),
+        CastHook(&CTemporaryStatView__Update_hook));
+
+    PatchJmp(kDrawSkillCooltimeHook, CUIStatusBar__DrawSkillCooltime_hook);
+
+    StartOverlayThread();
+    g_hooksAttached = shadowHook;
+
+    Log("hooks attached shadow=%d update=%d module=%p overlayThread=1", shadowHook ? 1 : 0, updateHook ? 1 : 0, g_module);
+}
+
+DWORD WINAPI InitThreadProc(LPVOID) {
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        Sleep(kStartupDelayMs);
+        if (!g_hooksAttached) {
+            AttachHooksOnce();
+        }
+        LogActiveTimersIfNeeded("init");
+        const auto timers = CollectBuffTimers();
+        Log("init attempt=%d timers=%zu hooks=%d overlay=%p", attempt + 1, timers.size(), g_hooksAttached ? 1 : 0, g_overlay);
+    }
+    return 0;
+}
+
+struct BuffTimerAutoInit {
+    BuffTimerAutoInit() {
+        Log("BuffTimer auto init thread scheduled");
+        HANDLE thread = CreateThread(nullptr, 0, InitThreadProc, nullptr, 0, nullptr);
+        if (thread) {
+            CloseHandle(thread);
+        }
+    }
+};
+
+BuffTimerAutoInit g_buffTimerAutoInit;
+
+} // namespace
+
+namespace BuffTimer {
+
+void EnsureHooks() {
+    AttachHooksOnce();
+}
+
+} // namespace BuffTimer
