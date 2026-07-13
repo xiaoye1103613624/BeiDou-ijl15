@@ -6,6 +6,7 @@ void AttachFusionAnvilMod();
 void AttachFusionAnvilPacketHooks();
 void AttachFusionAnvilUiHooks();
 void AttachFusionAnvilTooltipHooks();
+void FusionAnvil_BindDrawToolTipEquipTarget(void** outPtr);
 void AttachFusionAnvilItemIconHooks();
 
 namespace FusionAnvil {

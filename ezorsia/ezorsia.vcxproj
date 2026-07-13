@@ -254,6 +254,10 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)ijl15.minimal.dll</Comma
     <ClInclude Include="damagerank\DamageRankInput.h" />
     <ClInclude Include="damageskin\DamageSkinApi.h" />
     <ClInclude Include="damageskin\DamageSkinData.h" />
+    <ClInclude Include="setitem\SetItemApi.h" />
+    <ClInclude Include="setitem\SetItemData.h" />
+    <ClInclude Include="dropitemaura\DropItemAuraApi.h" />
+    <ClInclude Include="userinfodetail\UserInfoDetailApi.h" />
     <ClInclude Include="damageskin\debug.h" />
     <ClInclude Include="beautyshop\BeautyShopApi.h" />
     <ClInclude Include="dailycheckin\DailyCheckinApi.h" />
@@ -345,6 +349,24 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)ijl15.minimal.dll</Comma
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="damageskin\damageskinpicker.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="setitem\SetItemBridge.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="setitem\setitem.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="setitem\equiptooltip_style.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="dropitemaura\dropitemaura.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="userinfodetail\UserInfoDetailBridge.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="userinfodetail\userinfodetail.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="beautyshop\BeautyShopBridge.cpp">

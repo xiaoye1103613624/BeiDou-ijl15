@@ -15,6 +15,9 @@ public:
 
 class CField : public CMapLoadable {
 public:
+    MEMBER_AT(IWzGr2DLayerPtr, 0x15C, m_pLayerObject)
+    MEMBER_AT(IWzGr2DLayerPtr, 0x174, m_pLayerBack)
+    MEMBER_AT(IWzGr2DLayerPtr, 0x180, m_pLayerFront)
     MEMBER_AT(ZRef<CWnd>, 0x1C8, m_pClock) // ZRef<CClock>
 
     inline static auto OnKey =

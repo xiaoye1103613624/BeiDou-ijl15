@@ -50,7 +50,7 @@ inline void PatchJmp(uintptr_t pAddress, U pDestination) {
 
 template <typename T, typename U>
 inline void PatchJmp(T pAddress, U pDestination) {
-    PatchJmp(reinterpret_cast<uintptr_t>(pAddress), pDestination);
+    PatchJmp(static_cast<uintptr_t>(pAddress), pDestination);
 }
 
 template <typename U>
@@ -65,7 +65,17 @@ inline void PatchCall(uintptr_t pAddress, U pDestination, size_t uSize = 5) {
 
 template <typename T, typename U>
 inline void PatchCall(T pAddress, U pDestination, size_t uSize = 5) {
-    PatchCall(reinterpret_cast<uintptr_t>(pAddress), pDestination, uSize);
+    PatchCall(static_cast<uintptr_t>(pAddress), pDestination, uSize);
+}
+
+template <typename T>
+inline void Patch1(T pAddress, unsigned char uValue) {
+    Memory::WriteByte(static_cast<uintptr_t>(pAddress), uValue);
+}
+
+template <typename T>
+inline void Patch4(T pAddress, unsigned int uValue) {
+    Memory::WriteInt(static_cast<uintptr_t>(pAddress), uValue);
 }
 
 #define MEMBER_HOOK(T, ADDRESS, NAME, ...) \

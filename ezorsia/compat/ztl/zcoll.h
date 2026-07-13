@@ -217,11 +217,11 @@ private:
     }
     static T* _GetNext(void* p) {
         auto pDummy = ZRefCountedDummy<T>::From(reinterpret_cast<T*>(p));
-        auto pNext = ZRefCountedAccessor::_GetNext(pDummy);
+        auto pNext = ZRefCountedAccessorBase::_GetNext(pDummy);
         return pNext ? zaddressof(static_cast<ZRefCountedDummy<T>*>(pNext)->t) : nullptr;
     }
     static T* _GetNext(ZRefCounted* p) {
-        return ZRefCountedAccessor::_GetNext(p);
+        return ZRefCountedAccessorBase::_GetNext(p);
     }
     static void _SetNext(void* p, void* pNext) {
         ZRefCountedDummy<T>::From(reinterpret_cast<T*>(p))->_m_pNext = ZRefCountedDummy<T>::From(reinterpret_cast<T*>(pNext));
@@ -231,11 +231,11 @@ private:
     }
     static T* _GetPrev(void* p) {
         auto pDummy = ZRefCountedDummy<T>::From(reinterpret_cast<T*>(p));
-        auto pPrev = ZRefCountedAccessor::_GetPrev(pDummy);
+        auto pPrev = ZRefCountedAccessorBase::_GetPrev(pDummy);
         return pPrev ? zaddressof(static_cast<ZRefCountedDummy<T>*>(pPrev)->t) : nullptr;
     }
     static T* _GetPrev(ZRefCounted* p) {
-        return ZRefCountedAccessor::_GetPrev(p);
+        return ZRefCountedAccessorBase::_GetPrev(p);
     }
     static void _SetPrev(void* p, void* pPrev) {
         ZRefCountedDummy<T>::From(reinterpret_cast<T*>(p))->_m_pPrev = ZRefCountedDummy<T>::From(reinterpret_cast<T*>(pPrev));

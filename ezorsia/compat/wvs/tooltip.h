@@ -14,6 +14,8 @@ public:
     MEMBER_AT(int, 0xC, m_nWidth)
     MEMBER_AT(IWzGr2DLayerPtr, 0x10, m_pLayer)
 
+    MEMBER_HOOK(IWzCanvasPtr*, 0x008F3141, MakeLayer, IWzCanvasPtr* result, int nLeft, int nTop, int bDoubleOutline, int bLogin, int bCharToolTip, unsigned int uColor)
+
     virtual ~CUIToolTip() {
         reinterpret_cast<void(__thiscall*)(CUIToolTip*)>(0x008E6BA3)(this);
     }

@@ -683,6 +683,8 @@ void AttachFusionAnvilPacketHooks() {
     Memory::WriteInt(kPatch_GetItemSlotSizeImm, kNewItemSlotEquipSize);
     Memory::WriteInt(kPatch_SubtypeAllocSizeImm, kNewItemSlotEquipSize);
     ATTACH_HOOK(GW_ItemSlotBase__Decode, GW_ItemSlotBase__Decode_hook);
+    // Must run before getCharInfo / first AvatarLook::Load on login.
+    ATTACH_HOOK(AvatarLook__Load, AvatarLook__Load_hook);
 }
 
 void AttachFusionAnvilUiHooks() {
@@ -691,7 +693,6 @@ void AttachFusionAnvilUiHooks() {
     }
     g_uiHooksAttached = true;
 
-    ATTACH_HOOK(AvatarLook__Load, AvatarLook__Load_hook);
     ATTACH_HOOK(CWvsContext__SendConsumeCashItemUseRequest,
                 CWvsContext__SendConsumeCashItemUseRequest_hook);
     ATTACH_HOOK(CDraggableItem__OnDropped, CDraggableItem__OnDropped_hook);

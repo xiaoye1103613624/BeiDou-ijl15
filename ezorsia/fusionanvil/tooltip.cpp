@@ -163,6 +163,7 @@ static auto get_basic_font =
 void __fastcall CUIToolTip__DrawToolTip_Equip_hook(
     CUIToolTip* pThis, void* /*edx*/, int a2, GW_ItemSlotEquip* pe)
 {
+    // Dot-removal patches attach once in SetItem UI init; no per-draw Begin/End.
     CUIToolTip__DrawToolTip_Equip(pThis, a2, pe);
     const int nAnvilItemID = SafeGetAnvilItemId(pe);
     if (!pe || !nAnvilItemID || !pThis || !pThis->m_pLayer) {
@@ -198,6 +199,13 @@ void __fastcall CUIToolTip__DrawToolTip_Equip_hook(
 namespace {
 bool g_tooltipHooksAttached = false;
 } // namespace
+
+void FusionAnvil_BindDrawToolTipEquipTarget(void** outPtr) {
+    if (!outPtr) {
+        return;
+    }
+    *outPtr = reinterpret_cast<void*>(CUIToolTip__DrawToolTip_Equip);
+}
 
 void AttachFusionAnvilTooltipHooks() {
     if (g_tooltipHooksAttached) {
