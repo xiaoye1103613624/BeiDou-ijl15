@@ -19,6 +19,22 @@
 // config.ini can use IP or hostname (ServerIP_Address=...).
 // The patch expects an IPv4 dotted string; resolve hostnames to IPv4.
 // On failure, fall back to the original value.
+static std::string GetConfigIniPath(HMODULE module)
+{
+	char dllPath[MAX_PATH]{};
+	if (GetModuleFileNameA(module, dllPath, MAX_PATH) == 0) {
+		return "config.ini";
+	}
+
+	std::string path(dllPath);
+	const auto slash = path.find_last_of("\\/");
+	if (slash == std::string::npos) {
+		return "config.ini";
+	}
+
+	return path.substr(0, slash + 1) + "config.ini";
+}
+
 static std::string ResolveToIpv4String(const std::string& hostOrIp)
 {
 	if (hostOrIp.empty()) return hostOrIp;
@@ -71,7 +87,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 	case DLL_PROCESS_ATTACH:
 	{
 		//CreateConsole();	//console for devs, use this to log stuff if you want
-		INIReader reader("config.ini");
+		const std::string configPath = GetConfigIniPath(hModule);
+		INIReader reader(configPath);
 		if (reader.ParseError() == 0) {
 			Client::m_nGameWidth = reader.GetInteger("general", "width", 1280);
 			Client::m_nGameHeight = reader.GetInteger("general", "height", 720);
