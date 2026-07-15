@@ -273,15 +273,44 @@ void SyncOverlayPaint(int clientWidth, int clientHeight, bool forceFullBar) {
     g_paintState.labels = std::move(labels);
 }
 
+// v083 Basic.img has digits under LevelNo directly; some clients nest under LevelNo/number.
+// GetObjectA throws STG_E_FILENOTFOUND (0x80030002) on missing paths — must catch.
+IWzPropertyPtr LoadLevelNoNumberFont(const char* logTag) {
+    static const wchar_t* kPaths[] = {
+        L"UI/Basic.img/LevelNo",
+        L"UI/Basic.img/LevelNo/number",
+    };
+    for (const wchar_t* path : kPaths) {
+        try {
+            IWzPropertyPtr font = get_rm()->GetObjectA(const_cast<wchar_t*>(path)).GetUnknown();
+            if (font) {
+                Log("%s font loaded from %ls", logTag, path);
+                return font;
+            }
+        } catch (...) {
+        }
+    }
+    Log("%s font MISSING (tried LevelNo and LevelNo/number)", logTag);
+    return nullptr;
+}
+
+static void DrawBuffNumberSafe(IWzCanvas* canvas, int left, int top, int value, void* font) {
+    if (!canvas || !font || value <= 0) {
+        return;
+    }
+    auto drawNumber = reinterpret_cast<DrawNumberByImageFn>(kDrawNumberByImage);
+    __try {
+        drawNumber(canvas, left, top, value, font, -1);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 void DrawBuffDurationOnCanvas(IWzCanvasPtr pCanvas, int nSeconds) {
     if (!pCanvas || nSeconds <= 0 || nSeconds >= 999) {
         return;
     }
     if (!g_pBuffNumberFont) {
-        g_pBuffNumberFont = get_rm()->GetObjectA(L"UI/Basic.img/LevelNo/number").GetUnknown();
-        if (g_pBuffNumberFont) {
-            Log("buff font loaded from UI/Basic.img/LevelNo/number");
-        }
+        g_pBuffNumberFont = LoadLevelNoNumberFont("buff");
     }
     if (!g_pBuffNumberFont) {
         return;
@@ -296,8 +325,12 @@ void DrawBuffDurationOnCanvas(IWzCanvasPtr pCanvas, int nSeconds) {
         offsetY = 19;
     }
 
-    auto drawNumber = reinterpret_cast<DrawNumberByImageFn>(kDrawNumberByImage);
-    drawNumber(pCanvas, offsetX, offsetY, nValue, g_pBuffNumberFont.GetInterfacePtr(), -1);
+    DrawBuffNumberSafe(
+        pCanvas.GetInterfacePtr(),
+        offsetX,
+        offsetY,
+        nValue,
+        g_pBuffNumberFont.GetInterfacePtr());
 }
 
 void RefreshAllBuffShadows(void* view) {
@@ -644,7 +677,7 @@ void StartOverlayThread() {
     }
 }
 
-void RefreshBuffShadow(TemporaryStat* pThis) {
+static void RefreshBuffShadowBody(TemporaryStat* pThis) {
     if (!pThis || pThis->bNoShadow || !pThis->pLayerShadow) {
         if (g_shadowRefreshLogCount < 3) {
             Log("shadow skip id=%d bNoShadow=%d pLayerShadow=%p", pThis ? pThis->nID : -1,
@@ -674,16 +707,30 @@ void RefreshBuffShadow(TemporaryStat* pThis) {
     pThis->pLayerShadow->RemoveCanvas(-2);
     IWzCanvasPtr pCanvas;
     PcCreateObject<IWzCanvasPtr>(L"Canvas", pCanvas, nullptr);
-    pCanvas->Create(32, 32);
-    pCanvas->Copy(0, 0, statusBar->m_aCanvasSkillCooltime[nShadowIndex]);
-    if (pThis->nID != 5221006) {
-        DrawBuffDurationOnCanvas(pCanvas, nSeconds);
+    if (!pCanvas) {
+        return;
     }
+    pCanvas->Create(32, 32);
+    IWzCanvas* cooltime = statusBar->m_aCanvasSkillCooltime[nShadowIndex];
+    if (cooltime) {
+        pCanvas->Copy(0, 0, cooltime);
+    }
+    // Number glyphs on the cooltime pie are crashy on this client; overlay shows time.
+    // Keep pie shadow only — GDI overlay handles the countdown text.
+    (void)nSeconds;
     pThis->pLayerShadow->InsertCanvas(pCanvas, 500, 210, 64);
 
     if (g_shadowRefreshLogCount < 5) {
         Log("shadow drawn id=%d sec=%d idx=%d tLeft=%d", pThis->nID, nSeconds, nShadowIndex, pThis->tLeft);
         ++g_shadowRefreshLogCount;
+    }
+}
+
+void RefreshBuffShadow(TemporaryStat* pThis) {
+    __try {
+        RefreshBuffShadowBody(pThis);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("RefreshBuffShadow SEH id=%d", pThis ? pThis->nID : -1);
     }
 }
 
@@ -706,10 +753,7 @@ void* GetStatusBarNumberFont(CUIStatusBar* /*statusBar*/) {
         return g_pSkillNumberFont.GetInterfacePtr();
     }
 
-    g_pSkillNumberFont = get_rm()->GetObjectA(L"UI/Basic.img/LevelNo/number").GetUnknown();
-    if (g_pSkillNumberFont) {
-        Log("skill font loaded from UI/Basic.img/LevelNo/number");
-    }
+    g_pSkillNumberFont = LoadLevelNoNumberFont("skill");
     return g_pSkillNumberFont ? g_pSkillNumberFont.GetInterfacePtr() : nullptr;
 }
 
@@ -782,7 +826,23 @@ void __declspec(naked) CUIStatusBar__DrawSkillCooltime_hook() {
 }
 
 bool IsEnabledByConfig() {
-    INIReader reader("config.ini");
+    // Must resolve beside ijl15.dll — cwd may not be the client folder (shortcut).
+    char dllPath[MAX_PATH]{};
+    std::string configPath = "config.ini";
+    HMODULE self = nullptr;
+    if (GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(&IsEnabledByConfig),
+            &self) &&
+        self &&
+        GetModuleFileNameA(self, dllPath, MAX_PATH) != 0) {
+        std::string path(dllPath);
+        const auto slash = path.find_last_of("\\/");
+        if (slash != std::string::npos) {
+            configPath = path.substr(0, slash + 1) + "config.ini";
+        }
+    }
+    INIReader reader(configPath);
     if (reader.ParseError() != 0) {
         return true;
     }
@@ -795,6 +855,7 @@ void AttachHooksOnce() {
     }
     if (!IsEnabledByConfig()) {
         Log("disabled by config optional.enableBuffTimer=false");
+        g_hooksAttached = true; // stop retry loop
         return;
     }
 
