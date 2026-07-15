@@ -124,7 +124,7 @@
       <PreprocessorDefinitions>WIN32;_DEBUG;EZORSIA_EXPORTS;_WINDOWS;_USRDLL;_CRT_NON_CONFORMING_SWPRINTFS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)storagebag;$(ProjectDir)fusionanvil;$(ProjectDir)higherstoragelist;$(ProjectDir)bufftimer;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)storagebag;$(ProjectDir)slotlock;$(ProjectDir)fusionanvil;$(ProjectDir)higherstoragelist;$(ProjectDir)highershoplist;$(ProjectDir)bufftimer;$(ProjectDir)charslots;$(ProjectDir)equipcompare;$(ProjectDir)maxhpmp;$(ProjectDir)level300;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <UndefinePreprocessorDefinitions>%(UndefinePreprocessorDefinitions)</UndefinePreprocessorDefinitions>
       <AdditionalOptions>-D _CRT_SECURE_NO_WARNINGS %(AdditionalOptions)</AdditionalOptions>
@@ -169,7 +169,7 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)storagebag;$(ProjectDir)fusionanvil;$(ProjectDir)higherstoragelist;$(ProjectDir)bufftimer;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)storagebag;$(ProjectDir)slotlock;$(ProjectDir)fusionanvil;$(ProjectDir)higherstoragelist;$(ProjectDir)highershoplist;$(ProjectDir)bufftimer;$(ProjectDir)charslots;$(ProjectDir)equipcompare;$(ProjectDir)maxhpmp;$(ProjectDir)level300;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -199,7 +199,7 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)storagebag;$(ProjectDir)fusionanvil;$(ProjectDir)higherstoragelist;$(ProjectDir)bufftimer;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)storagebag;$(ProjectDir)slotlock;$(ProjectDir)fusionanvil;$(ProjectDir)higherstoragelist;$(ProjectDir)highershoplist;$(ProjectDir)bufftimer;$(ProjectDir)charslots;$(ProjectDir)equipcompare;$(ProjectDir)maxhpmp;$(ProjectDir)level300;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -262,8 +262,15 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)ijl15.minimal.dll</Comma
     <ClInclude Include="beautyshop\BeautyShopApi.h" />
     <ClInclude Include="dailycheckin\DailyCheckinApi.h" />
     <ClInclude Include="storagebag\StorageBagApi.h" />
+    <ClInclude Include="slotlock\SlotLockApi.h" />
     <ClInclude Include="higherstoragelist\HigherStorageListApi.h" />
+    <ClInclude Include="highershoplist\HigherShopListApi.h" />
+    <ClInclude Include="maxhpmp\MaxHpMpApi.h" />
+    <ClInclude Include="level300\Level300Api.h" />
     <ClInclude Include="bufftimer\BuffTimerApi.h" />
+    <ClInclude Include="partybuffs\PartyBuffsApi.h" />
+    <ClInclude Include="charslots\CharSlotsApi.h" />
+    <ClInclude Include="equipcompare\EquipCompareApi.h" />
     <ClInclude Include="fusionanvil\FusionAnvilApi.h" />
     <ClInclude Include="compat\wvs\field.h" />
     <ClInclude Include="compat\wvs\wndman.h" />
@@ -381,6 +388,9 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)ijl15.minimal.dll</Comma
     <ClCompile Include="dailycheckin\dailycheckin.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="partybuffs\partyBuffs.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="storagebag\StorageBagBridge.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
@@ -389,8 +399,46 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)ijl15.minimal.dll</Comma
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="slotlock\slotlock.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="higherstoragelist\HigherStorageListBridge.cpp" />
     <ClCompile Include="higherstoragelist\higherstoragelist.cpp" />
+    <ClCompile Include="highershoplist\HigherShopListBridge.cpp" />
+    <ClCompile Include="highershoplist\highershoplist.cpp" />
+    <ClCompile Include="maxhpmp\maxhpmp.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="level300\level300.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="personalshop\personalshop.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="charslots\CharSlotsBridge.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="charslots\charslots.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="equipcompare\EquipCompareBridge.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="equipcompare\equipcompare.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="bufftimer\BuffTimerMod.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>

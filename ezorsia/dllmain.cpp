@@ -13,6 +13,11 @@
 #ifndef BEIDOU_MINIMAL_PLUGIN
 #include "compat/LazyCompatInit.h"
 #include "higherstoragelist/HigherStorageListApi.h"
+#include "highershoplist/HigherShopListApi.h"
+#include "maxhpmp/MaxHpMpApi.h"
+#include "level300/Level300Api.h"
+#include "personalshop/PersonalShopApi.h"
+#include "charslots/CharSlotsApi.h"
 #endif
 #pragma comment(lib, "ws2_32.lib")
 
@@ -160,8 +165,20 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		Client::MoreHook();
 		Client::DeleteChar();
 #ifndef BEIDOU_MINIMAL_PLUGIN
-		// Trunk merchant row patches are pure WriteByte — safe at DllMain (before any UI).
+		// Trunk / shop list row patches are pure WriteByte — safe at DllMain (before any UI).
 		HigherStorageList::ApplyPatches();
+		// HigherShopList 5→9: requires Shop/backgrnd ~463x499 (+160). PatchStorageBg extend-shop.
+		HigherShopList::ApplyPatches();
+		// HP/MP 4-byte expansion: Decode2->Decode4 + FakeTear + Fuse hooks + FixMovsx.
+		// Must run before first char-stat packet decode (login / map enter).
+		AttachMaxHpMpMod();
+		// Level ushort expansion: Decode1->Decode2 + LevelFakeTear + Fuse_byte + FixMovsx.
+        // EXP stays Decode4 until AttachLevel300Mod also installs Decode8 caves.
+        AttachLevel300Mod();
+		// Player/hired shop: server slotMax=32; UI canvas lengthening still WZ-side.
+		AttachPersonalShopMod();
+		// Select-char UI runs before first map; raise slot cap 15->30 at DllMain.
+		CharSlots::ApplyPatches();
 		// Defer ModRegistry / BossHP / WorldMap / DamageRank / DamageSkin / RefreshRate
 		// until first CField::CField — DllMain path matches ultra-minimal startup.
 		LazyCompatInit::InstallBootstrapHook();

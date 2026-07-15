@@ -35,9 +35,17 @@ static constexpr uintptr_t kAddr_get_bodypart_from_item       = 0x004606A0;
 static constexpr uintptr_t kPatch_GetItemSlotSizeImm          = 0x005D6053;
 static constexpr uintptr_t kPatch_SubtypeAllocSizeImm         = 0x004E3580;
 
-// Extend GW_ItemSlotEquip: nAnvilItemID at offset 0xF9, new size 0xFD.
-static constexpr uint32_t  kNewItemSlotEquipSize              = 0xFD;
+// Extend GW_ItemSlotEquip:
+//   nAnvilItemID   @ 0xF9 (int)
+//   nEquipSkillID  @ 0xFD (int)
+//   nEquipSkillLv  @ 0x101 (int)
+//   tEquipSkillExp @ 0x105 (FILETIME / uint64)
+// New size 0x10D.
+static constexpr uint32_t  kNewItemSlotEquipSize              = 0x10D;
 static constexpr size_t    kOffset_nAnvilItemID               = 0xF9;
+static constexpr size_t    kOffset_nEquipSkillID              = 0xFD;
+static constexpr size_t    kOffset_nEquipSkillLevel           = 0x101;
+static constexpr size_t    kOffset_tEquipSkillExpire          = 0x105;
 
 // Fusion Anvil cash item (Item.wz/Cash/0590.img/05900000.img)
 static constexpr int32_t   kFusionAnvilItemID                 = 5900000;
@@ -65,6 +73,9 @@ struct GW_ItemSlotBase : public ZRefCounted {
 
 struct GW_ItemSlotEquip {
     MEMBER_AT(int32_t, kOffset_nAnvilItemID, nAnvilItemID)
+    MEMBER_AT(int32_t, kOffset_nEquipSkillID, nEquipSkillID)
+    MEMBER_AT(int32_t, kOffset_nEquipSkillLevel, nEquipSkillLevel)
+    MEMBER_AT(uint64_t, kOffset_tEquipSkillExpire, tEquipSkillExpire)
 };
 
 struct AvatarLook {
@@ -514,11 +525,26 @@ int __cdecl GW_ItemSlotBase__Decode_hook(void* pOutZRef, CInPacket* pPacket) {
     __except (EXCEPTION_EXECUTE_HANDLER) { return ret; }
     if (nType != 1) return ret;
 
+    auto* pEquip = reinterpret_cast<GW_ItemSlotEquip*>(pItem);
     uint32_t nAnvilItemID = 0;
-    __try { nAnvilItemID = CInPacket__Decode4(pPacket); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return ret; }
-    __try { reinterpret_cast<GW_ItemSlotEquip*>(pItem)->nAnvilItemID = nAnvilItemID; }
-    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    uint32_t nSkillID = 0;
+    uint32_t nSkillLevel = 0;
+    uint32_t expireLo = 0;
+    uint32_t expireHi = 0;
+    __try {
+        nAnvilItemID = CInPacket__Decode4(pPacket);
+        nSkillID = CInPacket__Decode4(pPacket);
+        nSkillLevel = CInPacket__Decode4(pPacket);
+        expireLo = CInPacket__Decode4(pPacket);
+        expireHi = CInPacket__Decode4(pPacket);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return ret; }
+    __try {
+        pEquip->nAnvilItemID = static_cast<int32_t>(nAnvilItemID);
+        pEquip->nEquipSkillID = static_cast<int32_t>(nSkillID);
+        pEquip->nEquipSkillLevel = static_cast<int32_t>(nSkillLevel);
+        pEquip->tEquipSkillExpire =
+            (static_cast<uint64_t>(expireHi) << 32) | expireLo;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return ret;
 }
 

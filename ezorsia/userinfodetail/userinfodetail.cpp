@@ -28,6 +28,9 @@ struct RemoteEquipStats {
     int targetCharId = -1;
     int itemId = 0;
     int anvilItemId = 0;
+    int equipSkillId = 0;
+    int equipSkillLevel = 0;
+    unsigned long long equipSkillExpire = 0;
     short str = 0;
     short dex = 0;
     short intel = 0;
@@ -74,6 +77,9 @@ public:
     MEMBER_AT(ZtlSecure<short>, 0x9C, niSpeed)
     MEMBER_AT(ZtlSecure<short>, 0xA4, niJump)
     MEMBER_AT(int, 0xF9, nAnvilItemID)
+    MEMBER_AT(int, 0xFD, nEquipSkillID)
+    MEMBER_AT(int, 0x101, nEquipSkillLevel)
+    MEMBER_AT(unsigned long long, 0x105, tEquipSkillExpire)
 };
 
 static auto TSecTypeGetData =
@@ -155,6 +161,9 @@ void ApplyRemoteStats(GW_ItemSlotEquip* equip, int itemId) {
     if (g_remoteStats.anvilItemId != 0) {
         equip->nAnvilItemID = g_remoteStats.anvilItemId;
     }
+    equip->nEquipSkillID = g_remoteStats.equipSkillId;
+    equip->nEquipSkillLevel = g_remoteStats.equipSkillLevel;
+    equip->tEquipSkillExpire = g_remoteStats.equipSkillExpire;
 }
 
 bool TryShowEquipTooltip(void* self, int x, int y) {
@@ -290,6 +299,12 @@ void HandleServerPacket(CompatInPacket* packet) {
     stats.targetCharId = packet->Decode<int>();
     stats.itemId = packet->Decode<int>();
     stats.anvilItemId = packet->Decode<int>();
+    stats.equipSkillId = packet->Decode<int>();
+    stats.equipSkillLevel = packet->Decode<int>();
+    const unsigned int expireLo = packet->Decode<unsigned int>();
+    const unsigned int expireHi = packet->Decode<unsigned int>();
+    stats.equipSkillExpire =
+        (static_cast<unsigned long long>(expireHi) << 32) | expireLo;
     stats.str = static_cast<short>(packet->Decode<unsigned short>());
     stats.dex = static_cast<short>(packet->Decode<unsigned short>());
     stats.intel = static_cast<short>(packet->Decode<unsigned short>());
