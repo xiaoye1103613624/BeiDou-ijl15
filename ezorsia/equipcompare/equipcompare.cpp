@@ -40,7 +40,8 @@ constexpr size_t kToolTipBufSize = 0x520;
 constexpr int kEquipInventoryType = 1;
 constexpr int kCompareTooltipGap = 8;
 constexpr int kShoulderItemCategory = 115;
-constexpr int kShoulderBodyPart = 49;
+// BP20 / inventory -20 (Sh). Was wrongly 49 (medal) — conflicts with 114.
+constexpr int kShoulderBodyPart = 20;
 
 // 外观 : / (无) / ->  / (装备独有)  in GBK
 static const char kLabelAppearance[] = "\xCD\xE2\xB9\xD3 :";
