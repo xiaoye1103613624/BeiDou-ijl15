@@ -595,31 +595,13 @@ static void CALLBACK AuraTimerProc(HWND, UINT, UINT_PTR, DWORD dwTime) {
 static unsigned long s_onDropEnterFieldRet = static_cast<unsigned long>(kOnDropEnterFieldRet);
 
 static unsigned char __stdcall OnDropEnterFieldHelper(void* pPacket, void* pDrop) {
+    // Server still inserts a drop-grade byte before the pet-pickup byte.
+    // Consume both for packet sync, but do NOT load Effect/.../dropItemAura
+    // (feature disabled — missing/corrupt BasicEff nodes caused error 38 on drop).
     const unsigned char nItemGrade = pPacket ? Decode1(pPacket) : 0;
     const unsigned char petPickupFlag = pPacket ? Decode1(pPacket) : 0;
-
-    if (!pPacket || !pDrop || !IsReadablePtr(pDrop, 0x40)) {
-        return petPickupFlag;
-    }
-
-    const int nIndex = (nItemGrade >= 1 && nItemGrade <= 4) ? static_cast<int>(nItemGrade - 1) : -1;
-    if (nIndex < 0) {
-        return petPickupFlag;
-    }
-
-    const unsigned char* buf = PacketBuffer(pPacket);
-    const int mod = ReadPacketMod(buf);
-    if (!IsSpawnDropMod(mod)) {
-        return petPickupFlag;
-    }
-
-    int dropX = 0;
-    int dropY = 0;
-    const int objectId = ReadPacketObjectId(buf);
-    ReadDropPosFromPacket(pPacket, dropX, dropY);
-
-    EnsureTimer();
-    QueueAuraSpawn(pDrop, objectId, nIndex, dropX, dropY);
+    (void)nItemGrade;
+    (void)pDrop;
     return petPickupFlag;
 }
 
