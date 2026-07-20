@@ -18,6 +18,8 @@
 #include "level300/Level300Api.h"
 #include "personalshop/PersonalShopApi.h"
 #include "charslots/CharSlotsApi.h"
+#include "shoulders/ShoulderApi.h"
+#include "gamedata/GameDataGuardApi.h"
 #endif
 #pragma comment(lib, "ws2_32.lib")
 
@@ -38,6 +40,36 @@ static std::string GetConfigIniPath(HMODULE module)
 	}
 
 	return path.substr(0, slash + 1) + "config.ini";
+}
+
+// SEH helper must not live in DllMain (C2712: no __try with C++ unwinding).
+static void WriteBootLine(HMODULE hModule, const char* line)
+{
+	char bootPath[MAX_PATH]{};
+	GetModuleFileNameA(hModule, bootPath, MAX_PATH);
+	if (char* slash = strrchr(bootPath, '\\')) {
+		*(slash + 1) = '\0';
+	}
+	strcat_s(bootPath, "plugin_boot.txt");
+	HANDLE boot = CreateFileA(bootPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+		nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (boot != INVALID_HANDLE_VALUE) {
+		DWORD w = 0;
+		WriteFile(boot, line, (DWORD)strlen(line), &w, nullptr);
+		FlushFileBuffers(boot);
+		CloseHandle(boot);
+	}
+}
+
+static void AttachLevel300ModWithBootLog(HMODULE hModule)
+{
+	WriteBootLine(hModule, "before AttachLevel300Mod\r\n");
+	__try {
+		AttachLevel300Mod();
+		WriteBootLine(hModule, "after AttachLevel300Mod\r\n");
+	} __except (EXCEPTION_EXECUTE_HANDLER) {
+		WriteBootLine(hModule, "EXCEPTION in AttachLevel300Mod\r\n");
+	}
 }
 
 static std::string ResolveToIpv4String(const std::string& hostOrIp)
@@ -163,6 +195,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		Client::FixChatPosHook();
 		Client::NoPassword();
 		Client::MoreHook();
+		// TEMP disabled 2026-07-19: isolate error-38 on item drop (UIWindow/ExpandItem redraw).
+		// Client::ExpandItem();
 		Client::DeleteChar();
 #ifndef BEIDOU_MINIMAL_PLUGIN
 		// Trunk / shop list row patches are pure WriteByte — safe at DllMain (before any UI).
@@ -172,13 +206,19 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		// HP/MP 4-byte expansion: Decode2->Decode4 + FakeTear + Fuse hooks + FixMovsx.
 		// Must run before first char-stat packet decode (login / map enter).
 		AttachMaxHpMpMod();
-		// Level ushort expansion: Decode1->Decode2 + LevelFakeTear + Fuse_byte + FixMovsx.
-        // EXP stays Decode4 until AttachLevel300Mod also installs Decode8 caves.
-        AttachLevel300Mod();
+		// Level ushort expansion + EXP Decode8 caves (server writeLong).
+		AttachLevel300ModWithBootLog(hModule);
+		// Soften InitializeGameData EC_INVALID_GAME_DATA (StringPool#86) after Data appends.
+		AttachGameDataGuard();
 		// Player/hired shop: server slotMax=32; UI canvas lengthening still WZ-side.
 		AttachPersonalShopMod();
-		// Select-char UI runs before first map; raise slot cap 15->30 at DllMain.
-		CharSlots::ApplyPatches();
+		// DISABLED 2026-07-16: CharSlots addresses are for Characterslot-30/kaentake client,
+		// NOT BeiDou.exe. Patch1 overwrites 0F-prefix of jge/jl (0F 8D/0F 7C) with 0x1E,
+		// corrupting jumps -> ZException -21E (0x21E) on channel->charselect.
+		// CharSlots::ApplyPatches();
+		// HARD-OFF 2026-07-19 login bisect: shoulders not the crash; tiny 0115 + inv dup suspected.
+		// AttachShoulderSlotsFix();
+
 		// Defer ModRegistry / BossHP / WorldMap / DamageRank / DamageSkin / RefreshRate
 		// until first CField::CField — DllMain path matches ultra-minimal startup.
 		LazyCompatInit::InstallBootstrapHook();
