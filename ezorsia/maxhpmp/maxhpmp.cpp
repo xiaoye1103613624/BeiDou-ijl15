@@ -3,7 +3,7 @@
 // the live IDA database for this exact binary (BeiDou_GMS_083.exe.i64,
 // module BeiDou.exe, imagebase 0x400000) before being written here.
 //
-// Reference: GW_CharacterStat.md (Status: Working, 100 patches total)
+// Reference: GW_CharacterStat.md (Status: Working, 107 patches total)
 //
 // Architecture (hybrid FakeTear + Fuse hook - see reference doc for why a
 // global Tear_short -> Tear_long redirect crashes with ZException):
@@ -19,6 +19,8 @@
 //      instead of 2 (server must send writeInt for these fields).
 //   5. Clamping limits raised 30000 -> 99999; two 16-bit `cmp ax,si`
 //      compares widened to 32-bit `cmp eax,esi`.
+//   5b. FixTest: `test ax,ax` after HP Fuse widened to `test eax,eax` so
+//       HP>=32768 is not treated as dead (blocks item/skill use).
 //
 // Do NOT globally redirect Tear_short -> Tear_long (see FAILED APPROACHES
 // in the reference doc). Do NOT apply FakeFuse globally (breaks all other
@@ -267,6 +269,20 @@ const RawPatch kRawPatches[] = {
     // Instruction starts at the 0x66 operand-size prefix, not the opcode.
     { 0x0078D8E7, 3, { 0x66, 0x3B, 0xC6 }, { 0x3B, 0xC6, 0x90 }, "CmpFix_StatRecalc_MaxHP" },
     { 0x0078D934, 3, { 0x66, 0x3B, 0xC6 }, { 0x3B, 0xC6, 0x90 }, "CmpFix_StatRecalc_MaxMP" },
+
+    // Category 5b: alive/can-act gates after HP Fuse.
+    // Fuse returns full int in EAX, but `test ax,ax` + `jle` treats HP>=32768
+    // as dead (SF from low 16 bits) — blocks item use / skill cast.
+    // `test ax,ax` (66 85 C0) -> `test eax,eax; nop` (85 C0 90).
+    { 0x00485C1C, 3, { 0x66, 0x85, 0xC0 }, { 0x85, 0xC0, 0x90 }, "FixTest_CanAct_HP" },
+    { 0x00A09687, 3, { 0x66, 0x85, 0xC0 }, { 0x85, 0xC0, 0x90 }, "FixTest_CanActEx_HP" },
+    { 0x0078D36C, 3, { 0x66, 0x85, 0xC0 }, { 0x85, 0xC0, 0x90 }, "FixTest_StatRecalc_HP" },
+    { 0x00A02F5F, 3, { 0x66, 0x85, 0xC0 }, { 0x85, 0xC0, 0x90 }, "FixTest_TryRecovery_HP_1" },
+    { 0x00A03155, 3, { 0x66, 0x85, 0xC0 }, { 0x85, 0xC0, 0x90 }, "FixTest_TryRecovery_HP_2" },
+
+    // Remaining movsx after HP Fuse (truncates >=32768 incorrectly).
+    { 0x0064286B, 3, { 0x0F, 0xBF, 0xF0 }, { 0x8B, 0xF0, 0x90 }, "FixMovsx_MobHPBar_HP" },
+    { 0x0096AE9D, 3, { 0x0F, 0xBF, 0xC7 }, { 0x8B, 0xC7, 0x90 }, "FixMovsx_SkillHPPct_HP" },
 };
 
 bool PatchRawWithVerify(const RawPatch& site) {
@@ -409,5 +425,5 @@ void AttachMaxHpMpMod() {
     if (hookedShort) ++okCount; else ++failCount;
     if (hookedLong) ++okCount; else ++failCount;
 
-    MhmLog("AttachMaxHpMpMod done: ok=%d fail=%d (expected total=100)", okCount, failCount);
+    MhmLog("AttachMaxHpMpMod done: ok=%d fail=%d (expected total=107)", okCount, failCount);
 }
