@@ -26,6 +26,19 @@
 
 namespace {
 
+void LvlLogWrite(const char* path, const char* line) {
+    HANDLE file = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    SetFilePointer(file, 0, nullptr, FILE_END);
+    DWORD written = 0;
+    WriteFile(file, line, static_cast<DWORD>(strlen(line)), &written, nullptr);
+    FlushFileBuffers(file);
+    CloseHandle(file);
+}
+
 void LvlLog(const char* format, ...) {
     char msg[512];
     va_list args;
@@ -39,22 +52,31 @@ void LvlLog(const char* format, ...) {
     _snprintf_s(line, sizeof(line), _TRUNCATE, "[%02d:%02d:%02d.%03d] %s\r\n",
                 st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, msg);
 
-    char path[MAX_PATH];
-    GetModuleFileNameA(nullptr, path, MAX_PATH);
-    char* slash = strrchr(path, '\\');
-    if (slash) {
+    // Write beside EXE and beside ijl15.dll — cwd/shortcut confusion is common.
+    char pathExe[MAX_PATH];
+    GetModuleFileNameA(nullptr, pathExe, MAX_PATH);
+    if (char* slash = strrchr(pathExe, '\\')) {
         *(slash + 1) = '\0';
     }
-    strcat_s(path, MAX_PATH, "level300_debug.txt");
+    strcat_s(pathExe, MAX_PATH, "level300_debug.txt");
+    LvlLogWrite(pathExe, line);
 
-    HANDLE file = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                              nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file != INVALID_HANDLE_VALUE) {
-        SetFilePointer(file, 0, nullptr, FILE_END);
-        DWORD written = 0;
-        WriteFile(file, line, static_cast<DWORD>(strlen(line)), &written, nullptr);
-        CloseHandle(file);
+    char pathDll[MAX_PATH];
+    HMODULE self = nullptr;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCSTR>(&LvlLog), &self) && self) {
+        GetModuleFileNameA(self, pathDll, MAX_PATH);
+        if (char* slash = strrchr(pathDll, '\\')) {
+            *(slash + 1) = '\0';
+        }
+        strcat_s(pathDll, MAX_PATH, "level300_debug.txt");
+        if (_stricmp(pathExe, pathDll) != 0) {
+            LvlLogWrite(pathDll, line);
+        }
     }
+
+    OutputDebugStringA(line);
 }
 
 constexpr uintptr_t kAddr_CInPacket_Decode1   = 0x004065F3;
@@ -108,13 +130,21 @@ __declspec(naked) static void Cave_ExpDecode_StatChanged() {
 }
 
 // Store raw ushort (fits the 2-byte Level tear slot at +0x33). CS sentinel=0.
-unsigned int __fastcall LevelFakeTear(int value, void* ptr) {
-    *reinterpret_cast<unsigned short*>(ptr) = static_cast<unsigned short>(value);
-    return 0;
+ // Use naked stub so call-sites (__fastcall ECX=value, EDX=ptr) never hit a C++ prologue.
+static int g_lvlFuseLogLeft = 48;
+
+__declspec(naked) static void LevelFakeTear_naked() {
+    __asm {
+        // ecx = level (ushort-wide), edx = tear ptr
+        mov word ptr [edx], cx
+        xor eax, eax          // checksum sentinel = 0
+        ret
+    }
 }
 
 void* LevelFakeTearTarget() {
-    return CastHook(&LevelFakeTear);
+    // Prefer naked: exact maple Tear_byte ABI (__fastcall ECX=value, EDX=ptr).
+    return CastHook(&LevelFakeTear_naked);
 }
 
 typedef int(__cdecl* t_ZtlSecureFuse_byte)(void* pTear, unsigned int checksum);
@@ -124,7 +154,12 @@ auto ZtlSecureFuse_byte = reinterpret_cast<t_ZtlSecureFuse_byte>(kAddr_ZtlSecure
 // Return full ushort in EAX when sentinel; callers that used only AL are FixMovsx'd.
 int __cdecl ZtlSecureFuse_byte_hook(void* pTear, unsigned int checksum) {
     if (checksum == 0) {
-        return *reinterpret_cast<unsigned short*>(pTear);
+        const unsigned short v = *reinterpret_cast<unsigned short*>(pTear);
+        if (g_lvlFuseLogLeft > 0) {
+            --g_lvlFuseLogLeft;
+            LvlLog("Fuse_byte CS0 level=%u", static_cast<unsigned>(v));
+        }
+        return v;
     }
     return ZtlSecureFuse_byte(pTear, checksum) & 0xFF;
 }
@@ -183,6 +218,10 @@ bool PatchRawWithVerify(const RawPatch& site) {
     unsigned char before[4] = {};
     for (unsigned char i = 0; i < site.size; ++i) {
         before[i] = *reinterpret_cast<unsigned char*>(site.addr + i);
+    }
+    if (memcmp(before, site.value, site.size) == 0) {
+        LvlLog("OK   %s @ 0x%08X: already patched", site.label, static_cast<unsigned int>(site.addr));
+        return true;
     }
     if (memcmp(before, site.expected, site.size) != 0) {
         LvlLog("SKIP %s @ 0x%08X: unexpected bytes", site.label, static_cast<unsigned int>(site.addr));
@@ -264,15 +303,59 @@ void AttachLevel300Mod() {
         { 0x0072447D, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelReq_6" },
         { 0x00752C75, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_Shop_Level" },
         { 0x00764DB0, 2, { 0x8A, 0xD8 }, { 0x8B, 0xD8 }, "FixMovEbx_Skill_Level" },
+        // EquipCalc (sub_77E227): Fuse level → EBX, then was re-truncated via mov cl,bl
+        // before IsAbleToWear. Level 300 became 44 → reqLevel 200/250 equips paint red.
         { 0x0077E251, 2, { 0x8A, 0xD8 }, { 0x8B, 0xD8 }, "FixMovEbx_EquipCalc_Level" },
+        { 0x0077E25D, 2, { 0x8A, 0xCB }, { 0x8B, 0xCB }, "FixMovEcx_EquipCalc_LevelAdd" },
         { 0x0077ECCB, 2, { 0x8A, 0xC8 }, { 0x8B, 0xC8 }, "FixMovEcx_EquipCalc_Level" },
+        // IsAbleToWear cash-path level override: movzx eax,al → ax @ 0x4F2D7A
+        { 0x004F2D7A, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_IsAbleToWear_Level" },
         { 0x0078DAEB, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_ExpTableLookup_Level" },
         { 0x008C531A, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_UIStat_Level" },
         { 0x008C58CF, 2, { 0x8A, 0xD8 }, { 0x8B, 0xD8 }, "FixMovEbx_UIStat_Level" },
         { 0x008CBE33, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_StatWnd_Level" },
         { 0x008D774C, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_StatusBar_Level_1" },
         { 0x008D81BC, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_StatusBar_Level_2" },
+        // ★ 状态栏 LevelNo 数字：Fuse 后 movzx al → 把 300 截成 44 再 DrawNumberByImage
+        { 0x008D8176, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_StatusBar_DrawLevel" },
         { 0x00A1FBB4, 3, { 0x0F, 0xB6, 0xF8 }, { 0x0F, 0xB7, 0xF8 }, "FixMovzx_Context_Level" },
+
+        // Extra Fuse→AL truncations found via IDA (digit/UI/copy paths)
+        { 0x00A1FC08, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_Context_Level2" },
+        { 0x0076601C, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_76601C" },
+        { 0x00822B87, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_822B87" },
+        { 0x00877DFE, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_877DFE" },
+        { 0x0087924B, 3, { 0x0F, 0xB6, 0xF0 }, { 0x0F, 0xB7, 0xF0 }, "FixMovzx_LevelExtra_87924B" },
+        { 0x00882EFA, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_882EFA" },
+        { 0x008AD0AB, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8AD0AB" },
+        { 0x008AD155, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8AD155" },
+        { 0x008AD200, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8AD200" },
+        { 0x008CD1A6, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD1A6" },
+        { 0x008CD1C6, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD1C6" },
+        { 0x008CD1E6, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD1E6" },
+        { 0x008CD24A, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD24A" },
+        { 0x008CD2C4, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD2C4" },
+        { 0x008CD2E1, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD2E1" },
+        { 0x008CD332, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD332" },
+        { 0x008CD35C, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD35C" },
+        { 0x008CD405, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD405" },
+        { 0x008CD422, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD422" },
+        { 0x008CD43F, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD43F" },
+        { 0x008CD49C, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD49C" },
+        { 0x008CD4BA, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD4BA" },
+        { 0x008CD531, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD531" },
+        { 0x008CD54A, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD54A" },
+        { 0x008CD599, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD599" },
+        { 0x008CD5C2, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD5C2" },
+        { 0x008E93CE, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8E93CE" },
+        { 0x009514FD, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_9514FD" },
+        { 0x00958938, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_958938" },
+        { 0x00A0EC35, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_A0EC35" },
+        { 0x00A12413, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_A12413" },
+        { 0x00A2041A, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_A2041A" },
+        { 0x00A3E7D5, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_A3E7D5" },
+        { 0x004E3367, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_4E3367" },
+        { 0x004BBB33, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_4BBB33" },
     };
 
     for (const CallPatch& site : kCallPatches) {
@@ -330,6 +413,6 @@ void AttachLevel300Mod() {
         }
     }
 
-    // Expected: 2 exp caves + 6 call + 23 raw + 1 fuse + 5 max-level = 37
-    LvlLog("AttachLevel300Mod done: ok=%d fail=%d (expected total=37)", okCount, failCount);
+    // Expected: 2 exp caves + 6 call + (23+N) raw + 1 fuse + 5 max-level
+    LvlLog("AttachLevel300Mod done: ok=%d fail=%d", okCount, failCount);
 }
