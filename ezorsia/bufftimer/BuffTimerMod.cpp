@@ -24,13 +24,15 @@ constexpr uintptr_t kCWvsContextInst = 0x00BE7918;
 constexpr int kCtxTempStatViewOff = 0x2EA8;
 constexpr int kTempStatListHeadOff = 0x10;
 constexpr int kStatusBarNumberFontOff = 0xE0;
-constexpr DWORD kStartupDelayMs = 3000;
-constexpr DWORD kOverlayTimerMs = 250;
+// Match V95 reference: delay hooks until client UI is up; overlay tick stays light.
+constexpr DWORD kStartupDelayMs = 12000;
+constexpr DWORD kOverlayTimerMs = 500;
 constexpr DWORD kDiagLogIntervalMs = 10000;
 constexpr int kOverlayTextTop = 37;
 constexpr int kOverlayTextBottom = 59;
 constexpr COLORREF kOverlayColorKey = RGB(1, 0, 1);
 constexpr COLORREF kBuffTimerTextColor = RGB(255, 224, 96);
+constexpr uintptr_t kUserLocalInstanceAddr = 0x00BEBF98;
 
 using DrawNumberByImageFn = int(__cdecl*)(void*, int, int, int, void*, int);
 
@@ -47,6 +49,13 @@ bool g_overlayReady = false;
 bool g_loggedActiveTimers = false;
 DWORD g_lastDiagLogTick = 0;
 FILE* g_log = nullptr;
+
+// V95 pattern: walk TempStat only on the game thread; overlay reads a locked snapshot.
+CRITICAL_SECTION g_timerLock{};
+bool g_timerLockReady = false;
+std::vector<BuffTimerEntry> g_timerSnapshot;
+RECT g_lastOverlayScreenRect{};
+bool g_hasLastOverlayScreenRect = false;
 
 void Log(const char* fmt, ...) {
     if (!g_log) {
@@ -351,7 +360,17 @@ void RefreshAllBuffShadows(void* view) {
     }
 }
 
-std::vector<BuffTimerEntry> CollectBuffTimers() {
+bool IsInGameForOverlay() {
+    // Status bar exists only after character enters the field — never overlay login/char-select.
+    if (!CUIStatusBar::IsInstantiated()) {
+        return false;
+    }
+    void* userLocal = *reinterpret_cast<void**>(kUserLocalInstanceAddr);
+    return userLocal != nullptr;
+}
+
+std::vector<BuffTimerEntry> CollectBuffTimersUnlocked() {
+    // Call only from the Maple game thread (TempStat hooks). Overlay must use SnapshotBuffTimers().
     std::vector<BuffTimerEntry> timers;
     auto* view = GetTemporaryStatViewBase();
     if (!view) {
@@ -374,6 +393,32 @@ std::vector<BuffTimerEntry> CollectBuffTimers() {
         pos = link ? reinterpret_cast<uint8_t*>(link) + 0x10 : nullptr;
     }
     return timers;
+}
+
+void PublishTimerSnapshotFromGameThread() {
+    if (!g_timerLockReady) {
+        return;
+    }
+    auto timers = CollectBuffTimersUnlocked();
+    EnterCriticalSection(&g_timerLock);
+    g_timerSnapshot = std::move(timers);
+    LeaveCriticalSection(&g_timerLock);
+}
+
+std::vector<BuffTimerEntry> SnapshotBuffTimers() {
+    std::vector<BuffTimerEntry> timers;
+    if (!g_timerLockReady) {
+        return timers;
+    }
+    EnterCriticalSection(&g_timerLock);
+    timers = g_timerSnapshot;
+    LeaveCriticalSection(&g_timerLock);
+    return timers;
+}
+
+// Kept for init/diag on worker threads — never walks live list (snapshot only).
+std::vector<BuffTimerEntry> CollectBuffTimers() {
+    return SnapshotBuffTimers();
 }
 
 void LogActiveTimersIfNeeded(const char* reason) {
@@ -411,6 +456,21 @@ bool IsOverlayWindow(HWND hwnd) {
     wchar_t className[128]{};
     GetClassNameW(hwnd, className, 128);
     return wcscmp(className, L"BeiDouBuffTimerOverlay") == 0;
+}
+
+/** Hide buff timers when Maple is covered / alt-tabbed (overlay is WS_POPUP, not a child). */
+bool IsMapleForeground(HWND game) {
+    HWND fg = GetForegroundWindow();
+    if (!fg || !game) {
+        return false;
+    }
+    if (fg == game || fg == g_overlay || IsOverlayWindow(fg)) {
+        return true;
+    }
+    // In-game dialogs / owned popups still belong to this process.
+    DWORD pid = 0;
+    GetWindowThreadProcessId(fg, &pid);
+    return pid == GetCurrentProcessId();
 }
 
 HWND FindGameWindow() {
@@ -512,33 +572,13 @@ void PaintOverlay(HDC dc, const RECT& paintRect) {
     }
 }
 
-void AttachOverlayToGame(HWND game) {
-    if (!g_overlay || !game) {
-        return;
-    }
-    if (g_overlayParent == game) {
-        return;
-    }
-
-    LONG_PTR style = GetWindowLongPtr(g_overlay, GWL_STYLE);
-    style &= ~(WS_POPUP | WS_CAPTION | WS_BORDER);
-    style |= WS_CHILD;
-    SetWindowLongPtr(g_overlay, GWL_STYLE, style);
-    SetWindowLongPtr(
-        g_overlay,
-        GWL_EXSTYLE,
-        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE);
-    SetParent(g_overlay, game);
-    g_overlayParent = game;
-    g_cachedGameWindow = game;
-}
-
 void UpdateOverlayWindow() {
     if (!g_overlay) {
         return;
     }
 
-    const auto timers = CollectBuffTimers();
+    // Snapshot only — never walk TempStat from the overlay thread (hang root cause).
+    const auto timers = SnapshotBuffTimers();
     bool hasTimer = false;
     for (const auto& entry : timers) {
         if (ShouldDrawBuffOverlay(entry)) {
@@ -548,16 +588,21 @@ void UpdateOverlayWindow() {
     }
 
     HWND game = FindGameWindow();
-    if (!game || !hasTimer) {
+    // Match V95BuffTimerClient: popup over the game client (NOT WS_CHILD).
+    // Child layered windows break color-key under DirectX → fullscreen black + half-clipped buffs.
+    // Must NOT stay HWND_TOPMOST when Maple is covered — timers would float over other apps.
+    if (!game || !hasTimer || !IsInGameForOverlay() || !IsWindowVisible(game) || IsIconic(game)
+        || !IsMapleForeground(game)) {
         if (hasTimer && !g_loggedOverlayShow) {
-            Log("overlay hidden: game=%p hasTimer=%d", game, hasTimer ? 1 : 0);
+            Log("overlay hidden: game=%p hasTimer=%d inGame=%d fg=%d", game, hasTimer ? 1 : 0,
+                IsInGameForOverlay() ? 1 : 0, game ? (IsMapleForeground(game) ? 1 : 0) : 0);
         }
         g_paintState = {};
+        g_overlayParent = nullptr;
+        g_hasLastOverlayScreenRect = false;
         ShowWindow(g_overlay, SW_HIDE);
         return;
     }
-
-    AttachOverlayToGame(game);
 
     RECT client{};
     if (!GetClientRect(game, &client)) {
@@ -566,27 +611,64 @@ void UpdateOverlayWindow() {
         return;
     }
 
+    POINT origin{0, 0};
+    ClientToScreen(game, &origin);
+
     const int width = client.right - client.left;
     const int height = client.bottom - client.top;
+    const RECT screenRect{origin.x, origin.y, origin.x + width, origin.y + height};
+    const bool movedOrResized = !g_hasLastOverlayScreenRect ||
+        screenRect.left != g_lastOverlayScreenRect.left ||
+        screenRect.top != g_lastOverlayScreenRect.top ||
+        screenRect.right != g_lastOverlayScreenRect.right ||
+        screenRect.bottom != g_lastOverlayScreenRect.bottom;
     const bool sizeChanged = width != g_paintState.width || height != g_paintState.height;
-    if (sizeChanged) {
+
+    // Keep as independent WS_POPUP (created that way); never reparent as WS_CHILD.
+    if (g_overlayParent != game) {
+        SetWindowLongPtr(
+            g_overlay,
+            GWL_EXSTYLE,
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+        SetLayeredWindowAttributes(g_overlay, kOverlayColorKey, 0, LWA_COLORKEY);
+        g_overlayParent = game;
+        g_cachedGameWindow = game;
+    }
+
+    // Place just above the game window — never HWND_TOPMOST (leaks over other apps).
+    // Throttle: SetWindowPos every tick flooded DWM/GDI and starved the Maple main thread.
+    if (movedOrResized || !IsWindowVisible(g_overlay)) {
+        // Leave topmost band if a previous build left us there.
         SetWindowPos(
             g_overlay,
-            HWND_TOP,
+            HWND_NOTOPMOST,
             0,
             0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        HWND insertAfter = GetWindow(game, GW_HWNDPREV);
+        if (!insertAfter || insertAfter == g_overlay) {
+            insertAfter = HWND_TOP;
+        }
+        SetWindowPos(
+            g_overlay,
+            insertAfter,
+            origin.x,
+            origin.y,
             width,
             height,
             SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    } else {
-        ShowWindow(g_overlay, SW_SHOWNA);
+        g_lastOverlayScreenRect = screenRect;
+        g_hasLastOverlayScreenRect = true;
     }
 
-    SyncOverlayPaint(width, height, sizeChanged);
+    // Dirty only changed timer slots — do NOT full-window InvalidateRect each tick.
+    SyncOverlayPaint(width, height, sizeChanged || movedOrResized);
 
     if (!g_loggedOverlayShow) {
         g_loggedOverlayShow = true;
-        Log("overlay show game=%p size=%dx%d timers=%zu", game, client.right, client.bottom, timers.size());
+        Log("overlay show popup game=%p size=%dx%d timers=%zu", game, width, height, timers.size());
     }
 }
 
@@ -643,7 +725,7 @@ DWORD WINAPI OverlayThreadProc(LPVOID) {
     RegisterClassExW(&wc);
 
     g_overlay = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         wc.lpszClassName,
         L"",
         WS_POPUP,
@@ -736,6 +818,7 @@ void RefreshBuffShadow(TemporaryStat* pThis) {
 
 void __fastcall TEMPORARY_STAT__UpdateShadowIndex_hook(TemporaryStat* pThis, void* /*edx*/) {
     RefreshBuffShadow(pThis);
+    PublishTimerSnapshotFromGameThread();
 }
 
 static auto CTemporaryStatView__Update =
@@ -744,6 +827,7 @@ static auto CTemporaryStatView__Update =
 void* __fastcall CTemporaryStatView__Update_hook(void* pThis, void* /*edx*/) {
     void* result = CTemporaryStatView__Update(pThis);
     RefreshAllBuffShadows(pThis);
+    PublishTimerSnapshotFromGameThread();
     LogActiveTimersIfNeeded("view-update");
     return result;
 }
@@ -859,6 +943,11 @@ void AttachHooksOnce() {
         return;
     }
 
+    if (!g_timerLockReady) {
+        InitializeCriticalSection(&g_timerLock);
+        g_timerLockReady = true;
+    }
+
     g_module = GetModuleHandleW(L"ijl15.dll");
     if (!g_module) {
         g_module = GetModuleHandleW(nullptr);
@@ -878,25 +967,23 @@ void AttachHooksOnce() {
     StartOverlayThread();
     g_hooksAttached = shadowHook;
 
-    Log("hooks attached shadow=%d update=%d module=%p overlayThread=1", shadowHook ? 1 : 0, updateHook ? 1 : 0, g_module);
+    Log("hooks attached shadow=%d update=%d module=%p overlayThread=1 snapshot=1", shadowHook ? 1 : 0, updateHook ? 1 : 0, g_module);
 }
 
 DWORD WINAPI InitThreadProc(LPVOID) {
-    for (int attempt = 0; attempt < 8; ++attempt) {
-        Sleep(kStartupDelayMs);
-        if (!g_hooksAttached) {
-            AttachHooksOnce();
-        }
-        LogActiveTimersIfNeeded("init");
-        const auto timers = CollectBuffTimers();
-        Log("init attempt=%d timers=%zu hooks=%d overlay=%p", attempt + 1, timers.size(), g_hooksAttached ? 1 : 0, g_overlay);
+    // Single delayed attach (V95 uses 12s). Avoid polling TempStat from worker threads.
+    Sleep(kStartupDelayMs);
+    if (!g_hooksAttached) {
+        AttachHooksOnce();
     }
+    Log("init complete hooks=%d overlay=%p inGame=%d", g_hooksAttached ? 1 : 0, g_overlay,
+        IsInGameForOverlay() ? 1 : 0);
     return 0;
 }
 
 struct BuffTimerAutoInit {
     BuffTimerAutoInit() {
-        Log("BuffTimer auto init thread scheduled");
+        Log("BuffTimer auto init thread scheduled (delay=%ums)", kStartupDelayMs);
         HANDLE thread = CreateThread(nullptr, 0, InitThreadProc, nullptr, 0, nullptr);
         if (thread) {
             CloseHandle(thread);
