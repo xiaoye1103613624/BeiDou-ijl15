@@ -115,6 +115,7 @@ std::unordered_map<int, PartyTrackerStats> g_partyTracker;
 std::unordered_map<int, IWzCanvasPtr> g_buffIconCache;
 std::unordered_set<int> g_missingBuffIcons;
 std::unordered_set<int> g_pendingIconLoads;
+std::unordered_map<int, DWORD> g_missingIconRetryAt; // sourceId -> tick when retry allowed
 IWzCanvasPtr g_scaledCooltimeShadows[16];
 IWzFontPtr g_hpPercentFont;
 IWzFontPtr g_trackerExpFont;
@@ -314,20 +315,36 @@ IWzCanvasPtr CreateScaledCanvas(const IWzCanvasPtr& source, int targetSize) {
     return target;
 }
 
+void QueueBuffIconLoad(int sourceId) {
+    if (sourceId == 0) {
+        return;
+    }
+    if (g_buffIconCache.find(sourceId) != g_buffIconCache.end()) {
+        return;
+    }
+
+    const DWORD now = GetTickCount();
+    const auto missing = g_missingBuffIcons.find(sourceId);
+    if (missing != g_missingBuffIcons.end()) {
+        const auto retryAt = g_missingIconRetryAt.find(sourceId);
+        if (retryAt != g_missingIconRetryAt.end() && now < retryAt->second) {
+            return;
+        }
+        // First load often fails before Skill/Item WZ is ready — retry after 2s.
+        g_missingBuffIcons.erase(missing);
+        g_missingIconRetryAt[sourceId] = now + 2000;
+    }
+
+    g_pendingIconLoads.insert(sourceId);
+}
+
 IWzCanvasPtr GetBuffIconCached(int sourceId) {
     const auto cached = g_buffIconCache.find(sourceId);
     if (cached != g_buffIconCache.end()) {
         return cached->second;
     }
 
-    if (g_missingBuffIcons.find(sourceId) != g_missingBuffIcons.end()) {
-        return IWzCanvasPtr();
-    }
-
-    if (g_pendingIconLoads.find(sourceId) == g_pendingIconLoads.end()) {
-        g_pendingIconLoads.insert(sourceId);
-    }
-
+    QueueBuffIconLoad(sourceId);
     return IWzCanvasPtr();
 }
 
@@ -403,17 +420,21 @@ IWzCanvasPtr LoadBuffIcon(int sourceId) {
     wchar_t uol[180] = {};
 
     if (sourceId > 0) {
-        swprintf_s(uol, L"Skill/%d.img/skill/%d/icon", sourceId / 10000, sourceId);
-        icon = LoadCanvas(uol);
-        if (!icon) {
-            // Beginner skills such as Echo of Hero are stored under a
-            // zero-padded node (0001005) inside Skill/000.img.
-            swprintf_s(uol, L"Skill/%03d.img/skill/%07d/icon", sourceId / 10000, sourceId);
+        const int skillBook = sourceId / 10000;
+        // Try common GMS083 Skill.img layouts (padded book + padded/unpadded skill id).
+        const wchar_t* skillPaths[] = {
+            L"Skill/%03d.img/skill/%07d/icon",
+            L"Skill/%03d.img/skill/%d/icon",
+            L"Skill/%d.img/skill/%d/icon",
+            L"Skill/%03d.img/skill/%07d/iconMouseOver",
+            L"Skill/%d.img/skill/%07d/icon",
+        };
+        for (const wchar_t* fmt : skillPaths) {
+            swprintf_s(uol, fmt, skillBook, sourceId);
             icon = LoadCanvas(uol);
-        }
-        if (!icon) {
-            swprintf_s(uol, L"Skill/%03d.img/skill/%07d/iconMouseOver", sourceId / 10000, sourceId);
-            icon = LoadCanvas(uol);
+            if (icon) {
+                break;
+            }
         }
     } else if (sourceId < 0) {
         const int itemId = -sourceId;
@@ -437,17 +458,19 @@ IWzCanvasPtr LoadBuffIcon(int sourceId) {
     }
 
     if (icon) {
+        g_missingBuffIcons.erase(sourceId);
+        g_missingIconRetryAt.erase(sourceId);
         IWzCanvasPtr scaled = CreateScaledCanvas(icon, kPreferredIconSize);
         if (scaled) {
             g_buffIconCache[sourceId] = scaled;
             return scaled;
-        } else {
-            g_buffIconCache[sourceId] = icon;
-            return icon;
         }
-    } else {
-        g_missingBuffIcons.insert(sourceId);
+        g_buffIconCache[sourceId] = icon;
+        return icon;
     }
+
+    g_missingBuffIcons.insert(sourceId);
+    g_missingIconRetryAt[sourceId] = GetTickCount() + 2000;
     return icon;
 }
 
@@ -481,6 +504,8 @@ void CopyFit(const IWzCanvasPtr& destination, const IWzCanvasPtr& source, int x,
 void DrawBuff(const IWzCanvasPtr& canvas, const PartyBuff& buff, int x, int y, int size) {
     IWzCanvasPtr icon = GetBuffIconCached(buff.sourceId);
     if (!icon) {
+        // Pending / retrying icon load — keep the widened strip visibly occupied.
+        canvas->DrawRectangle(x, y, size, size, 0x60404040);
         return;
     }
     CopyFit(canvas, icon, x, y, size);
@@ -820,6 +845,7 @@ void PartyBuffs_UpdateSnapshot(
             buff.useCount = 0;
             buff.active = true;
             newBuffs.push_back(buff);
+            QueueBuffIconLoad(sourceId);
         } else {
             // Items: search in oldBuffs to update useCount
             int useCount = 1;
@@ -851,12 +877,7 @@ void PartyBuffs_UpdateSnapshot(
             buff.useCount = useCount;
             buff.active = true;
             newBuffs.push_back(buff);
-
-            // Queue for loading if not cached
-            if (g_buffIconCache.find(sourceId) == g_buffIconCache.end() &&
-                g_missingBuffIcons.find(sourceId) == g_missingBuffIcons.end()) {
-                g_pendingIconLoads.insert(sourceId);
-            }
+            QueueBuffIconLoad(sourceId);
         }
     }
 
@@ -943,9 +964,22 @@ void RecreatePartyWindowSafe(CWnd* partyWindow) {
 }
 
 void PartyBuffs_OnClientTick() {
+    // Re-queue timed-out "missing" icons so early WZ misses do not stay blank forever.
+    const DWORD nowRetry = GetTickCount();
+    for (auto itRetry = g_missingIconRetryAt.begin(); itRetry != g_missingIconRetryAt.end(); ) {
+        if (nowRetry >= itRetry->second &&
+                g_buffIconCache.find(itRetry->first) == g_buffIconCache.end()) {
+            g_missingBuffIcons.erase(itRetry->first);
+            g_pendingIconLoads.insert(itRetry->first);
+            itRetry = g_missingIconRetryAt.erase(itRetry);
+        } else {
+            ++itRetry;
+        }
+    }
+
     int loadedThisTick = 0;
     auto it = g_pendingIconLoads.begin();
-    while (it != g_pendingIconLoads.end() && loadedThisTick < 2) {
+    while (it != g_pendingIconLoads.end() && loadedThisTick < 4) {
         int sourceId = *it;
         it = g_pendingIconLoads.erase(it);
 
@@ -1133,10 +1167,7 @@ void PartyBuffs_UpdateCounts(int characterId, int count, const unsigned char* pa
             buffs.push_back(buff);
             changed = true;
 
-            if (g_buffIconCache.find(sourceId) == g_buffIconCache.end() &&
-                g_missingBuffIcons.find(sourceId) == g_missingBuffIcons.end()) {
-                g_pendingIconLoads.insert(sourceId);
-            }
+            QueueBuffIconLoad(sourceId);
         }
     }
 
