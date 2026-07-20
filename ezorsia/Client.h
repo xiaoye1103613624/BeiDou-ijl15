@@ -18,6 +18,7 @@ public:
 	static void FixChatPosHook();
 	static void NoPassword();
 	static void MoreHook();
+	static void ExpandItem();
 	static void WorldMap();
 	static void RefreshRate(); 
 	static void DeleteChar();
