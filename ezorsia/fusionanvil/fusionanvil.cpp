@@ -562,7 +562,7 @@ void __fastcall AvatarLook__Load_hook(AvatarLook* pThis, void* /*edx*/,
 {
     AvatarLook__Load(pThis, cs, apEquipped, apEquipped2);
 
-    for (int i = 1; i <= 51; ++i) {
+    for (int i = 1; i <= 50; ++i) {
         GW_ItemSlotBase* pItem = nullptr;
         __try {
             pItem = *reinterpret_cast<GW_ItemSlotBase**>(apEquipped + 8 * i + 4);
@@ -706,10 +706,10 @@ void AttachFusionAnvilPacketHooks() {
     }
     g_packetHooksAttached = true;
 
+    // ALIGNED with server writeAnvilSpiritTail=true
     Memory::WriteInt(kPatch_GetItemSlotSizeImm, kNewItemSlotEquipSize);
     Memory::WriteInt(kPatch_SubtypeAllocSizeImm, kNewItemSlotEquipSize);
     ATTACH_HOOK(GW_ItemSlotBase__Decode, GW_ItemSlotBase__Decode_hook);
-    // Must run before getCharInfo / first AvatarLook::Load on login.
     ATTACH_HOOK(AvatarLook__Load, AvatarLook__Load_hook);
 }
 
