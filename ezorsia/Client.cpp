@@ -1044,7 +1044,12 @@ HookPcCreateObject_IWzPackage(
 }
 void Client::RefreshRate()
 {
-	//屏幕刷新率大于60客户端无法启动
+	//屏幕刷新率大于60客户端无法启动（登录/选角阶段也需生效）
+	static bool s_installed = false;
+	if (s_installed) {
+		return;
+	}
+	s_installed = true;
 
 	PatchRefreshRateTo60();
 	CreateThread(nullptr, 0, RefreshRatePatchWorker, nullptr, 0, nullptr);
@@ -1053,7 +1058,7 @@ void Client::RefreshRate()
 	DetourTransactionBegin();
 	DetourUpdateThread(GetCurrentThread());
 	DetourAttach((LPVOID*)&g_PcCreateObject_IWzPackage, HookPcCreateObject_IWzPackage);
-	DetourTransactionCommit(); 
+	DetourTransactionCommit();
 }
   
 typedef unsigned int (__fastcall *pfunSendDeleteCharPacket)(void* This, int _);

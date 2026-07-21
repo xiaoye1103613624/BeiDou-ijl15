@@ -219,8 +219,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		// HARD-OFF 2026-07-19 login bisect: shoulders not the crash; tiny 0115 + inv dup suspected.
 		// AttachShoulderSlotsFix();
 
-		// Defer ModRegistry / BossHP / WorldMap / DamageRank / DamageSkin / RefreshRate
-		// until first CField::CField — DllMain path matches ultra-minimal startup.
+		// InstallBootstrapHook: RefreshRate early (login-safe); other mods at first CField.
 		LazyCompatInit::InstallBootstrapHook();
 #else
 		// Ultra-minimal: ijl15 proxy + IP/res hooks only — no feature hooks at DllMain.
