@@ -10,11 +10,35 @@
 
 已测试的开发工具 VS 2019，SDK 10，工具集 VS2019（v142）
 
-使用vs打开的时候注意，要使用 Release x86 的模式生成解决方案
+使用 VS 打开时选择 **Release | x86** 生成解决方案。
 
-生成后可在 out/Release 目录下找到 ijl15.dll
+生成产物：`out\Release\ijl15.dll`
 
-先把客户端原本的ijl15.dll重命名成2ijl15.dll，然后把生成的ijl15.dll拷贝到客户端目录下，然后把项目根目录下的config.ini同样复制到客户端目录下，具体配置都在config.ini中
+### 自动部署（推荐）
+
+生成成功后会 **Post-Build 自动覆盖** 到：
+
+`E:\mxd_soft\2.客户端\083\beidou_client_xiaoye\BeiDou-Client_1\ijl15.dll`
+
+（同时复制 `ezorsia\config.ini`；旧 DLL 会备份到客户端目录下 `_ijl15_backup\`）
+
+| 方式 | 命令 / 操作 |
+|------|-------------|
+| VS 生成 | 选 Release\|x86，生成（Ctrl+Shift+B）即可覆盖客户端 |
+| 一键编译+部署 | `deploy_ijl15.bat` |
+| 客户端占用 DLL | `deploy_ijl15.bat /kill`（会结束 BeiDou.exe） |
+| 只复制不编译 | `deploy_ijl15.bat /copyonly` 或再加 `/kill` |
+| MSBuild | `msbuild ezorsia.sln /p:Configuration=Release /p:Platform=x86` |
+| MSBuild 并杀端 | 同上再加 `/p:DeployKillClient=true` |
+| 保存后自动编译部署 | `powershell -ExecutionPolicy Bypass -File .\watch_and_deploy.ps1`（可选 `-KillClient`） |
+
+说明：
+
+- 若客户端正在运行导致文件锁定，默认 **部署失败并提示**；需要时用 `/kill` 或 `DeployKillClient=true`。
+- `deploy_ijl15.bat` / `watch_and_deploy.ps1` 编译时会带 `DeploySkipPostBuild=true`，避免 Post-Build 与脚本重复复制。
+- 首次使用前仍建议把原版客户端 `ijl15.dll` 留一份备份（例如重命名为 `2ijl15.dll`）。
+
+详细配置见 `ezorsia\config.ini`。
 
 ## 推荐服务端
 
