@@ -154,6 +154,13 @@ static int SafeGetAnvilItemId(GW_ItemSlotBase* pItem) {
 
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 
+    // Same range as tooltip.cpp — CS preview heap garbage must not paint 幻化.
+    if (nAnvilItemID < 1000000 || nAnvilItemID >= 2000000) {
+
+        return 0;
+
+    }
+
     return nAnvilItemID;
 
 }

@@ -5,8 +5,10 @@
 #include "compat/wvs/packet_legacy.h"
 #include "compat/wvs/util.h"
 #include "compat/ztl/ztl.h"
+#include "../potentialscroll/PotentialScrollApi.h"
 
 #include <windows.h>
+#include <cstring>
 
 
 // ===========================================================================
@@ -15,6 +17,8 @@
 
 static constexpr uintptr_t kAddr_AvatarLook_Load              = 0x004E72AD;
 static constexpr uintptr_t kAddr_ItemSlotBase_Decode          = 0x004E33F9;
+static constexpr uintptr_t kAddr_InPacket_Decode1             = 0x004065F3;
+static constexpr uintptr_t kAddr_InPacket_Decode2             = 0x0042470C;
 static constexpr uintptr_t kAddr_InPacket_Decode4             = 0x00406629;
 static constexpr uintptr_t kAddr_SendConsumeCash              = 0x00A0A63F;
 static constexpr uintptr_t kAddr_SendEtcCash                  = 0x00A1DC5B;
@@ -36,16 +40,42 @@ static constexpr uintptr_t kPatch_GetItemSlotSizeImm          = 0x005D6053;
 static constexpr uintptr_t kPatch_SubtypeAllocSizeImm         = 0x004E3580;
 
 // Extend GW_ItemSlotEquip:
-//   nAnvilItemID   @ 0xF9 (int)
-//   nEquipSkillID  @ 0xFD (int)
-//   nEquipSkillLv  @ 0x101 (int)
-//   tEquipSkillExp @ 0x105 (FILETIME / uint64)
-// New size 0x10D.
-static constexpr uint32_t  kNewItemSlotEquipSize              = 0x10D;
+//   nAnvilItemID     @ 0xF9 (int)
+//   nEquipSkillID    @ 0xFD (int)
+//   nEquipSkillLv    @ 0x101 (int)
+//   tEquipSkillExp   @ 0x105 (FILETIME / uint64)
+//   nEnhance         @ 0x10D (byte)   — Hyper ★
+//   nPotentialGrade  @ 0x10E (byte)
+//   nPotentialPad    @ 0x10F (short)  — reserved
+//   nPotential1/2/3  @ 0x110/114/118 (int)
+//   nBonusPotGrade   @ 0x11C (byte)   — Phase3 附加潜能
+//   nBonusPotPad     @ 0x11D (byte) + short @ 0x11E
+//   nBonusPot1/2/3   @ 0x120/124/128 (int)
+//   nSoulId          @ 0x12C (int)    — Phase4 灵魂宝珠
+//   nSoulOption      @ 0x130 (int)
+//   nSocket1         @ 0x134 (int)    — 星岩
+//   nSocket2         @ 0x138 (int)    — 星岩槽2
+//   nSocket3         @ 0x13C (int)    — 星岩槽3 Phase10
+// New size 0x140. Keep PacketCreator.addItemInfo tail in sync.
+static constexpr uint32_t  kNewItemSlotEquipSize              = 0x140;
 static constexpr size_t    kOffset_nAnvilItemID               = 0xF9;
 static constexpr size_t    kOffset_nEquipSkillID              = 0xFD;
 static constexpr size_t    kOffset_nEquipSkillLevel           = 0x101;
 static constexpr size_t    kOffset_tEquipSkillExpire          = 0x105;
+static constexpr size_t    kOffset_nEnhance                   = 0x10D;
+static constexpr size_t    kOffset_nPotentialGrade            = 0x10E;
+static constexpr size_t    kOffset_nPotential1                = 0x110;
+static constexpr size_t    kOffset_nPotential2                = 0x114;
+static constexpr size_t    kOffset_nPotential3                = 0x118;
+static constexpr size_t    kOffset_nBonusPotentialGrade       = 0x11C;
+static constexpr size_t    kOffset_nBonusPotential1           = 0x120;
+static constexpr size_t    kOffset_nBonusPotential2           = 0x124;
+static constexpr size_t    kOffset_nBonusPotential3           = 0x128;
+static constexpr size_t    kOffset_nSoulId                    = 0x12C;
+static constexpr size_t    kOffset_nSoulOption                = 0x130;
+static constexpr size_t    kOffset_nSocket1                   = 0x134;
+static constexpr size_t    kOffset_nSocket2                   = 0x138;
+static constexpr size_t    kOffset_nSocket3                   = 0x13C;
 
 // Fusion Anvil cash item (Item.wz/Cash/0590.img/05900000.img)
 static constexpr int32_t   kFusionAnvilItemID                 = 5900000;
@@ -76,6 +106,20 @@ struct GW_ItemSlotEquip {
     MEMBER_AT(int32_t, kOffset_nEquipSkillID, nEquipSkillID)
     MEMBER_AT(int32_t, kOffset_nEquipSkillLevel, nEquipSkillLevel)
     MEMBER_AT(uint64_t, kOffset_tEquipSkillExpire, tEquipSkillExpire)
+    MEMBER_AT(unsigned char, kOffset_nEnhance, nEnhance)
+    MEMBER_AT(unsigned char, kOffset_nPotentialGrade, nPotentialGrade)
+    MEMBER_AT(int32_t, kOffset_nPotential1, nPotential1)
+    MEMBER_AT(int32_t, kOffset_nPotential2, nPotential2)
+    MEMBER_AT(int32_t, kOffset_nPotential3, nPotential3)
+    MEMBER_AT(unsigned char, kOffset_nBonusPotentialGrade, nBonusPotentialGrade)
+    MEMBER_AT(int32_t, kOffset_nBonusPotential1, nBonusPotential1)
+    MEMBER_AT(int32_t, kOffset_nBonusPotential2, nBonusPotential2)
+    MEMBER_AT(int32_t, kOffset_nBonusPotential3, nBonusPotential3)
+    MEMBER_AT(int32_t, kOffset_nSoulId, nSoulId)
+    MEMBER_AT(int32_t, kOffset_nSoulOption, nSoulOption)
+    MEMBER_AT(int32_t, kOffset_nSocket1, nSocket1)
+    MEMBER_AT(int32_t, kOffset_nSocket2, nSocket2)
+    MEMBER_AT(int32_t, kOffset_nSocket3, nSocket3)
 };
 
 struct AvatarLook {
@@ -509,6 +553,10 @@ void CUIFusionAnvil::SendRequestPacket() {
 // Hook 1: GW_ItemSlotBase::Decode — static __cdecl factory.
 // ===========================================================================
 
+static auto CInPacket__Decode1 =
+    reinterpret_cast<unsigned char(__thiscall*)(CInPacket*)>(kAddr_InPacket_Decode1);
+static auto CInPacket__Decode2 =
+    reinterpret_cast<unsigned short(__thiscall*)(CInPacket*)>(kAddr_InPacket_Decode2);
 static auto CInPacket__Decode4 =
     reinterpret_cast<uint32_t(__thiscall*)(CInPacket*)>(kAddr_InPacket_Decode4);
 static auto GW_ItemSlotBase__Decode =
@@ -526,17 +574,59 @@ int __cdecl GW_ItemSlotBase__Decode_hook(void* pOutZRef, CInPacket* pPacket) {
     if (nType != 1) return ret;
 
     auto* pEquip = reinterpret_cast<GW_ItemSlotEquip*>(pItem);
+    // Vanilla ctor only clears through old size 0xF9; zero the FusionAnvil /
+    // Hyper / Potential / Soul tail before packet fill so local copies / failed
+    // partial decodes cannot leak heap into tooltips.
+    __try {
+        memset(reinterpret_cast<char*>(pEquip) + kOffset_nAnvilItemID, 0,
+               kNewItemSlotEquipSize - kOffset_nAnvilItemID);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return ret; }
+
     uint32_t nAnvilItemID = 0;
     uint32_t nSkillID = 0;
     uint32_t nSkillLevel = 0;
     uint32_t expireLo = 0;
     uint32_t expireHi = 0;
+    unsigned char nEnhance = 0;
+    unsigned char nPotGrade = 0;
+    uint32_t nPot1 = 0;
+    uint32_t nPot2 = 0;
+    uint32_t nPot3 = 0;
+    unsigned char nBonusGrade = 0;
+    uint32_t nBonus1 = 0;
+    uint32_t nBonus2 = 0;
+    uint32_t nBonus3 = 0;
+    uint32_t nSoulId = 0;
+    uint32_t nSoulOption = 0;
+    uint32_t nSocket1 = 0;
+    uint32_t nSocket2 = 0;
+    uint32_t nSocket3 = 0;
     __try {
         nAnvilItemID = CInPacket__Decode4(pPacket);
         nSkillID = CInPacket__Decode4(pPacket);
         nSkillLevel = CInPacket__Decode4(pPacket);
         expireLo = CInPacket__Decode4(pPacket);
         expireHi = CInPacket__Decode4(pPacket);
+        // Phase2 Hyper/Potential — after spirit expire (PacketCreator tail)
+        nEnhance = CInPacket__Decode1(pPacket);
+        nPotGrade = CInPacket__Decode1(pPacket);
+        (void)CInPacket__Decode2(pPacket); // reserved
+        nPot1 = CInPacket__Decode4(pPacket);
+        nPot2 = CInPacket__Decode4(pPacket);
+        nPot3 = CInPacket__Decode4(pPacket);
+        // Phase3 附加潜能
+        nBonusGrade = CInPacket__Decode1(pPacket);
+        (void)CInPacket__Decode1(pPacket); // pad
+        (void)CInPacket__Decode2(pPacket); // reserved
+        nBonus1 = CInPacket__Decode4(pPacket);
+        nBonus2 = CInPacket__Decode4(pPacket);
+        nBonus3 = CInPacket__Decode4(pPacket);
+        // Phase4 灵魂 + 星岩 + Phase10 socket3
+        nSoulId = CInPacket__Decode4(pPacket);
+        nSoulOption = CInPacket__Decode4(pPacket);
+        nSocket1 = CInPacket__Decode4(pPacket);
+        nSocket2 = CInPacket__Decode4(pPacket);
+        nSocket3 = CInPacket__Decode4(pPacket);
     } __except (EXCEPTION_EXECUTE_HANDLER) { return ret; }
     __try {
         pEquip->nAnvilItemID = static_cast<int32_t>(nAnvilItemID);
@@ -544,6 +634,20 @@ int __cdecl GW_ItemSlotBase__Decode_hook(void* pOutZRef, CInPacket* pPacket) {
         pEquip->nEquipSkillLevel = static_cast<int32_t>(nSkillLevel);
         pEquip->tEquipSkillExpire =
             (static_cast<uint64_t>(expireHi) << 32) | expireLo;
+        pEquip->nEnhance = nEnhance;
+        pEquip->nPotentialGrade = nPotGrade;
+        pEquip->nPotential1 = static_cast<int32_t>(nPot1);
+        pEquip->nPotential2 = static_cast<int32_t>(nPot2);
+        pEquip->nPotential3 = static_cast<int32_t>(nPot3);
+        pEquip->nBonusPotentialGrade = nBonusGrade;
+        pEquip->nBonusPotential1 = static_cast<int32_t>(nBonus1);
+        pEquip->nBonusPotential2 = static_cast<int32_t>(nBonus2);
+        pEquip->nBonusPotential3 = static_cast<int32_t>(nBonus3);
+        pEquip->nSoulId = static_cast<int32_t>(nSoulId);
+        pEquip->nSoulOption = static_cast<int32_t>(nSoulOption);
+        pEquip->nSocket1 = static_cast<int32_t>(nSocket1);
+        pEquip->nSocket2 = static_cast<int32_t>(nSocket2);
+        pEquip->nSocket3 = static_cast<int32_t>(nSocket3);
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return ret;
 }
@@ -660,6 +764,11 @@ int __fastcall CDraggableItem__OnDropped_hook(
     CDraggableItem* pThis, void* /*edx*/,
     IUIMsgHandler* pFrom, IUIMsgHandler* pTo, int rx, int ry)
 {
+    // Phase11: Cash cube → 背包装备栏 (same UseCashItem + slot as drag-use intent)
+    if (pThis && PotentialScroll_TryHandleCashCubeDrop(
+            pThis->m_nItemTI, pThis->m_nSlotPosition, pFrom, pTo, rx, ry)) {
+        return 1;
+    }
     if (pTo && pTo->IsKindOf(&CUIFusionAnvil::ms_RTTI)) {
         // `pTo` arrives as the IUIMsgHandler sub-object pointer (offset +4
         // inside the real CUIFusionAnvil layout). static_cast tells the
