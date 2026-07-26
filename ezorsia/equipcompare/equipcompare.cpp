@@ -7,7 +7,10 @@
 #include "compat/wvs/tooltip.h"
 #include "compat/wvs/util.h"
 #include "compat/ztl/ztl.h"
+#include "../setitem/SetItemApi.h"
+#include "../setitem/equiptooltip_style.h"
 
+#include <algorithm>
 #include <cstring>
 
 // Side-by-side equipped compare + delta rendering on the hovered tip.
@@ -434,7 +437,6 @@ static void EmitCompareValueLine(
         sBase.Format(" %d", hoverVal);
     }
 
-    // No delta: vanilla white label + white value.
     if (delta == 0) {
         tip->AddInfoEx(14, kFontSubtypeWhite, sProperty, sBase, 1, 1001);
         return;
@@ -448,8 +450,6 @@ static void EmitCompareValueLine(
         sDelta.Format(" (%d)", delta);
     }
 
-    // AddInfoEx: type font -> sContext (left), subtype font -> sSubContext (right).
-    // Keep original attr white: put label+base in left (font 14); only delta is colored.
     ZXString<char> sLeft;
     sLeft.Format("%s%s",
                  static_cast<const char*>(sProperty),
@@ -491,6 +491,62 @@ static void AppendEquippedOnlyStats(CUIToolTip* tip, GW_ItemSlotEquip* hover, GW
     }
 }
 
+static void ComputeCompareDockLeft(
+    CUIToolTip* sourceTooltip,
+    int sourceLeft,
+    int sourceTop,
+    int& outLeft,
+    int& outTop) {
+    outLeft = sourceLeft;
+    outTop = sourceTop;
+    if (sourceTooltip && sourceTooltip->m_nWidth > 0) {
+        outLeft = sourceLeft + sourceTooltip->m_nWidth + kCompareTooltipGap;
+    }
+    int setX = 0;
+    int setY = 0;
+    int setW = 0;
+    int setH = 0;
+    if (SetItem::TryGetActiveSetTooltipRect(setX, setY, setW, setH) && setW > 0) {
+        outLeft = setX + setW + kCompareTooltipGap;
+        outTop = setY;
+    }
+    const int screenW = get_screen_width();
+    int cmpW = 0;
+    if (g_compareTooltipInit) {
+        cmpW = CompareToolTip()->m_nWidth;
+    }
+    if (screenW > 0 && cmpW > 0 && outLeft + cmpW > screenW) {
+        outLeft = (std::max)(0, screenW - cmpW);
+    }
+}
+
+static void RelayoutActiveCompareTipImpl() {
+    if (!g_compareTooltipActive || !g_compareTooltipInit || !g_activeSourceTooltip) {
+        return;
+    }
+    CUIToolTip* cmp = CompareToolTip();
+    if (!cmp || !cmp->m_pLayer) {
+        return;
+    }
+    int sourceLeft = 0;
+    int sourceTop = 0;
+    __try {
+        if (g_activeSourceTooltip->m_pLayer) {
+            sourceLeft = g_activeSourceTooltip->m_pLayer->rx;
+            sourceTop = g_activeSourceTooltip->m_pLayer->ry;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    int left = 0;
+    int top = 0;
+    ComputeCompareDockLeft(g_activeSourceTooltip, sourceLeft, sourceTop, left, top);
+    __try {
+        cmp->m_pLayer->RelMove(left, top);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 static void ShowEquippedCompareToolTip(
     CUIToolTip* sourceTooltip,
     int sourceLeft,
@@ -518,10 +574,8 @@ static void ShowEquippedCompareToolTip(
 
     const int equippedItemId = DecodeItemId(equippedItem);
     int left = sourceLeft;
-    const int top = sourceTop;
-    if (sourceTooltip->m_nWidth > 0) {
-        left = sourceLeft + sourceTooltip->m_nWidth + kCompareTooltipGap;
-    }
+    int top = sourceTop;
+    ComputeCompareDockLeft(sourceTooltip, sourceLeft, sourceTop, left, top);
 
     if (g_compareTooltipActive &&
         g_activeSourceItemId == itemId &&
@@ -562,6 +616,9 @@ static void ShowEquippedCompareToolTip(
     }
     g_showingCompareTooltip = false;
     reinterpret_cast<void(__thiscall*)(void*)>(kAddrItemToolTipParamDtor)(paramBuf);
+
+    // Set tip may appear after this call — SetItem will Relayout; also try now.
+    RelayoutActiveCompareTipImpl();
 }
 
 void __fastcall Hook_PrintValue(
@@ -579,11 +636,9 @@ void __fastcall Hook_PrintValue(
         const int idx = MatchStatByLabel(prop);
         if (idx >= 0) {
             const int eqVal = ReadStat(g_deltaEquipped, static_cast<EquipStat>(idx));
-            // Match vanilla: hide attrs neither side has (both <= 0).
             if (!bShowAlways && nValue <= 0 && eqVal <= 0) {
                 return;
             }
-            // Hover is 0 but equipped has it — AppendEquippedOnlyStats adds the line.
             if (!bShowAlways && nValue <= 0) {
                 return;
             }
@@ -640,6 +695,10 @@ int __fastcall Hook_ShowItemToolTip(
     g_deltaHover = reinterpret_cast<GW_ItemSlotEquip*>(item);
     g_deltaEquipped = equipped;
 
+    if (item && DecodeItemId(item) / 1000000 == 1) {
+        EquipTooltipStyle_NoteHoverPos(tooltip, nLeft, nTop);
+    }
+
     g_inPrimaryToolTipShow = true;
     const int result =
         Original_ShowItemToolTip(tooltip, nLeft, nTop, item, param, a6, a7, a8, a9);
@@ -679,3 +738,12 @@ void AttachEquipCompareMod() {
     // Chain after FusionAnvil's SetToolTip_Equip_Basic (transmog line stays).
     ATTACH_HOOK(Original_SetToolTipEquipBasic, Hook_SetToolTipEquipBasic);
 }
+
+namespace EquipCompare {
+void RelayoutActiveCompareTip() {
+    RelayoutActiveCompareTipImpl();
+}
+bool IsDeltaPrintValueActive() {
+    return g_inEquipBasicCompare;
+}
+} // namespace EquipCompare

@@ -13,4 +13,6 @@ void EnsureHooks() {
     g_hooksAttached = true;
     AttachEquipCompareMod();
 }
+
+// RelayoutActiveCompareTip is defined in equipcompare.cpp
 } // namespace

@@ -3,6 +3,7 @@
 #include "SetItemData.h"
 #include "equiptooltip_style.h"
 #include "../fusionanvil/FusionAnvilApi.h"
+#include "../equipcompare/EquipCompareApi.h"
 #include "compat/ClientAddresses.h"
 #include "compat/hook.h"
 #include "compat/wvs/secure.h"
@@ -28,10 +29,23 @@ struct LocalSetBonus {
     short luk = 0;
     short pad = 0;
     short mad = 0;
+    short pdd = 0;
+    short mdd = 0;
+    short acc = 0;
+    short eva = 0;
     short mhp = 0;
     short mmp = 0;
     short speed = 0;
     short jump = 0;
+    short mhpR = 0;
+    short mmpR = 0;
+    // combat % (from Effect keys or Option fallback)
+    short damR = 0;
+    short bdR = 0;
+    short nbdR = 0;
+    short fdR = 0;
+    short ignorePdr = 0;
+    short ignoreMdr = 0;
 };
 
 struct LocalSetDef {
@@ -51,11 +65,11 @@ static constexpr uintptr_t kAddr_GetItemName = 0x005CF63E;
 
 // Draw on canvas with custom IWzFont colors (SetToolTip_String2 does not parse rich-text).
 enum class SetTipStyle {
-    Title,         // set name — bold green, centered
-    ActiveHeader,  // "N件效果（已激活）" — bold green
+    Title,         // set name ? bold lime, centered
+    ActiveHeader,  // "N????" ? same lime as title
     White,         // equipped piece / active stat
     Grey,          // inactive piece / stat / unmet tier
-    Orange,        // hover piece / final damage emphasis
+    Orange,        // hover piece / attack labels
 };
 
 struct SetTipSegment {
@@ -63,24 +77,40 @@ struct SetTipSegment {
     SetTipStyle style = SetTipStyle::White;
 };
 
+enum class SetTipLayout {
+    Left,           // default flow left (title headers / N????)
+    Center,         // whole line horizontally centered (set name)
+    IndentLeft,     // left + 1 CJK char (tier attribute lines)
+    ItemSlotRight,  // name left, slot label right-aligned
+};
+
 struct SetTipLine {
     std::vector<SetTipSegment> segments;
     bool separatorBefore = false;
-    bool centered = false;
     bool tierGapAfter = false;
+    SetTipLayout layout = SetTipLayout::Left;
 };
 
+// When true, equal-value pairs merge into one line (???/??, ????/????, ????).
+// Set false to always list each attribute separately.
+static constexpr bool kMergeEqualSetStats = true;
+
 static constexpr int kSetTipPadX = 8;
-static constexpr int kSetTipPadY = 10;
-static constexpr int kSetTipLineH = 18;
-static constexpr int kSetTipTitleExtraH = 4;
+static constexpr int kSetTipPadY = 6;          // was 10
+static constexpr int kSetTipLineH = 16;         // was 14 ? slight gap between attribute rows
+static constexpr int kSetTipTitleExtraH = 2;    // was 4
+static constexpr int kSetTipSepGapY = 3;        // was +6 after separator
+static constexpr int kSetTipTierGapY = 3;       // was +8 after tierGapAfter
+static constexpr int kSetTipIndentChars = 1;    // attribute lines: indent 1 CJK
 static constexpr unsigned int kSetTipSepColor = 0x80FFFFFF;
+// ASCII " : " (space + ':' + space) ? never fullwidth U+FF1A.
+static constexpr char kSetTipColonSep[] = "\x20\x3A\x20";
 static constexpr size_t kSetTooltipBufSize = 0x600;
-static constexpr unsigned long kColTitleGreen = 0xFF00CC00;
-static constexpr unsigned long kColActiveGreen = 0xFF33DD33;
+// Match reference tip: lime / yellow-green for title + "N????".
+static constexpr unsigned long kColTitleLime = 0xFFCCFF00;
 static constexpr unsigned long kColWhite = 0xFFFFFFFF;
 static constexpr unsigned long kColGrey = 0xFFBBBBBB;
-static constexpr unsigned long kColOrange = 0xFFFF9900;
+static constexpr unsigned long kColOrange = 0xFFFFCC00; // hover / slot gold-yellow
 
 typedef void(__cdecl* GetBasicFont_t)(IWzFontPtr*, int);
 typedef HRESULT(__thiscall* WzFontCreate_t)(
@@ -128,8 +158,9 @@ static void EnsureSetTipFonts(CUIToolTip* /*fontTip*/) {
     if (g_setTipFonts.ready) {
         return;
     }
-    CreateSetFont(g_setTipFonts.title, kColTitleGreen, 12, true);
-    CreateSetFont(g_setTipFonts.activeHeader, kColActiveGreen, 12, true);
+    // Title and tier headers share the same lime color (reference tip).
+    CreateSetFont(g_setTipFonts.title, kColTitleLime, 12, true);
+    CreateSetFont(g_setTipFonts.activeHeader, kColTitleLime, 12, true);
     CreateSetFont(g_setTipFonts.white, kColWhite, 12, false);
     CreateSetFont(g_setTipFonts.grey, kColGrey, 12, false);
     CreateSetFont(g_setTipFonts.orange, kColOrange, 12, false);
@@ -174,10 +205,36 @@ static int MeasureGbkTextWidth(const char* text) {
     return w;
 }
 
+// Prefer real IWzFont metrics ? byte estimates mis-size ASCII (HP/MP) vs CJK and
+// make label right-edges look like the colon axis jumped.
+static int MeasureFontTextWidth(IWzFontPtr font, const char* gbk) {
+    if (!gbk || !gbk[0]) {
+        return 0;
+    }
+    if (font) {
+        try {
+            return static_cast<int>(font->CalcTextWidth(GbkToBstr(gbk), Ztl_variant_t()));
+        } catch (...) {
+        }
+    }
+    return MeasureGbkTextWidth(gbk);
+}
+
 static int MeasureLineWidth(const SetTipLine& line) {
+    if (line.layout == SetTipLayout::ItemSlotRight && line.segments.size() >= 2) {
+        IWzFontPtr nameFont = GetSetTipFont(line.segments[0].style);
+        IWzFontPtr slotFont = GetSetTipFont(line.segments[1].style);
+        const int nameW = MeasureFontTextWidth(nameFont, line.segments[0].text.c_str());
+        const int slotW = MeasureFontTextWidth(slotFont, line.segments[1].text.c_str());
+        return nameW + 8 + slotW;
+    }
     int w = 0;
+    if (line.layout == SetTipLayout::IndentLeft) {
+        w += MeasureFontTextWidth(GetSetTipFont(SetTipStyle::White), "\xA1\xA1")
+                * kSetTipIndentChars;
+    }
     for (const SetTipSegment& seg : line.segments) {
-        w += MeasureGbkTextWidth(seg.text.c_str());
+        w += MeasureFontTextWidth(GetSetTipFont(seg.style), seg.text.c_str());
     }
     return w;
 }
@@ -193,15 +250,37 @@ static void DrawSetTipText(IWzCanvasPtr canvas, int x, int y, const char* text, 
 }
 
 static void DrawSetTipLine(IWzCanvasPtr canvas, int width, int y, const SetTipLine& line) {
+    if (line.layout == SetTipLayout::ItemSlotRight && !line.segments.empty()) {
+        const SetTipSegment& name = line.segments[0];
+        IWzFontPtr nameFont = GetSetTipFont(name.style);
+        DrawSetTipText(canvas, kSetTipPadX, y, name.text.c_str(), nameFont);
+        if (line.segments.size() >= 2) {
+            const SetTipSegment& slot = line.segments[1];
+            IWzFontPtr slotFont = GetSetTipFont(slot.style);
+            const int slotW = MeasureFontTextWidth(slotFont, slot.text.c_str());
+            const int slotX = width - kSetTipPadX - slotW;
+            DrawSetTipText(canvas, slotX, y, slot.text.c_str(), slotFont);
+        }
+        return;
+    }
+
     const int lineW = MeasureLineWidth(line);
-    int x = line.centered ? (std::max)(kSetTipPadX, (width - lineW) / 2) : kSetTipPadX;
+    int x = kSetTipPadX;
+    if (line.layout == SetTipLayout::Center) {
+        x = (std::max)(kSetTipPadX, (width - lineW) / 2);
+    } else if (line.layout == SetTipLayout::IndentLeft) {
+        // One CJK character indent for attribute lines.
+        const int indent = MeasureFontTextWidth(GetSetTipFont(SetTipStyle::White), "\xA1\xA1")
+                * kSetTipIndentChars;
+        x = kSetTipPadX + indent;
+    }
     for (const SetTipSegment& seg : line.segments) {
         if (seg.text.empty()) {
             continue;
         }
         IWzFontPtr font = GetSetTipFont(seg.style);
         DrawSetTipText(canvas, x, y, seg.text.c_str(), font);
-        x += MeasureGbkTextWidth(seg.text.c_str());
+        x += MeasureFontTextWidth(font, seg.text.c_str());
     }
 }
 
@@ -253,7 +332,7 @@ static bool IsEquipItemId(int itemId) {
     return itemId >= 1000000 && itemId < 2000000;
 }
 
-// TSecTypeGetData throws ZException on checksum failure — must use C++ try/catch.
+// TSecTypeGetData throws ZException on checksum failure ? must use C++ try/catch.
 static int DecodeItemIdAt(const void* base, int offset) {
     if (!base) {
         return 0;
@@ -340,7 +419,7 @@ static const char* GetEquipSlotLabel(int itemId) {
     case 104:
         return "\xC9\xCF\xD2\xC2";
     case 105:
-        return "\xC1\xAC\xD2\xC2\xB7\xFE";
+        return "\xCC\xD7\xB7\xFE"; // 套服
     case 106:
         return "\xBF\xE3/\xC8\xB9";
     case 107:
@@ -351,11 +430,51 @@ static const char* GetEquipSlotLabel(int itemId) {
         return "\xB6\xB7\xC5\xF0";
     case 110:
         return "\xB6\xDC\xC5\xC6";
+    case 111:
+        return "\xBD\xE4\xD6\xB8"; // ??
+    case 112:
+        return "\xCF\xEE\xC1\xB3"; // ??
+    case 113:
+        return "\xD1\xFC\xB4\xF8"; // ??
+    case 114:
+        return "\xD1\xAF\xD5\xC2"; // ??
+    case 115:
+        return "\xBC\xE7\xCA\xCE"; // ?? (not ?? BCE1)
     default:
         if (itemId >= 1300000 && itemId < 1500000) {
             return "\xCE\xE4\xC6\xF7";
         }
+        if (itemId / 10000 == 170) {
+            return "\xCE\xE4\xC6\xF7";
+        }
         return "";
+    }
+}
+
+// Head-to-toe then accessories; weapons last. Same key ? stable_sort keeps order.
+static int GetEquipSortKey(int itemId) {
+    const int cat = itemId / 10000;
+    if ((cat >= 130 && cat <= 149) || cat == 170) {
+        return 1000 + cat;
+    }
+    switch (cat) {
+    case 100: return 10;  // hat
+    case 101: return 20;  // face
+    case 102: return 30;  // eye
+    case 103: return 40;  // ear
+    case 104: return 50;  // top
+    case 105: return 55;  // overall
+    case 106: return 60;  // pants
+    case 107: return 70;  // shoes
+    case 108: return 80;  // gloves
+    case 109: return 85;  // shield
+    case 110: return 90;  // cape
+    case 113: return 95;  // belt
+    case 115: return 96;  // shoulder
+    case 112: return 97;  // pendant
+    case 111: return 98;  // ring
+    case 114: return 99;  // medal
+    default: return 200 + cat;
     }
 }
 
@@ -375,31 +494,99 @@ static const LocalSetDef* GetSetDef(int setId);
 static bool TierHasStats(const LocalSetBonus& bonus);
 static std::string GetLocalSetName(int setId);
 
-static void AppendTierStatLine(std::vector<SetTipLine>& lines, SetTipStyle style,
-        const char* label, int value, const char* suffix = "") {
+static void AppendTierStatLine(std::vector<SetTipLine>& lines, SetTipStyle labelStyle,
+        SetTipStyle valueStyle, const char* label, int value, const char* suffix = "") {
     if (value == 0) {
         return;
     }
-    char buf[96];
-    _snprintf_s(buf, _countof(buf), _TRUNCATE, "%s : +%d%s", label, value, suffix);
+    char left[80];
+    char right[32];
+    _snprintf_s(left, _countof(left), _TRUNCATE, "%s%s", label, kSetTipColonSep);
+    _snprintf_s(right, _countof(right), _TRUNCATE, "+%d%s", value, suffix);
     SetTipLine line;
-    line.segments.push_back({buf, style});
+    line.layout = SetTipLayout::IndentLeft; // 1 CJK indent, left-aligned (not colon-center)
+    line.segments.push_back({left, labelStyle});
+    line.segments.push_back({right, valueStyle});
     lines.push_back(std::move(line));
 }
 
 static void AppendTierStats(std::vector<SetTipLine>& lines, const LocalSetBonus& bonus,
         bool active) {
-    const SetTipStyle statStyle = active ? SetTipStyle::White : SetTipStyle::Grey;
-    AppendTierStatLine(lines, statStyle, "\xC1\xA6\xC1\xBF", bonus.str);
-    AppendTierStatLine(lines, statStyle, "\xC3\xF4\xBD\xDD", bonus.dex);
-    AppendTierStatLine(lines, statStyle, "\xD6\xC7\xC1\xA6", bonus.int_);
-    AppendTierStatLine(lines, statStyle, "\xD4\xCB\xC6\xF8", bonus.luk);
-    AppendTierStatLine(lines, statStyle, "\xB9\xA5\xBB\xF7\xC1\xA6", bonus.pad);
-    AppendTierStatLine(lines, statStyle, "\xC4\xA7\xB7\xA8\xB9\xA5\xBB\xF7\xC1\xA6", bonus.mad);
-    AppendTierStatLine(lines, statStyle, "HP", bonus.mhp);
-    AppendTierStatLine(lines, statStyle, "MP", bonus.mmp);
-    AppendTierStatLine(lines, statStyle, "\xD2\xC6\xB6\xAF\xCB\xD9\xB6\xC8", bonus.speed);
-    AppendTierStatLine(lines, statStyle, "\xCC\xF8\xD4\xBE\xC1\xA6", bonus.jump);
+    const SetTipStyle valueStyle = active ? SetTipStyle::White : SetTipStyle::Grey;
+    const SetTipStyle nameStyle = active ? SetTipStyle::White : SetTipStyle::Grey;
+    // ??? / ?? ? orange name when active
+    const SetTipStyle atkStyle = active ? SetTipStyle::Orange : SetTipStyle::Grey;
+
+    // ???equal ? ?????????
+    if (kMergeEqualSetStats && bonus.str != 0 && bonus.str == bonus.dex && bonus.str == bonus.int_
+            && bonus.str == bonus.luk) {
+        AppendTierStatLine(lines, nameStyle, valueStyle, "\xCB\xF9\xD3\xD0\xCA\xF4\xD0\xD4",
+                bonus.str);
+    } else {
+        AppendTierStatLine(lines, nameStyle, valueStyle, "\xC1\xA6\xC1\xBF", bonus.str);
+        AppendTierStatLine(lines, nameStyle, valueStyle, "\xC3\xF4\xBD\xDD", bonus.dex);
+        AppendTierStatLine(lines, nameStyle, valueStyle, "\xD6\xC7\xC1\xA6", bonus.int_);
+        AppendTierStatLine(lines, nameStyle, valueStyle, "\xD4\xCB\xC6\xF8", bonus.luk);
+    }
+
+    // ???/?? merge when equal
+    if (kMergeEqualSetStats && bonus.pad != 0 && bonus.pad == bonus.mad) {
+        AppendTierStatLine(lines, atkStyle, valueStyle,
+                "\xB9\xA5\xBB\xF7\xC1\xA6/\xC4\xA7\xC1\xA6", bonus.pad);
+    } else {
+        AppendTierStatLine(lines, atkStyle, valueStyle, "\xB9\xA5\xBB\xF7\xC1\xA6", bonus.pad);
+        AppendTierStatLine(lines, atkStyle, valueStyle, "\xC4\xA7\xC1\xA6", bonus.mad); // ??
+    }
+
+    // ????/???? merge when equal
+    if (kMergeEqualSetStats && bonus.mhp != 0 && bonus.mhp == bonus.mmp) {
+        AppendTierStatLine(lines, nameStyle, valueStyle,
+                "\xD7\xEE\xB4\xF3\xD1\xAA\xC1\xBF/\xD7\xEE\xB4\xF3\xC4\xA7\xC1\xBF",
+                bonus.mhp);
+    } else {
+        AppendTierStatLine(lines, nameStyle, valueStyle, "\xD7\xEE\xB4\xF3\xD1\xAA\xC1\xBF",
+                bonus.mhp);
+        AppendTierStatLine(lines, nameStyle, valueStyle, "\xD7\xEE\xB4\xF3\xC4\xA7\xC1\xBF",
+                bonus.mmp);
+    }
+
+    AppendTierStatLine(lines, nameStyle, valueStyle, "\xB7\xC0\xD3\xF9\xC1\xA6", bonus.pdd); // ???
+    AppendTierStatLine(lines, nameStyle, valueStyle, "\xC4\xA7\xB7\xC0", bonus.mdd);       // ??
+    AppendTierStatLine(lines, nameStyle, valueStyle, "\xC3\xFC\xD6\xD0\xC2\xCA", bonus.acc); // ???
+    AppendTierStatLine(lines, nameStyle, valueStyle, "\xBB\xD8\xB1\xDC\xC2\xCA", bonus.eva); // ???
+
+    AppendTierStatLine(lines, nameStyle, valueStyle, "\xD2\xC6\xB6\xAF\xCB\xD9\xB6\xC8",
+            bonus.speed);
+    AppendTierStatLine(lines, nameStyle, valueStyle, "\xCC\xF8\xD4\xBE\xC1\xA6", bonus.jump);
+
+    // % HP/MP
+    AppendTierStatLine(lines, nameStyle, valueStyle, "\xD7\xEE\xB4\xF3\xD1\xAA\xC1\xBF",
+            bonus.mhpR, "%");
+    AppendTierStatLine(lines, nameStyle, valueStyle, "\xD7\xEE\xB4\xF3\xC4\xA7\xC1\xBF",
+            bonus.mmpR, "%");
+
+    // combat % ? GBK labels matching reference tip style
+    AppendTierStatLine(lines, atkStyle, valueStyle,
+            "\xC9\xCB\xBA\xA6", bonus.damR, "%"); // ??
+    // bdR: boss damage % (GBK: 攻击首领怪物时的伤害 — 怪=B9D6 not 关=B9D8)
+    AppendTierStatLine(lines, atkStyle, valueStyle,
+            "\xB9\xA5\xBB\xF7\xCA\xD7\xC1\xEC\xB9\xD6\xCE\xEF\xCA\xB1\xB5\xC4\xC9\xCB\xBA\xA6",
+            bonus.bdR, "%");
+    // nbdR: normal-mob damage %
+    AppendTierStatLine(lines, atkStyle, valueStyle,
+            "\xB6\xD4\xC6\xD5\xCD\xA8\xB9\xD6\xCE\xEF\xB5\xC4\xC9\xCB\xBA\xA6",
+            bonus.nbdR, "%");
+    // ignorePdr
+    AppendTierStatLine(lines, atkStyle, valueStyle,
+            "\xCE\xDE\xCA\xD3\xB9\xD6\xCE\xEF\xB7\xC0\xD3\xF9\xC2\xCA",
+            bonus.ignorePdr, "%");
+    // ignoreMdr
+    AppendTierStatLine(lines, atkStyle, valueStyle,
+            "\xCE\xDE\xCA\xD3\xB9\xD6\xCE\xEF\xC4\xA7\xB7\xA8\xB7\xC0\xD3\xF9\xC2\xCA",
+            bonus.ignoreMdr, "%");
+    // ????
+    AppendTierStatLine(lines, atkStyle, valueStyle,
+            "\xD7\xEE\xD6\xD5\xC9\xCB\xBA\xA6", bonus.fdR, "%");
 }
 
 static std::vector<SetTipLine> BuildSetTooltipLayout(int setId, int hoverItemId) {
@@ -419,31 +606,42 @@ static std::vector<SetTipLine> BuildSetTooltipLayout(int setId, int hoverItemId)
 
     {
         SetTipLine title;
-        title.centered = true;
+        title.layout = SetTipLayout::Center;
         title.segments.push_back({def->name, SetTipStyle::Title});
         lines.push_back(std::move(title));
     }
 
-    for (int id : def->itemIds) {
+    // Blank row above the equipment name list.
+    lines.push_back(SetTipLine{});
+
+    std::vector<int> sortedIds = def->itemIds;
+    std::stable_sort(sortedIds.begin(), sortedIds.end(),
+            [](int a, int b) { return GetEquipSortKey(a) < GetEquipSortKey(b); });
+
+    for (int id : sortedIds) {
         const std::string name = GetCachedItemDisplayName(id);
         const char* slot = GetEquipSlotLabel(id);
         const bool isEquipped = equipped.count(id) > 0;
         const bool isHover = id == hoverItemId;
-        const SetTipStyle nameStyle =
-                isHover ? SetTipStyle::Orange : (isEquipped ? SetTipStyle::White : SetTipStyle::Grey);
-        const SetTipStyle slotStyle =
-                isHover ? SetTipStyle::Grey : (isEquipped ? SetTipStyle::White : SetTipStyle::Grey);
+        // Reference tip: hover = gold name+slot; equipped = white; unequipped = grey.
+        const SetTipStyle rowStyle = isHover
+                ? SetTipStyle::Orange
+                : (isEquipped ? SetTipStyle::White : SetTipStyle::Grey);
 
         SetTipLine itemLine;
-        itemLine.segments.push_back({name.empty() ? "?" : name, nameStyle});
+        itemLine.layout = SetTipLayout::ItemSlotRight;
+        itemLine.segments.push_back({name.empty() ? "?" : name, rowStyle});
         if (slot && slot[0] != '\0') {
-            std::string slotText = " (";
+            std::string slotText = "(";
             slotText += slot;
             slotText += ")";
-            itemLine.segments.push_back({slotText, slotStyle});
+            itemLine.segments.push_back({slotText, rowStyle});
         }
         lines.push_back(std::move(itemLine));
     }
+
+    // Blank row below the equipment name list (before tier effects).
+    lines.push_back(SetTipLine{});
 
     if (!def->tiers.empty()) {
         for (const auto& tierEntry : def->tiers) {
@@ -453,16 +651,13 @@ static std::vector<SetTipLine> BuildSetTooltipLayout(int setId, int hoverItemId)
                 continue;
             }
             const bool active = equippedCount >= req;
-            char header[64];
-            if (active) {
-                _snprintf_s(header, _countof(header), _TRUNCATE,
-                        "%d\xBC\xFE\xD0\xA7\xB9\xFB (\xD2\xD1\xBC\xA4\xBB\xEE)", req);
-            } else {
-                _snprintf_s(header, _countof(header), _TRUNCATE,
-                        "%d\xBC\xFE\xD0\xA7\xB9\xFB (%d/%d)", req, equippedCount, req);
-            }
+            // "N????" ? no indent; same lime as title when active.
+            char header[48];
+            _snprintf_s(header, _countof(header), _TRUNCATE,
+                    "%d\xCC\xD7\xD7\xB0\xD0\xA7\xB9\xFB", req);
             SetTipLine headerLine;
             headerLine.separatorBefore = true;
+            headerLine.layout = SetTipLayout::Left;
             headerLine.segments.push_back(
                     {header, active ? SetTipStyle::ActiveHeader : SetTipStyle::Grey});
             lines.push_back(std::move(headerLine));
@@ -513,7 +708,7 @@ static std::vector<SetTipLine> BuildServerFallbackLayout(int setId) {
         if (!localName.empty()) {
             SetTipLine line;
             line.segments.push_back({localName, SetTipStyle::Title});
-            line.centered = true;
+            line.layout = SetTipLayout::Center;
             lines.push_back(std::move(line));
         }
     }
@@ -535,7 +730,83 @@ static int EstimateLayoutWidth(const std::vector<SetTipLine>& lines) {
     for (const SetTipLine& line : lines) {
         maxLine = (std::max)(maxLine, MeasureLineWidth(line));
     }
+    // Fallback only when hover tip width is unavailable.
     return (std::max)(180, (std::min)(320, maxLine + 2 * kSetTipPadX));
+}
+
+static int ResolveSetTipWidth(CUIToolTip* mainTip, const std::vector<SetTipLine>& lines) {
+    int mainW = 0;
+    if (mainTip) {
+        __try {
+            mainW = mainTip->m_nWidth;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            mainW = 0;
+        }
+    }
+    if (mainW > 40) {
+        return mainW;
+    }
+    return EstimateLayoutWidth(lines);
+}
+
+// Same Y walk as RenderSetTooltipCanvas + bottom pad ? exact content height.
+static int ComputeSetTipContentHeight(const std::vector<SetTipLine>& lines) {
+    int y = kSetTipPadY;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const SetTipLine& line = lines[i];
+        if (line.separatorBefore) {
+            y += kSetTipSepGapY;
+        }
+        y += kSetTipLineH;
+        if (i == 0 && line.layout == SetTipLayout::Center) {
+            y += kSetTipTitleExtraH;
+        }
+        if (line.tierGapAfter) {
+            y += kSetTipTierGapY;
+        }
+    }
+    return y + kSetTipPadY;
+}
+
+static constexpr int kSetTipHeightSlack = 3;
+
+// Calibrate String2 newline probe to shrink-fit targetH (same approach as FusionAnvil marker tip).
+static int CreateSetTipLayerAtHeight(CUIToolTip* tip, int tipX, int tipY, int tipW, int targetH) {
+    if (!tip || tipW <= 0 || targetH <= 0) {
+        return 0;
+    }
+
+    ZXString<char> zTitle("");
+    auto setLines = [&](int n) -> int {
+        std::string s((std::max)(0, n), '\n');
+        ZXString<char> zDesc(s.c_str());
+        tip->ClearToolTip();
+        tip->SetToolTip_String2(tipX, tipY, zTitle, zDesc, 0, 0, 0, tipW, 1, 0);
+        return tip->m_nHeight;
+    };
+
+    const int h2 = setLines(2);
+    const int h12 = setLines(12);
+    const int perLine = (h12 > h2) ? (std::max)(1, (h12 - h2) / 10) : 14;
+    const int base = h2 - 2 * perLine;
+    int need = (std::max)(1, (targetH - base + perLine - 1) / perLine);
+    setLines(need);
+
+    for (int i = 0; i < 6 && tip->m_nHeight < targetH; ++i) {
+        setLines(++need);
+    }
+    for (int i = 0; i < 8 && need > 1 && tip->m_nHeight > targetH + kSetTipHeightSlack; ++i) {
+        const int prevH = tip->m_nHeight;
+        setLines(--need);
+        if (tip->m_nHeight < targetH) {
+            setLines(++need);
+            break;
+        }
+        if (tip->m_nHeight >= prevH) {
+            break;
+        }
+    }
+    return tip->m_nHeight > 0 ? tip->m_nHeight : targetH;
 }
 
 static void RenderSetTooltipCanvas(IWzCanvasPtr canvas, const std::vector<SetTipLine>& lines,
@@ -547,16 +818,16 @@ static void RenderSetTooltipCanvas(IWzCanvasPtr canvas, const std::vector<SetTip
     for (size_t i = 0; i < lines.size(); ++i) {
         const SetTipLine& line = lines[i];
         if (line.separatorBefore) {
-            DrawSetTipSeparator(canvas, width, y - 4);
-            y += 6;
+            DrawSetTipSeparator(canvas, width, y - 2);
+            y += kSetTipSepGapY;
         }
         DrawSetTipLine(canvas, width, y, line);
         y += kSetTipLineH;
-        if (i == 0 && line.centered) {
+        if (i == 0 && line.layout == SetTipLayout::Center) {
             y += kSetTipTitleExtraH;
         }
         if (line.tierGapAfter) {
-            y += 8;
+            y += kSetTipTierGapY;
         }
     }
 }
@@ -590,6 +861,62 @@ static int ReadWzInt(IWzPropertyPtr node, const wchar_t* key) {
     }
 }
 
+static void ApplyKnownSetOptionFallback(LocalSetBonus& bonus, int optionId) {
+    // ??/???? Option 60024??????????? +10%?083 ItemOption ?????
+    if (optionId == 60024) {
+        bonus.bdR = static_cast<short>(bonus.bdR + 10);
+    }
+}
+
+static void ParseEffectOptions(IWzPropertyPtr tierNode, LocalSetBonus& bonus) {
+    if (!tierNode) {
+        return;
+    }
+    try {
+        Ztl_variant_t vOpt;
+        if (FAILED(tierNode->get_item(const_cast<wchar_t*>(L"Option"), &vOpt))) {
+            return;
+        }
+        IWzPropertyPtr optRoot(vOpt.GetUnknown(false, false));
+        if (!optRoot) {
+            return;
+        }
+        IUnknownPtr pEnumUnknown;
+        if (FAILED(optRoot->get__NewEnum(&pEnumUnknown))) {
+            return;
+        }
+        IEnumVARIANTPtr pEnum(pEnumUnknown);
+        if (!pEnum) {
+            return;
+        }
+        while (true) {
+            VARIANT rgVar[1];
+            ULONG uFetched = 0;
+            if (FAILED(pEnum->Next(1, rgVar, &uFetched)) || uFetched == 0) {
+                break;
+            }
+            if (rgVar[0].vt != VT_BSTR || !rgVar[0].bstrVal) {
+                VariantClear(&rgVar[0]);
+                continue;
+            }
+            Ztl_variant_t vChild;
+            if (FAILED(optRoot->get_item(rgVar[0].bstrVal, &vChild))) {
+                VariantClear(&rgVar[0]);
+                continue;
+            }
+            IWzPropertyPtr child(vChild.GetUnknown(false, false));
+            if (child) {
+                const int optionId = ReadWzInt(child, L"option");
+                if (optionId > 0) {
+                    ApplyKnownSetOptionFallback(bonus, optionId);
+                }
+            }
+            VariantClear(&rgVar[0]);
+        }
+    } catch (...) {
+    }
+}
+
 static LocalSetBonus ParseEffectTier(IWzPropertyPtr tierNode, int reqCount) {
     LocalSetBonus bonus;
     bonus.reqCount = reqCount;
@@ -599,10 +926,29 @@ static LocalSetBonus ParseEffectTier(IWzPropertyPtr tierNode, int reqCount) {
     bonus.luk = static_cast<short>(ReadWzInt(tierNode, L"incLUK"));
     bonus.pad = static_cast<short>(ReadWzInt(tierNode, L"incPAD"));
     bonus.mad = static_cast<short>(ReadWzInt(tierNode, L"incMAD"));
+    bonus.pdd = static_cast<short>(ReadWzInt(tierNode, L"incPDD"));
+    bonus.mdd = static_cast<short>(ReadWzInt(tierNode, L"incMDD"));
+    bonus.acc = static_cast<short>(ReadWzInt(tierNode, L"incACC"));
+    bonus.eva = static_cast<short>(ReadWzInt(tierNode, L"incEVA"));
     bonus.mhp = static_cast<short>(ReadWzInt(tierNode, L"incMHP"));
     bonus.mmp = static_cast<short>(ReadWzInt(tierNode, L"incMMP"));
     bonus.speed = static_cast<short>(ReadWzInt(tierNode, L"incSpeed"));
     bonus.jump = static_cast<short>(ReadWzInt(tierNode, L"incJump"));
+    bonus.mhpR = static_cast<short>(ReadWzInt(tierNode, L"incMHPr"));
+    bonus.mmpR = static_cast<short>(ReadWzInt(tierNode, L"incMMPr"));
+    bonus.damR = static_cast<short>(ReadWzInt(tierNode, L"damR"));
+    bonus.bdR = static_cast<short>(ReadWzInt(tierNode, L"bdR"));
+    bonus.nbdR = static_cast<short>(ReadWzInt(tierNode, L"nbdR"));
+    bonus.fdR = static_cast<short>(ReadWzInt(tierNode, L"fdR"));
+    if (bonus.fdR == 0) {
+        // incDamage may be numeric or "10%"
+        bonus.fdR = static_cast<short>(ReadWzInt(tierNode, L"incDamage"));
+    }
+    bonus.ignorePdr = static_cast<short>(ReadWzInt(tierNode, L"ignoreMobpdpR"));
+    if (bonus.ignorePdr == 0) {
+        bonus.ignorePdr = static_cast<short>(ReadWzInt(tierNode, L"ignoreTargetDEF"));
+    }
+    bonus.ignoreMdr = static_cast<short>(ReadWzInt(tierNode, L"ignoreMobmdR"));
     const int allStat = ReadWzInt(tierNode, L"incAllStat");
     if (allStat > 0) {
         bonus.str = static_cast<short>(bonus.str + allStat);
@@ -610,6 +956,7 @@ static LocalSetBonus ParseEffectTier(IWzPropertyPtr tierNode, int reqCount) {
         bonus.int_ = static_cast<short>(bonus.int_ + allStat);
         bonus.luk = static_cast<short>(bonus.luk + allStat);
     }
+    ParseEffectOptions(tierNode, bonus);
     return bonus;
 }
 
@@ -663,8 +1010,11 @@ static const LocalSetDef* GetSetDef(int setId) {
 
 static bool TierHasStats(const LocalSetBonus& bonus) {
     return bonus.str != 0 || bonus.dex != 0 || bonus.int_ != 0 || bonus.luk != 0 ||
-            bonus.pad != 0 || bonus.mad != 0 || bonus.mhp != 0 || bonus.mmp != 0 ||
-            bonus.speed != 0 || bonus.jump != 0;
+            bonus.pad != 0 || bonus.mad != 0 || bonus.pdd != 0 || bonus.mdd != 0 ||
+            bonus.acc != 0 || bonus.eva != 0 || bonus.mhp != 0 || bonus.mmp != 0 ||
+            bonus.speed != 0 || bonus.jump != 0 || bonus.mhpR != 0 || bonus.mmpR != 0 ||
+            bonus.damR != 0 || bonus.bdR != 0 || bonus.nbdR != 0 || bonus.fdR != 0 ||
+            bonus.ignorePdr != 0 || bonus.ignoreMdr != 0;
 }
 
 static int LookupSetIdFromItemWz(int itemId) {
@@ -740,13 +1090,13 @@ static std::string GetLocalSetName(int setId) {
         if (nWide <= 0) {
             return "";
         }
-        const int nNarrow = WideCharToMultiByte(CP_ACP, 0, vName.bstrVal, nWide,
+        const int nNarrow = WideCharToMultiByte(936, 0, vName.bstrVal, nWide,
                 nullptr, 0, nullptr, nullptr);
         if (nNarrow <= 0) {
             return "";
         }
         std::string name(nNarrow, '\0');
-        WideCharToMultiByte(CP_ACP, 0, vName.bstrVal, nWide, name.data(), nNarrow,
+        WideCharToMultiByte(936, 0, vName.bstrVal, nWide, name.data(), nNarrow,
                 nullptr, nullptr);
         return name;
     } catch (...) {
@@ -778,9 +1128,43 @@ static void HideSetTooltip() {
     g_lastSetId = 0;
     g_lastHoverItemId = 0;
     g_lastEquippedCount = 0;
+    // Compare tip may have been parked to the right of set ? pull back beside hover.
+    EquipCompare::RelayoutActiveCompareTip();
 }
 
-static void ShowSetTooltipAt(int x, int y, int setId, int hoverItemId, CUIToolTip* fontTip) {
+bool TryGetActiveSetTooltipRect(int& outX, int& outY, int& outW, int& outH) {
+    outX = outY = outW = outH = 0;
+    if (!g_setTooltipInited || g_lastSetId <= 0) {
+        return false;
+    }
+    __try {
+        CUIToolTip* setTip = reinterpret_cast<CUIToolTip*>(g_setTooltipBuf);
+        if (!setTip || !setTip->m_pLayer) {
+            return false;
+        }
+        outW = setTip->m_nWidth;
+        outH = setTip->m_nHeight;
+        outX = setTip->m_pLayer->rx;
+        outY = setTip->m_pLayer->ry;
+        return outW > 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static int SafeReadTipWidth(CUIToolTip* setTip, int fallback) {
+    int drawW = fallback;
+    __try {
+        if (setTip && setTip->m_nWidth > 0) {
+            drawW = setTip->m_nWidth;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return drawW;
+}
+
+static void ShowSetTooltipAt(int x, int y, int setId, int hoverItemId, CUIToolTip* fontTip,
+        int preferredWidth) {
     std::vector<SetTipLine> lines = BuildSetTooltipLayout(setId, hoverItemId);
     if (lines.empty()) {
         lines = BuildServerFallbackLayout(setId);
@@ -793,13 +1177,16 @@ static void ShowSetTooltipAt(int x, int y, int setId, int hoverItemId, CUIToolTi
     if (!g_setTipFonts.ready || !g_setTipFonts.white) {
         return;
     }
+    // Orange names for PAD/MAD ? retry if first CreateSetFont failed.
+    if (!g_setTipFonts.orange) {
+        CreateSetFont(g_setTipFonts.orange, kColOrange, 12, false);
+    }
 
     CUIToolTip* setTip = EnsureSetTooltip();
     setTip->ClearToolTip();
 
-    const int width = EstimateLayoutWidth(lines);
-    const int lineCount = static_cast<int>(lines.size());
-    const int targetHeight = kSetTipPadY * 2 + lineCount * kSetTipLineH + 8;
+    const int width = preferredWidth > 40 ? preferredWidth : ResolveSetTipWidth(fontTip, lines);
+    const int targetHeight = ComputeSetTipContentHeight(lines);
 
     if (x < 0) {
         x = 0;
@@ -808,22 +1195,21 @@ static void ShowSetTooltipAt(int x, int y, int setId, int hoverItemId, CUIToolTi
         y = 0;
     }
 
-    ZXString<char> zTitle("");
-    std::string probe((std::max)(lineCount + 2, 4), '\n');
-    ZXString<char> zDesc(probe.c_str());
-    setTip->SetToolTip_String2(x, y, zTitle, zDesc, 0, 0, 0, width, 1, 0);
-    if (setTip->m_nHeight < targetHeight) {
-        probe.assign((std::max)(lineCount + 4, 6), '\n');
-        zDesc = ZXString<char>(probe.c_str());
-        setTip->ClearToolTip();
-        setTip->SetToolTip_String2(x, y, zTitle, zDesc, 0, 0, 0, width, 1, 0);
-    }
+    CreateSetTipLayerAtHeight(setTip, x, y, width, targetHeight);
 
     IWzCanvasPtr canvas = GetTooltipCanvas(setTip);
     if (!canvas) {
         return;
     }
-    RenderSetTooltipCanvas(canvas, lines, width);
+    int drawW = SafeReadTipWidth(setTip, width);
+    try {
+        const int cw = static_cast<int>(canvas->width);
+        if (cw > 0) {
+            drawW = cw;
+        }
+    } catch (...) {
+    }
+    RenderSetTooltipCanvas(canvas, lines, drawW);
 }
 
 static int ReadTooltipPosX(CUIToolTip* mainTip, int layout) {
@@ -870,10 +1256,13 @@ static bool HasSetTooltipLayer() {
     }
 }
 
-static void ReadMainTooltipLayout(CUIToolTip* mainTip, int posX, int posY,
-        int& outX, int& outY, int& mainW) {
-    outX = posX;
-    outY = posY;
+// Dock set tip to the RIGHT of the hovered equip tip: [hover] [set] [compare].
+static constexpr int kSetTipGap = 4;
+
+static void ReadMainTooltipOrigin(CUIToolTip* mainTip, int fallbackX, int fallbackY,
+        int& mainX, int& mainY, int& mainW) {
+    mainX = fallbackX;
+    mainY = fallbackY;
     mainW = 0;
     if (!mainTip) {
         return;
@@ -881,15 +1270,61 @@ static void ReadMainTooltipLayout(CUIToolTip* mainTip, int posX, int posY,
     __try {
         mainW = mainTip->m_nWidth;
         if (mainTip->m_pLayer) {
-            outX = mainTip->m_pLayer->rx + mainW + 4;
-            outY = mainTip->m_pLayer->ry;
-        } else if (mainW > 0) {
-            outX = posX + mainW + 4;
+            mainX = mainTip->m_pLayer->rx;
+            mainY = mainTip->m_pLayer->ry;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         mainW = 0;
-        outX = posX;
-        outY = posY;
+        mainX = fallbackX;
+        mainY = fallbackY;
+    }
+}
+
+// Dock set tip to the RIGHT of the hovered equip tip: [hover] [set] [compare].
+static void ComputeSetTooltipRightOfMain(CUIToolTip* mainTip, int setW,
+        int& outX, int& outY) {
+    int mainX = 0;
+    int mainY = 0;
+    int mainW = 0;
+    ReadMainTooltipOrigin(mainTip, 0, 0, mainX, mainY, mainW);
+    if (mainW <= 0) {
+        mainW = 180;
+    }
+    if (setW <= 0) {
+        setW = 180;
+    }
+    outX = mainX + mainW + kSetTipGap;
+    outY = mainY;
+    if (outY < 0) {
+        outY = 0;
+    }
+    const int screenW = get_screen_width();
+    if (screenW > 0 && outX + setW > screenW) {
+        outX = (std::max)(0, screenW - setW);
+    }
+    if (outX < 0) {
+        outX = 0;
+    }
+}
+
+static int SafeGetSetTipWidth(CUIToolTip* setTip) {
+    int tipW = 0;
+    __try {
+        if (setTip && setTip->m_nWidth > 0) {
+            tipW = setTip->m_nWidth;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        tipW = 0;
+    }
+    return tipW;
+}
+
+static void SafeRelMoveSetTip(CUIToolTip* setTip, int setX, int setY) {
+    __try {
+        if (setTip && setTip->m_pLayer) {
+            setTip->m_pLayer->RelMove(setX, setY);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
 }
 
@@ -945,8 +1380,20 @@ static void UpdateSetTooltip(CUIToolTip* mainTip, int posX, int posY,
             }
         }
 
+        const int setW = ResolveSetTipWidth(mainTip, layout);
+
         if (setId == g_lastSetId && itemId == g_lastHoverItemId &&
                 equippedCount == g_lastEquippedCount && HasSetTooltipLayer()) {
+            int setX = 0;
+            int setY = 0;
+            CUIToolTip* setTip = reinterpret_cast<CUIToolTip*>(g_setTooltipBuf);
+            int tipW = SafeGetSetTipWidth(setTip);
+            if (tipW <= 0) {
+                tipW = setW;
+            }
+            ComputeSetTooltipRightOfMain(mainTip, tipW, setX, setY);
+            SafeRelMoveSetTip(setTip, setX, setY);
+            EquipCompare::RelayoutActiveCompareTip();
             g_inTooltipUpdate = false;
             return;
         }
@@ -955,24 +1402,18 @@ static void UpdateSetTooltip(CUIToolTip* mainTip, int posX, int posY,
         g_lastHoverItemId = itemId;
         g_lastEquippedCount = equippedCount;
 
-        int mainW = 0;
         int setX = 0;
         int setY = 0;
-        ReadMainTooltipLayout(mainTip, 0, 0, setX, setY, mainW);
-        if (setX <= 0 && mainW > 0) {
-            setX = mainW + 4;
+        ComputeSetTooltipRightOfMain(mainTip, setW, setX, setY);
+        ShowSetTooltipAt(setX, setY, setId, itemId, mainTip, setW);
+        // Re-anchor with actual rendered width (estimate can differ slightly).
+        CUIToolTip* setTip = reinterpret_cast<CUIToolTip*>(g_setTooltipBuf);
+        const int renderedW = SafeGetSetTipWidth(setTip);
+        if (renderedW > 0) {
+            ComputeSetTooltipRightOfMain(mainTip, renderedW, setX, setY);
+            SafeRelMoveSetTip(setTip, setX, setY);
         }
-        if (mainW <= 0) {
-            mainW = 180;
-        }
-        if (setX < 0) {
-            setX = 0;
-        }
-        if (setY < 0) {
-            setY = 0;
-        }
-
-        ShowSetTooltipAt(setX, setY, setId, itemId, mainTip);
+        EquipCompare::RelayoutActiveCompareTip();
     } catch (...) {
         HideSetTooltip();
     }
@@ -1036,10 +1477,10 @@ void InitSetItemDatabase() {
                         vName.vt == VT_BSTR && vName.bstrVal) {
                     const int nWide = static_cast<int>(SysStringLen(vName.bstrVal));
                     const int nNarrow = WideCharToMultiByte(
-                            CP_ACP, 0, vName.bstrVal, nWide, nullptr, 0, nullptr, nullptr);
+                            936, 0, vName.bstrVal, nWide, nullptr, 0, nullptr, nullptr);
                     if (nNarrow > 0) {
                         def.name.assign(nNarrow, '\0');
-                        WideCharToMultiByte(CP_ACP, 0, vName.bstrVal, nWide, def.name.data(),
+                        WideCharToMultiByte(936, 0, vName.bstrVal, nWide, def.name.data(),
                                 nNarrow, nullptr, nullptr);
                     }
                 }
@@ -1107,6 +1548,12 @@ typedef int(__thiscall* SkillEntryCmp_t)(void* this_, unsigned int* skillEntry);
 static auto Original_SkillEntryCmp =
         reinterpret_cast<SkillEntryCmp_t>(0x00A08E05);
 
+// SanitizeSkillReqList REMOVED (2026-07-24 #3):
+// It ran on EVERY SkillEntryCmp call (global Detour), not only CUISkill, and
+// mutated skillEntry[+0x50]. With Skill.wz == V16 and cleaned char skills the
+// cyclic-list hang hypothesis is obsolete; the global walk was itself a hang /
+// corruption risk on K-open. Set-item skill (+x) display only needs fmt id.
+
 int __fastcall Hook_SkillEntryCmp(void* this_, void* /*edx*/, unsigned int* skillEntry) {
     void* ret = _ReturnAddress();
     const uintptr_t addr = reinterpret_cast<uintptr_t>(ret);
@@ -1135,18 +1582,22 @@ auto CUIToolTip__DrawToolTip_Equip =
         reinterpret_cast<void(__thiscall*)(CUIToolTip*, int, GW_ItemSlotEquip*)>(
                 ClientAddresses::SetItem::kDrawToolTipEquip);
 
-void __fastcall CUIToolTip__DrawToolTip_Equip_SetItem_hook(
-        CUIToolTip* pThis, void* /*edx*/, int layout, GW_ItemSlotEquip* pe) {
-    const int itemId = pe ? SafeGetItemId(pe) : 0;
-    CUIToolTip__DrawToolTip_Equip(pThis, layout, pe);
+static void AfterEquipTipDrawn(CUIToolTip* pThis, GW_ItemSlotEquip* pe) {
     if (g_inShowItemToolTip || !pThis || !pe) {
         return;
     }
+    const int itemId = SafeGetItemId(pe);
     if (!IsEquipItemId(itemId) || ResolveSetIdForItem(itemId) <= 0) {
         return;
     }
     g_activeEquip = pe;
     UpdateSetTooltip(pThis, 0, 0, itemId, true);
+}
+
+void __fastcall CUIToolTip__DrawToolTip_Equip_SetItem_hook(
+        CUIToolTip* pThis, void* /*edx*/, int layout, GW_ItemSlotEquip* pe) {
+    CUIToolTip__DrawToolTip_Equip(pThis, layout, pe);
+    AfterEquipTipDrawn(pThis, pe);
 }
 
 auto CUIToolTip__ClearToolTip =
@@ -1249,13 +1700,25 @@ void SetItem_RedrawActivePanel() {
     SetItemMod::RedrawActivePanel();
 }
 
+void SetItem_OnEquipTipDrawn(CUIToolTip* tip, GW_ItemSlotEquip* pe) {
+    SetItemMod::AfterEquipTipDrawn(
+            tip, reinterpret_cast<SetItemMod::GW_ItemSlotEquip*>(pe));
+}
+
+bool SetItem_TryGetActiveSetTooltipRect(int& outX, int& outY, int& outW, int& outH) {
+    return SetItemMod::TryGetActiveSetTooltipRect(outX, outY, outW, outH);
+}
+
 void AttachSetItemMod() {
     if (SetItemMod::g_hooksAttached) {
         return;
     }
     SetItemMod::g_hooksAttached = true;
     SetItemMod::InitSetItemDatabase();
-    SetItemMod::AttachSkillBonusHooks();
+    // HARD-OFF 2026-07-24: SkillEntryCmp global detour was a K-open hang risk
+    // (ran on every skill compare; SanitizeSkillReqList already removed).
+    // Set-item skill (+x) display disabled until K is stable again.
+    // SetItemMod::AttachSkillBonusHooks();
 }
 
 void AttachSetItemUiHooks() {
@@ -1265,7 +1728,7 @@ void AttachSetItemUiHooks() {
     SetItemMod::g_uiHooksAttached = true;
     AttachEquipTooltipStyleHooks();
     ATTACH_HOOK(SetItemMod::Original_ShowItemToolTip, SetItemMod::Hook_ShowItemToolTip);
-    // Chain onto FusionAnvil's live DrawToolTip detour — do not re-patch raw 0x8ED0D2.
+    // Chain onto FusionAnvil's live DrawToolTip detour ? do not re-patch raw 0x8ED0D2.
     FusionAnvil_BindDrawToolTipEquipTarget(
             reinterpret_cast<void**>(&SetItemMod::CUIToolTip__DrawToolTip_Equip));
     ATTACH_HOOK(SetItemMod::CUIToolTip__DrawToolTip_Equip,

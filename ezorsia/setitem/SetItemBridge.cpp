@@ -11,6 +11,7 @@
 void AttachSetItemMod();
 void AttachSetItemUiHooks();
 void SetItem_RedrawActivePanel();
+bool SetItem_TryGetActiveSetTooltipRect(int& outX, int& outY, int& outW, int& outH);
 
 namespace SetItemData {
 int g_finalDamagePercent = 0;
@@ -160,5 +161,9 @@ bool IsSetEnabled(int setId) {
 int GetSkillBonusLevel(int skillId) {
     const auto it = g_skillBonusLevels.find(skillId);
     return it == g_skillBonusLevels.end() ? 0 : it->second;
+}
+
+bool TryGetActiveSetTooltipRect(int& outX, int& outY, int& outW, int& outH) {
+    return SetItem_TryGetActiveSetTooltipRect(outX, outY, outW, outH);
 }
 } // namespace SetItem
