@@ -12,8 +12,9 @@
 // Architecture (same FakeTear + Fuse sentinel as maxhpmp, but ushort-width):
 //   Tear_byte stores 2 encrypted bytes; Tear_short needs 4 and would collide
 //   with the Level CS dword at +0x35 / Job at +0x39. LevelFakeTear stores a
-//   raw ushort at [ptr] and returns checksum=0. Fuse_byte is hooked: CS==0
-//   returns *(unsigned short*)pTear; otherwise original Fuse.
+//   raw ushort at [ptr] and returns checksum=kLevelFuseSentinel ('LVL3').
+//   Fuse_byte is hooked: CS==sentinel returns *(unsigned short*)pTear;
+//   otherwise original Fuse. Sentinel must NOT be 0 (skill UI CS==0 collisions).
 // EXP Decode4 is intentionally left alone this round.
 
 #include "stdafx.h"
@@ -35,7 +36,7 @@ void LvlLogWrite(const char* path, const char* line) {
     SetFilePointer(file, 0, nullptr, FILE_END);
     DWORD written = 0;
     WriteFile(file, line, static_cast<DWORD>(strlen(line)), &written, nullptr);
-    FlushFileBuffers(file);
+    // No FlushFileBuffers: skill UI Fuse is hot; sync flush stalls the UI thread.
     CloseHandle(file);
 }
 
@@ -129,15 +130,18 @@ __declspec(naked) static void Cave_ExpDecode_StatChanged() {
     }
 }
 
-// Store raw ushort (fits the 2-byte Level tear slot at +0x33). CS sentinel=0.
- // Use naked stub so call-sites (__fastcall ECX=value, EDX=ptr) never hit a C++ prologue.
+// Store raw ushort (fits the 2-byte Level tear slot at +0x33).
+// Sentinel MUST NOT be 0: skill UI Fuse_byte sites can legitimately see CS==0;
+// treating those as Level FakeTear returned garbage (often ~200) and hung/crashed K.
+constexpr unsigned int kLevelFuseSentinel = 0x4C564C33u; // 'LVL3'
+
 static int g_lvlFuseLogLeft = 48;
 
 __declspec(naked) static void LevelFakeTear_naked() {
     __asm {
         // ecx = level (ushort-wide), edx = tear ptr
         mov word ptr [edx], cx
-        xor eax, eax          // checksum sentinel = 0
+        mov eax, kLevelFuseSentinel
         ret
     }
 }
@@ -151,18 +155,26 @@ typedef int(__cdecl* t_ZtlSecureFuse_byte)(void* pTear, unsigned int checksum);
 
 auto ZtlSecureFuse_byte = reinterpret_cast<t_ZtlSecureFuse_byte>(kAddr_ZtlSecureFuse_byte);
 
-// Return full ushort in EAX when sentinel; callers that used only AL are FixMovsx'd.
+// Return full ushort in EAX when Level FakeTear sentinel; else original byte Fuse.
 int __cdecl ZtlSecureFuse_byte_hook(void* pTear, unsigned int checksum) {
-    if (checksum == 0) {
+    if (checksum == kLevelFuseSentinel) {
         const unsigned short v = *reinterpret_cast<unsigned short*>(pTear);
         if (g_lvlFuseLogLeft > 0) {
             --g_lvlFuseLogLeft;
-            LvlLog("Fuse_byte CS0 level=%u", static_cast<unsigned>(v));
+            LvlLog("Fuse_byte LVL3 level=%u", static_cast<unsigned>(v));
         }
         return v;
     }
     return ZtlSecureFuse_byte(pTear, checksum) & 0xFF;
 }
+
+// BookFilter null-guard REMOVED (2026-07-24):
+// Soft-skip when EDI==0 converted the K hang into EIP=0 flash-crash
+// (Event Viewer 0xc0000005 offset 0, ~2s after "BookFilter SKIP").
+// Call sites push book/char/out then call 0x75C7C5; skipping leaves the
+// out-slot unfilled so later UI code calls through null. Root fix is
+// ensuring the skill-book array slot is non-null (Skill.wz / UIWindow Skill /
+// character skill roots), not papering over EDI==0.
 
 struct CallPatch {
     uintptr_t addr;
@@ -252,7 +264,8 @@ void AttachLevel300Mod() {
     }
     g_attached = true;
 
-    LvlLog("AttachLevel300Mod begin (UseVirtuProtect=%d)", Memory::UseVirtuProtect ? 1 : 0);
+    LvlLog("AttachLevel300Mod begin sentinel=LVL3 (0x%08X) UseVirtuProtect=%d",
+           kLevelFuseSentinel, Memory::UseVirtuProtect ? 1 : 0);
 
     int okCount = 0;
     int failCount = 0;
@@ -268,31 +281,25 @@ void AttachLevel300Mod() {
     void* const fakeTear = LevelFakeTearTarget();
 
     const CallPatch kCallPatches[] = {
-        // Decode1 -> Decode2 (GW_CharacterStat::Decode + OnStatChanged LEVEL)
         { 0x004E2B20, kAddr_CInPacket_Decode1, decode2, "Decode_Login_Level" },
         { 0x004E303E, kAddr_CInPacket_Decode1, decode2, "Decode_StatChanged_Level" },
-
-        // Tear_byte -> LevelFakeTear (raw ushort + CS=0)
         { 0x004E2B2A, kAddr_ZtlSecureTear_byte, fakeTear, "FakeTear_Login_Level" },
         { 0x004E3048, kAddr_ZtlSecureTear_byte, fakeTear, "FakeTear_StatChanged_Level" },
-
-        // Encode1 -> Encode2 (character stat serialize)
         { 0x004E289B, kAddr_COutPacket_Encode1, encode2, "Encode_CharStat_Level" },
         { 0x004E2DB2, kAddr_COutPacket_Encode1, encode2, "Encode_StatMask_Level" },
     };
 
-    // mov cl,al (8A C8) -> mov ecx,eax (8B C8): pass full Decode2 result into Tear
-    // mov [ebp+x],al (88 45 xx) -> mov [ebp+x],eax (89 45 xx): keep ushort for Encode2 push
-    // movzx r32, al (0F B6 xx) -> movzx r32, ax (0F B7 xx)
-    // mov bl,al (8A D8) -> mov ebx,eax (8B D8); mov cl,al -> mov ecx,eax
+    // SAFE FixMovzx set only: character Level tear (+0x33) consumers.
+    // EXCLUDED (history / hang lessons):
+    //   - BookFilter soft-skip, SkillTip [ebp-1]->[ebp-4], SanitizeSkillReqList
+    //   - 8AD* / 8CD* SetupJob / UISkill index widen (byte Fuse -> tab/book index)
+    //   - Fuse_byte checksum==0 sentinel (use LVL3 only)
     const RawPatch kRawPatches[] = {
         { 0x004E2B28, 2, { 0x8A, 0xC8 }, { 0x8B, 0xC8 }, "MovEcx_Login_Level" },
         { 0x004E3046, 2, { 0x8A, 0xC8 }, { 0x8B, 0xC8 }, "MovEcx_StatChanged_Level" },
-
         { 0x004E2893, 3, { 0x88, 0x45, 0x08 }, { 0x89, 0x45, 0x08 }, "StoreDword_Encode_CharStat_Level" },
         { 0x004E2DAA, 3, { 0x88, 0x45, 0x0C }, { 0x89, 0x45, 0x0C }, "StoreDword_Encode_StatMask_Level" },
 
-        // FixMovsx: widen Level Fuse consumers that truncated AL
         { 0x00602DDD, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_itow_Level_1" },
         { 0x006077F3, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_itow_Level_2" },
         { 0x007212DC, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelReq_1" },
@@ -302,13 +309,10 @@ void AttachLevel300Mod() {
         { 0x00724468, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelReq_5" },
         { 0x0072447D, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelReq_6" },
         { 0x00752C75, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_Shop_Level" },
-        { 0x00764DB0, 2, { 0x8A, 0xD8 }, { 0x8B, 0xD8 }, "FixMovEbx_Skill_Level" },
-        // EquipCalc (sub_77E227): Fuse level → EBX, then was re-truncated via mov cl,bl
-        // before IsAbleToWear. Level 300 became 44 → reqLevel 200/250 equips paint red.
+        { 0x00764DB0, 2, { 0x8A, 0xD8 }, { 0x8B, 0xD8 }, "FixMovEbx_CharLevel_SkillConsume" },
         { 0x0077E251, 2, { 0x8A, 0xD8 }, { 0x8B, 0xD8 }, "FixMovEbx_EquipCalc_Level" },
         { 0x0077E25D, 2, { 0x8A, 0xCB }, { 0x8B, 0xCB }, "FixMovEcx_EquipCalc_LevelAdd" },
         { 0x0077ECCB, 2, { 0x8A, 0xC8 }, { 0x8B, 0xC8 }, "FixMovEcx_EquipCalc_Level" },
-        // IsAbleToWear cash-path level override: movzx eax,al → ax @ 0x4F2D7A
         { 0x004F2D7A, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_IsAbleToWear_Level" },
         { 0x0078DAEB, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_ExpTableLookup_Level" },
         { 0x008C531A, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_UIStat_Level" },
@@ -316,46 +320,8 @@ void AttachLevel300Mod() {
         { 0x008CBE33, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_StatWnd_Level" },
         { 0x008D774C, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_StatusBar_Level_1" },
         { 0x008D81BC, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_StatusBar_Level_2" },
-        // ★ 状态栏 LevelNo 数字：Fuse 后 movzx al → 把 300 截成 44 再 DrawNumberByImage
         { 0x008D8176, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_StatusBar_DrawLevel" },
         { 0x00A1FBB4, 3, { 0x0F, 0xB6, 0xF8 }, { 0x0F, 0xB7, 0xF8 }, "FixMovzx_Context_Level" },
-
-        // Extra Fuse→AL truncations found via IDA (digit/UI/copy paths)
-        { 0x00A1FC08, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_Context_Level2" },
-        { 0x0076601C, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_76601C" },
-        { 0x00822B87, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_822B87" },
-        { 0x00877DFE, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_877DFE" },
-        { 0x0087924B, 3, { 0x0F, 0xB6, 0xF0 }, { 0x0F, 0xB7, 0xF0 }, "FixMovzx_LevelExtra_87924B" },
-        { 0x00882EFA, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_882EFA" },
-        { 0x008AD0AB, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8AD0AB" },
-        { 0x008AD155, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8AD155" },
-        { 0x008AD200, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8AD200" },
-        { 0x008CD1A6, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD1A6" },
-        { 0x008CD1C6, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD1C6" },
-        { 0x008CD1E6, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD1E6" },
-        { 0x008CD24A, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD24A" },
-        { 0x008CD2C4, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD2C4" },
-        { 0x008CD2E1, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD2E1" },
-        { 0x008CD332, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD332" },
-        { 0x008CD35C, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD35C" },
-        { 0x008CD405, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD405" },
-        { 0x008CD422, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD422" },
-        { 0x008CD43F, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD43F" },
-        { 0x008CD49C, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD49C" },
-        { 0x008CD4BA, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD4BA" },
-        { 0x008CD531, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD531" },
-        { 0x008CD54A, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD54A" },
-        { 0x008CD599, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD599" },
-        { 0x008CD5C2, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8CD5C2" },
-        { 0x008E93CE, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_8E93CE" },
-        { 0x009514FD, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_9514FD" },
-        { 0x00958938, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_958938" },
-        { 0x00A0EC35, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_A0EC35" },
-        { 0x00A12413, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_A12413" },
-        { 0x00A2041A, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_A2041A" },
-        { 0x00A3E7D5, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_A3E7D5" },
-        { 0x004E3367, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_4E3367" },
-        { 0x004BBB33, 3, { 0x0F, 0xB6, 0xC0 }, { 0x0F, 0xB7, 0xC0 }, "FixMovzx_LevelExtra_4BBB33" },
     };
 
     for (const CallPatch& site : kCallPatches) {
@@ -366,11 +332,9 @@ void AttachLevel300Mod() {
     }
 
     const bool hookedFuse = ATTACH_HOOK(ZtlSecureFuse_byte, ZtlSecureFuse_byte_hook);
-    LvlLog("Fuse_byte hook: %d", hookedFuse ? 1 : 0);
+    LvlLog("Fuse_byte hook LVL3: %d", hookedFuse ? 1 : 0);
     if (hookedFuse) ++okCount; else ++failCount;
 
-    // GetNextLevelExp / lookup helpers: cmp eax, 200 -> cmp eax, 300 (same 5-byte imm32)
-    // Must stay in lockstep with NextLevel table length (301 slots incl. terminator).
     struct Imm32CmpPatch {
         uintptr_t addr;
         unsigned int expectedImm;
@@ -413,6 +377,7 @@ void AttachLevel300Mod() {
         }
     }
 
-    // Expected: 2 exp caves + 6 call + (23+N) raw + 1 fuse + 5 max-level
-    LvlLog("AttachLevel300Mod done: ok=%d fail=%d", okCount, failCount);
+    // Expected: 2 caves + 6 call + 26 raw + 1 fuse + 5 max-level = 40
+    LvlLog("AttachLevel300Mod done: ok=%d fail=%d (safe-set expected~40, sentinel=LVL3)",
+           okCount, failCount);
 }
