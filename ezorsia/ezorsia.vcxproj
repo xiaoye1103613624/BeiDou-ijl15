@@ -85,7 +85,13 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <BeiDouClientDir>E:\mxd_soft\2.客户端\083\beidou_client_xiaoye\BeiDou-Client_1\</BeiDouClientDir>
+    <!-- 杒件生戝坎覆盖的客户端目录（尝坶 Client_1）；路径�?trailing slash，靿�?cmd 坃掉引坷 -->
+    <BeiDouClientDir>E:\mxd_soft\2.客户端\083\beidou_client_xiaoye\BeiDou-Client_1</BeiDouClientDir>
+    <!-- 坯�? msbuild /p:DeployKillClient=true  �?部署剝结�?BeiDou.exe -->
+    <!-- Default true: auto-kill locked BeiDou.exe on deploy (MSB3073 was "file locked"). -->
+    <DeployKillClient Condition="'$(DeployKillClient)'==''">true</DeployKillClient>
+    <!-- 坯�? /p:DeploySkipPostBuild=true �?跳过 Post-Build（由 deploy_ijl15.bat / watch 自行部署时用�?-->
+    <DeploySkipPostBuild Condition="'$(DeploySkipPostBuild)'==''">false</DeploySkipPostBuild>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <LinkIncremental>true</LinkIncremental>
@@ -124,7 +130,7 @@
       <PreprocessorDefinitions>WIN32;_DEBUG;EZORSIA_EXPORTS;_WINDOWS;_USRDLL;_CRT_NON_CONFORMING_SWPRINTFS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)storagebag;$(ProjectDir)slotlock;$(ProjectDir)fusionanvil;$(ProjectDir)higherstoragelist;$(ProjectDir)highershoplist;$(ProjectDir)bufftimer;$(ProjectDir)charslots;$(ProjectDir)equipcompare;$(ProjectDir)maxhpmp;$(ProjectDir)level300;$(ProjectDir)shoulders;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)miraclecube;$(ProjectDir)storagebag;$(ProjectDir)sidetoolbar;$(ProjectDir)slotlock;$(ProjectDir)fusionanvil;$(ProjectDir)higherstoragelist;$(ProjectDir)highershoplist;$(ProjectDir)bufftimer;$(ProjectDir)charslots;$(ProjectDir)equipcompare;$(ProjectDir)maxhpmp;$(ProjectDir)level300;$(ProjectDir)shoulders;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <UndefinePreprocessorDefinitions>%(UndefinePreprocessorDefinitions)</UndefinePreprocessorDefinitions>
       <AdditionalOptions>-D _CRT_SECURE_NO_WARNINGS %(AdditionalOptions)</AdditionalOptions>
@@ -136,11 +142,13 @@
       <AdditionalDependencies>detours.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>if not exist "$(BeiDouClientDir)" mkdir "$(BeiDouClientDir)"
-xcopy /Y /Q "$(TargetPath)" "$(BeiDouClientDir)"
-if exist "$(ProjectDir)config.ini" xcopy /Y /Q "$(ProjectDir)config.ini" "$(BeiDouClientDir)"
-echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
-      <Message>Deploy ijl15.dll to BeiDou client directory</Message>
+      <Command>if /I not "$(DeploySkipPostBuild)"=="true" (
+  set "DeployKillClient=$(DeployKillClient)"
+  powershell -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir)..\deploy_ijl15.ps1" -DllPath "$(TargetPath)" -ConfigPath "$(ProjectDir)config.ini"
+) else (
+  echo [Deploy] skipped ^(DeploySkipPostBuild=true^)
+)</Command>
+      <Message>Deploy ijl15.dll to BeiDou-Client_1</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -169,7 +177,7 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)storagebag;$(ProjectDir)slotlock;$(ProjectDir)fusionanvil;$(ProjectDir)higherstoragelist;$(ProjectDir)highershoplist;$(ProjectDir)bufftimer;$(ProjectDir)charslots;$(ProjectDir)equipcompare;$(ProjectDir)maxhpmp;$(ProjectDir)level300;$(ProjectDir)shoulders;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)miraclecube;$(ProjectDir)storagebag;$(ProjectDir)sidetoolbar;$(ProjectDir)slotlock;$(ProjectDir)fusionanvil;$(ProjectDir)higherstoragelist;$(ProjectDir)highershoplist;$(ProjectDir)bufftimer;$(ProjectDir)charslots;$(ProjectDir)equipcompare;$(ProjectDir)maxhpmp;$(ProjectDir)level300;$(ProjectDir)shoulders;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -181,11 +189,17 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
       <AdditionalLibraryDirectories>$(SolutionDir)\detours;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
-      <Command>if not exist "$(BeiDouClientDir)" mkdir "$(BeiDouClientDir)"
-xcopy /Y /Q "$(TargetPath)" "$(BeiDouClientDir)"
-if exist "$(ProjectDir)config.ini" xcopy /Y /Q "$(ProjectDir)config.ini" "$(BeiDouClientDir)"
-echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
-      <Message>Deploy ijl15.dll to BeiDou client directory</Message>
+      <Command>if /I not "$(DeploySkipPostBuild)"=="true" (
+  set "DeployKillClient=$(DeployKillClient)"
+  if /I "$(DeployKillClient)"=="true" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir)..\deploy_ijl15.ps1" -DllPath "$(TargetPath)" -ConfigPath "$(ProjectDir)config.ini" -KillClient
+  ) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir)..\deploy_ijl15.ps1" -DllPath "$(TargetPath)" -ConfigPath "$(ProjectDir)config.ini"
+  )
+) else (
+  echo [Deploy] skipped ^(DeploySkipPostBuild=true^)
+)</Command>
+      <Message>Deploy ijl15.dll to BeiDou-Client_1</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">
@@ -200,7 +214,7 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)storagebag;$(ProjectDir)slotlock;$(ProjectDir)fusionanvil;$(ProjectDir)higherstoragelist;$(ProjectDir)highershoplist;$(ProjectDir)bufftimer;$(ProjectDir)charslots;$(ProjectDir)equipcompare;$(ProjectDir)maxhpmp;$(ProjectDir)level300;$(ProjectDir)shoulders;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)miraclecube;$(ProjectDir)storagebag;$(ProjectDir)sidetoolbar;$(ProjectDir)slotlock;$(ProjectDir)fusionanvil;$(ProjectDir)higherstoragelist;$(ProjectDir)highershoplist;$(ProjectDir)bufftimer;$(ProjectDir)charslots;$(ProjectDir)equipcompare;$(ProjectDir)maxhpmp;$(ProjectDir)level300;$(ProjectDir)shoulders;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -211,10 +225,13 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
       <AdditionalLibraryDirectories>$(SolutionDir)\detours;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
-      <Command>if not exist "$(BeiDouClientDir)" mkdir "$(BeiDouClientDir)"
-copy /Y "$(TargetPath)" "$(BeiDouClientDir)ijl15.minimal.dll"
-echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)ijl15.minimal.dll</Command>
-      <Message>Deploy minimal ijl15.dll to BeiDou client directory</Message>
+      <Command>if /I not "$(DeploySkipPostBuild)"=="true" (
+  set "DeployKillClient=$(DeployKillClient)"
+  powershell -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir)..\deploy_ijl15.ps1" -DllPath "$(TargetPath)" -DestName "ijl15.minimal.dll" -SkipConfig
+) else (
+  echo [Deploy] skipped ^(DeploySkipPostBuild=true^)
+)</Command>
+      <Message>Deploy ijl15.minimal.dll to BeiDou-Client_1</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -262,9 +279,12 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)ijl15.minimal.dll</Comma
     <ClInclude Include="damageskin\debug.h" />
     <ClInclude Include="beautyshop\BeautyShopApi.h" />
     <ClInclude Include="dailycheckin\DailyCheckinApi.h" />
+    <ClInclude Include="miraclecube\MiracleCubeApi.h" />
     <ClInclude Include="storagebag\StorageBagApi.h" />
+    <ClInclude Include="sidetoolbar\SideToolbarApi.h" />
     <ClInclude Include="slotlock\SlotLockApi.h" />
     <ClInclude Include="higherstoragelist\HigherStorageListApi.h" />
+    <ClInclude Include="potentialscroll\PotentialScrollApi.h" />
     <ClInclude Include="highershoplist\HigherShopListApi.h" />
     <ClInclude Include="maxhpmp\MaxHpMpApi.h" />
     <ClInclude Include="level300\Level300Api.h" />
@@ -273,7 +293,9 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)ijl15.minimal.dll</Comma
     <ClInclude Include="charslots\CharSlotsApi.h" />
     <ClInclude Include="equipcompare\EquipCompareApi.h" />
     <ClInclude Include="shoulders\ShoulderApi.h" />
+    <ClInclude Include="pendant2\Pendant2Api.h" />
     <ClInclude Include="fusionanvil\FusionAnvilApi.h" />
+    <ClInclude Include="fusionanvil\ItemOptionTipApi.h" />
     <ClInclude Include="compat\wvs\field.h" />
     <ClInclude Include="compat\wvs\wndman.h" />
     <ClInclude Include="compat\wvs\stage.h" />
@@ -390,6 +412,18 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)ijl15.minimal.dll</Comma
     <ClCompile Include="dailycheckin\dailycheckin.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="miraclecube\MiracleCubeBridge.cpp">
+      <PrecompiledHeader>Use</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="miraclecube\miraclecube.cpp">
+      <PrecompiledHeader>Use</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="sidetoolbar\SideToolbarBridge.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="sidetoolbar\sidetoolbar.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="partybuffs\partyBuffs.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
@@ -408,6 +442,7 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)ijl15.minimal.dll</Comma
     </ClCompile>
     <ClCompile Include="higherstoragelist\HigherStorageListBridge.cpp" />
     <ClCompile Include="higherstoragelist\higherstoragelist.cpp" />
+    <ClCompile Include="potentialscroll\potentialscroll.cpp" />
     <ClCompile Include="highershoplist\HigherShopListBridge.cpp" />
     <ClCompile Include="highershoplist\highershoplist.cpp" />
     <ClCompile Include="maxhpmp\maxhpmp.cpp">
@@ -447,6 +482,11 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)ijl15.minimal.dll</Comma
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="shoulders\shoulders.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="pendant2\pendant2.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>

@@ -1,4 +1,4 @@
-﻿// dllmain.cpp : Defines the entry point for the DLL application.
+// dllmain.cpp : Defines the entry point for the DLL application.
 #include "stdafx.h"
 #include "NMCO.h"
 #include "ijl15.h"
@@ -19,9 +19,16 @@
 #include "personalshop/PersonalShopApi.h"
 #include "charslots/CharSlotsApi.h"
 #include "shoulders/ShoulderApi.h"
+#include "pendant2/Pendant2Api.h"
 #include "gamedata/GameDataGuardApi.h"
 #endif
 #pragma comment(lib, "ws2_32.lib")
+
+// Keep in sync with LazyCompatInit.cpp / ModRegistry.cpp.
+// 0 = full late UI (C497-class). Skill.wz restored; K hang was Data not Level300.
+#ifndef BISECT_DISABLE_LATE_UI_HOOKS
+#define BISECT_DISABLE_LATE_UI_HOOKS 0
+#endif
 
 // config.ini can use IP or hostname (ServerIP_Address=...).
 // The patch expects an IPv4 dotted string; resolve hostnames to IPv4.
@@ -63,13 +70,12 @@ static void WriteBootLine(HMODULE hModule, const char* line)
 
 static void AttachLevel300ModWithBootLog(HMODULE hModule)
 {
-	WriteBootLine(hModule, "before AttachLevel300Mod\r\n");
-	__try {
-		AttachLevel300Mod();
-		WriteBootLine(hModule, "after AttachLevel300Mod\r\n");
-	} __except (EXCEPTION_EXECUTE_HANDLER) {
-		WriteBootLine(hModule, "EXCEPTION in AttachLevel300Mod\r\n");
-	}
+	WriteBootLine(hModule, "AttachLevel300Mod BEGIN (LVL3 sentinel)\r\n");
+	AttachLevel300Mod();
+	WriteBootLine(hModule, "AttachLevel300Mod END\r\n");
+#if BISECT_DISABLE_LATE_UI_HOOKS
+	WriteBootLine(hModule, "BISECT_DISABLE_LATE_UI_HOOKS=1 (worldmap/damageskin/fusionanvil/setitem-ui OFF)\r\n");
+#endif
 }
 
 static std::string ResolveToIpv4String(const std::string& hostOrIp)
@@ -216,9 +222,18 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		// NOT BeiDou.exe. Patch1 overwrites 0F-prefix of jge/jl (0F 8D/0F 7C) with 0x1E,
 		// corrupting jumps -> ZException -21E (0x21E) on channel->charselect.
 		// CharSlots::ApplyPatches();
-		// HARD-OFF 2026-07-19 login bisect: shoulders not the crash; tiny 0115 + inv dup suspected.
-		// AttachShoulderSlotsFix();
-
+		// Shoulder 115/BP20/-20 + pendant2 112 + rings (FIX_RING_UNEQUIP_PERSIST_20260727aj).
+		// get_bodypart x6 ON (52/53 first); draw max fixed 53; bind ON; bag dblclick
+		// restores ring empty-search count; equipped dblclick → native wear@4F0B89;
+		// login apply slot max 53 / walk −52.
+		AttachShoulderSlotsFix();
+		// Second pendant 112/BP51/-51: DllMain attach stays OFF (2026-07-26b/d).
+		// Root cause: ForceDrawLoop@7FEFB9 + GetSlotXY/HitTest at DllMain → AuthSuccess→ALL_IDLE.
+		// Post-field UI (LazyCompatInit): EnsurePendant2AfterFieldEnter when pendant2_ui=true;
+		// cave@7FDE8B forces drawer this+0x5E8; r-fix zeros +0x21 layout deltas + parks BP23 draw.
+		// Draw: loop-end mov eax,53 (ae); NOT add-imm 0x35 (ad BP54 hang). NEVER pet HT@801214.
+		// aa hang: [ebp-14] decimal; ad hang: imm 0x35+flag1=>BP54 OOB;
+		// ae/af E hang: ForceNormal special path skipped mov edx,[ebp-14h] @7FEEC9.
 		// InstallBootstrapHook: RefreshRate early (login-safe); other mods at first CField.
 		LazyCompatInit::InstallBootstrapHook();
 #else

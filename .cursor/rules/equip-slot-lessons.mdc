@@ -1,0 +1,54 @@
+---
+description: Equip-slot / second-pendant / six-ring lessons (wrong vs correct). Load before any ijl15 equip UI or −52/−53 bind work.
+globs:
+  - "**/shoulders/**"
+  - "**/pendant2/**"
+  - "**/装备槽*"
+alwaysApply: false
+---
+
+# 装备栏 / 第二坠 / 六戒 — 错误与正确行为
+
+权威记忆（按优先级）：
+
+1. `E:\pro\BeiDou-Server_xy\resource_doc\agent_memory\equip_slot_lessons.jsonl`
+2. **健康向量库** `resource_doc/agent_memory/chroma`（collection `equip_slot_lessons`；镜像 `D:\xy_vector_db\equip_slot_chroma`）
+3. `E:\资料\xiaoye\mxd学习\萧曳冒险岛\常见错误与避坑.md` §装备栏
+4. 简报：`E:\pro\BeiDou-ijl15\docs\装备槽修正-20260726ac.md`（及 ab/aa/z）
+5. 旧库 `D:\xy_vector_db` / `maplestory_kb` 对**新写入不可靠**（HNSW Error finding id）；勿依赖它存装备栏课
+
+## 禁止（WRONG — 永不重复）
+
+1. **ForceDrawLoop**（`setne→mov al,1` @ `0x007FEFB9`）或 **DllMain 早挂 UI** → 登录 ALL_IDLE
+2. 改 **pet HitTest** `0x801214` / `0x8013A3`（应用角色 `GetBodyPartFromPoint` @ `0x7FEC6F`）
+3. 错 VA / 损坏 ModRM；无 **ExpectBytes** 就写洞
+4. MASM **`[ebp-14]`（十进制）** 代替 PE **`[ebp-14h]`**（`8B 4D EC`）→ **E 开装备栏卡死**（aa）
+5. 经典窄栏上用 expanded `(336,165)` / 盲目 +33 布局
+6. 右列整列 Align HitTest→Draw → **武器画到盾牌**；仅 BP4/10/11 Align；经典戒硬编码标签坐标
+7. 把 BP22/23 park 到宠物坐标 → 宠物 UI 软坏
+8. 部署 **`ezorsia\out`** 陈旧 DLL — 只用 **`out\Release`**
+9. 第二坠只做半套红修，不做护肩式 **AbleToWear call-orig-then-OK + TSecType gate NOP**
+10. 把 **−53 直接解锁进 TSecType**（无 `g_ring53ZRef` 影子）
+
+## 正确（CORRECT）
+
+1. HT 扩展：角色 **`0x7FEC6F`**，端点 `BE23F4→BE240C`
+2. 护肩镜像：AbleToWear **先调原函数再强制 OK**；BP51 TSecType 失败分支 NOP（红+属性）
+3. 绘制：`setne` 不动；仅 **add-imm `0x32→0x34`** 让 BP52/53 上色
+4. DrawHasItem cave：**`[ebp-14h]`** 对齐 `8B 4D EC`
+5. −52 原生空隙；−53 **`g_ring53ZRef`**；GetItem/SetItem bound 谨慎（`kBindExtraRingInventory`）
+6. 字节校验 + 只部署 `out\Release`；保持武器/盾/护肩/第二坠/**E 可开**
+7. ab 曾关 bind；仅在 cave 已修且 E 验证后再开（戳记例：`RING_34_BIND_SAFE_20260726ac`）
+
+## 查询向量库
+
+```python
+import chromadb
+col = chromadb.PersistentClient(
+    r"E:\pro\BeiDou-Server_xy\resource_doc\agent_memory\chroma"
+).get_collection("equip_slot_lessons")
+r = col.query(query_texts=["装备栏 E卡死 ebp-14"], n_results=5)
+```
+
+入库：`py -3.10 E:\pro\BeiDou-Server_xy\resource_doc\agent_memory\ingest_equip_slot_chroma_fresh.py`  
+（JSONL 同步：`ingest_equip_slot_lessons.py --skip-chroma`）
