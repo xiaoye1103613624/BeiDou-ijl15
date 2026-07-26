@@ -71,6 +71,10 @@ public:
 
     static CUIDamageRank& GetInstance();
     static void ToggleByHotkey();
+    // Sidebar: simple open/close (not the F12 mode cycle).
+    static void ToggleBySidebar();
+    static bool IsPanelOpen();
+    static void ClosePanel();
 
     static void SendControlOpen();
     static void SendControlReset();

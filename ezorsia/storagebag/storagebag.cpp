@@ -567,6 +567,9 @@ public:
 
     alignas(8) unsigned char m_ttBuf[0x600];
     bool m_bTtInit; int m_nTtKey;
+    // When true, bag auto-closes if the item inventory is closed (inventory BAG button path).
+    // Sidebar / standalone open sets this false so the bag can stay up without inventory.
+    bool m_bCloseWithInventory;
     int m_cursorState;    // cursor currently set for the bag window: 0 arrow / 12 finger (button press) / 5 hand (grid cells)
     IWzFontPtr m_pFont;          // basic font (light) — stack-count numerals on dark badges
     IWzFontPtr m_pFontDk;        // Dotum 11 dark — search text / bag label on the light art
@@ -603,15 +606,25 @@ public:
     virtual void OnMouseEnter(int bEnter) override;
     virtual void OnDestroy() override;
     virtual void Update() override {
-        // Close together with the item inventory: when the inventory is hidden (its X button or the
-        // inventory hotkey), its render layer goes invisible -> the bag closes with it.
-        if (!IsInventoryShown()) { Destroy(); return; }
+        // Inventory-linked open: close together with the item inventory.
+        // Sidebar / standalone open: keep the bag until the user closes it.
+        if (m_bCloseWithInventory && !IsInventoryShown()) { Destroy(); return; }
         InvalidateRect(nullptr);
     }
     virtual const CRTTI* GetRTTI() const override { return &ms_RTTI; }
     virtual int IsKindOf(const CRTTI* pRTTI) const override { return ms_RTTI.IsKindOf(pRTTI); }
     virtual int OnSetFocus(int /*bFocus*/) override { return 0; }   // movement-pause fix
     virtual void OnKey(unsigned int wParam, unsigned int lParam) override {
+        const bool isKeyUp = (lParam & 0x80000000) != 0;
+        if (!isKeyUp && wParam == VK_ESCAPE) {
+            if (m_searchActive) {
+                if (m_searchLen) SearchClear();
+                SearchSetActive(false);
+                return;
+            }
+            Destroy();
+            return;
+        }
         void* ctx = GetWvsContext();
         if (ctx) reinterpret_cast<int(__thiscall*)(void*, unsigned int, unsigned int)>(
                      kAddr_ProcessBasicUIKey)(ctx, wParam, lParam);
@@ -1019,7 +1032,8 @@ CUIBagWindow::CUIBagWindow(int initialKind, int nLeft, int nTop)
       m_bDragging(0), m_nDragAnchorX(0), m_nDragAnchorY(0),
       m_bScrollDrag(0), m_nScrollGrabDY(0),
       m_armDragType(0), m_armDragIdx(0), m_armDragItem(0), m_armDownX(0), m_armDownY(0),
-      m_nLastClickKey(0), m_nLastClickTick(0), m_bTtInit(false), m_nTtKey(0), m_cursorState(0),
+      m_nLastClickKey(0), m_nLastClickTick(0), m_bTtInit(false), m_nTtKey(0), m_bCloseWithInventory(true),
+      m_cursorState(0),
       m_searchActive(false), m_searchLen(0), m_pendingAccent(0), m_displayCount(0) {
     m_search[0] = 0;
     m_rcClose  = { kBtCloseX,  kBtCloseY,  kBtCloseX  + kBtCloseW,  kBtCloseY  + kBtCloseH };
@@ -1396,21 +1410,32 @@ static void HandleBagSnapshot(CInPacket* pkt, unsigned char* data, unsigned int&
     }
 }
 
-// Toggle the bag window open/closed (opened via the inventory BAG button).
-static void ToggleBags() {
+// Toggle the bag window open/closed.
+// closeWithInventory: true when opened from the inventory BAG button (auto-close with inv);
+// false for sidebar / standalone so the bag can stay open without the item inventory.
+static void ToggleBags(bool closeWithInventory) {
     if (CUIBagWindow::ms_pInstance) { CUIBagWindow::ms_pInstance->Destroy(); return; }
-    EnsureBagWindow(s_savedKind);
+    CUIBagWindow* w = EnsureBagWindow(s_savedKind);
+    if (w) {
+        w->m_bCloseWithInventory = closeWithInventory && IsInventoryShown();
+    }
 }
 
 // --- key hook (chained): routes typing into the bag's search box while it's focused ---
 static auto CField_OnKey = reinterpret_cast<void(__thiscall*)(void*, unsigned int, int)>(kAddr_CField_OnKey);
 void __fastcall CField_OnKey_bag_hook(void* pThis, void* /*edx*/, unsigned int wParam, int lParam) {
     const bool isKeyUp = (lParam & 0x80000000) != 0;
-    // (the bag has no keyboard hotkey — it opens only via the inventory BAG button.)
-    // While the bag's search box is focused, route printable keys into it (and
-    // swallow them so they don't fire skills); non-text keys still reach the game
-    // so arrow-key movement etc. keeps working.
     CUIBagWindow* w = CUIBagWindow::ms_pInstance;
+    if (!isKeyUp && wParam == VK_ESCAPE && w) {
+        if (w->m_searchActive) {
+            if (w->m_searchLen) w->SearchClear();
+            w->SearchSetActive(false);
+            return;
+        }
+        w->Destroy();
+        return;
+    }
+    // While the bag's search box is focused, route printable keys into it.
     if (w && w->m_searchActive && !isKeyUp) {
         if (w->HandleSearchKey(wParam)) return;
     }
@@ -1623,7 +1648,7 @@ typedef void(__thiscall* t_CUIItem_OnChildNotify)(void*, unsigned int, unsigned 
 static auto CUIItem_OnChildNotify = reinterpret_cast<t_CUIItem_OnChildNotify>(kAddr_CUIItem_OnChildNotify);
 void __fastcall CUIItem_OnChildNotify_hook(void* pThis, void* /*edx*/, unsigned int nId, unsigned int nCode, unsigned int nParam) {
     if (nId == kInvBtnId) {
-        if (nCode == kInvNotifyClick) ToggleBags();    // 0x64 = clicked (0x65 = hover enter/leave); toggle the F9 bag
+        if (nCode == kInvNotifyClick) ToggleBags(true);    // 0x64 = clicked; inventory-linked toggle
         return;                                        // consume (vanilla ignores this id)
     }
     CUIItem_OnChildNotify(pThis, nId, nCode, nParam);
@@ -1790,7 +1815,13 @@ void AttachStorageBagMod() {
 // Public toggle entry for other mods: open the bag on the last-viewed kind if closed,
 // close it if open — the same path the F9 hotkey uses. (BagWindow::ToggleBags is
 // file-static; this is its extern face.)
-void BagWindow_Toggle() { BagWindow::ToggleBags(); }
+void BagWindow_Toggle() { BagWindow::ToggleBags(false); } // sidebar/standalone: do not require inventory
+void BagWindow_Close() {
+    if (BagWindow::CUIBagWindow::ms_pInstance) {
+        BagWindow::CUIBagWindow::ms_pInstance->Destroy();
+    }
+}
+bool BagWindow_IsOpen() { return BagWindow::CUIBagWindow::ms_pInstance != nullptr; }
 
 // Public entry for slotlock.cpp: a plain right-click on an inventory item deposits it into its category
 // Storage Bag, auto-routed by inventory type (EQUIP->mount, USE->scroll, SETUP->chair, ETC->ore). No-op
@@ -1850,7 +1881,7 @@ bool BagWindow_HandleMouseMessage(UINT& msg, WPARAM, LPARAM, LRESULT*) {
         if (s_invBagBtnPressed) {
             s_invBagBtnPressed = false; InvInvalidate();       // un-sink
             RECT rc; POINT sp; GetAbsCursor(sp);
-            if (InvBagLiveScreenRect(rc) && PtInRect(&rc, sp)) ToggleBags();  // released inside -> toggle the bag
+            if (InvBagLiveScreenRect(rc) && PtInRect(&rc, sp)) ToggleBags(true);  // released inside -> toggle the bag
             msg = WM_NULL;                                      // eat the matching button-up too
             return true;
         }

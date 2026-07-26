@@ -14,6 +14,8 @@ void PartyBuffs_UpdateSnapshot(
         const std::vector<int>& totalTimes);
 void PartyBuffs_UpdateHpPercent(int characterId, int percent);
 void PartyBuffs_SetTrackerVisible(bool visible);
+bool PartyBuffs_IsTrackerVisible();
+void PartyBuffs_ToggleTracker();
 void PartyBuffs_UpdateTracker(int characterId, unsigned long long exp, unsigned long long meso);
 void PartyBuffs_UpdateCounts(int characterId, int count, const unsigned char* payload);
 

@@ -93,6 +93,12 @@ static constexpr int kReq_Claim     = 1;
 static constexpr int kResp_Snapshot = 1;
 static constexpr int kDays          = 28;
 
+static void SendReq_Open() {
+    COutPacket o(kOpcode_Send);
+    o.Encode1((unsigned char)kReq_Open);
+    SendPacket(o);
+}
+
 static void SendReq_Claim(int day) {
     COutPacket o(kOpcode_Send);
     o.Encode1((unsigned char)kReq_Claim);
@@ -183,6 +189,11 @@ public:
     virtual int IsKindOf(const CRTTI* pRTTI) const override { return ms_RTTI.IsKindOf(pRTTI); }
     virtual int OnSetFocus(int /*bFocus*/) override { return 0; }   // let the player still move
     virtual void OnKey(unsigned int wParam, unsigned int lParam) override {
+        const bool isKeyUp = (lParam & 0x80000000) != 0;
+        if (!isKeyUp && wParam == VK_ESCAPE) {
+            Destroy();
+            return;
+        }
         void* ctx = GetWvsContext();
         if (ctx) reinterpret_cast<int(__thiscall*)(void*, unsigned int, unsigned int)>(
                      kAddr_ProcessBasicUIKey)(ctx, wParam, lParam);
@@ -575,4 +586,32 @@ void HandleServerPacket(CompatInPacket* packet) {
 
 void AttachDailyCheckinMod() {
     // No extra hooks; PacketDispatcher handles recv opcode 0x17C.
+}
+
+void DailyCheckin_RequestOpen() {
+    // Same TU as SendReq_Open (namespace DailyCheckin).
+    COutPacket o(0x11A);
+    o.Encode1(0); // kReq_Open
+    void* sock = *reinterpret_cast<void**>(ClientAddresses::kClientSocketPtr);
+    if (sock) {
+        reinterpret_cast<void(__thiscall*)(void*, const COutPacket&)>(ClientAddresses::kSendPacket)(sock, o);
+    }
+}
+
+void DailyCheckin_Close() {
+    if (DailyCheckin::CUIDailyCheckin::ms_pInstance) {
+        DailyCheckin::CUIDailyCheckin::ms_pInstance->Destroy();
+    }
+}
+
+void DailyCheckin_Toggle() {
+    if (DailyCheckin_IsOpen()) {
+        DailyCheckin_Close();
+    } else {
+        DailyCheckin_RequestOpen();
+    }
+}
+
+bool DailyCheckin_IsOpen() {
+    return DailyCheckin::CUIDailyCheckin::ms_pInstance != nullptr;
 }

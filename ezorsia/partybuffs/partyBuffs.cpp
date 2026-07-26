@@ -931,6 +931,14 @@ void PartyBuffs_UpdateHpPercent(int characterId, int percent) {
     }
 }
 
+bool PartyBuffs_IsTrackerVisible() {
+    return g_trackerVisible;
+}
+
+void PartyBuffs_ToggleTracker() {
+    PartyBuffs_SetTrackerVisible(!g_trackerVisible);
+}
+
 void PartyBuffs_SetTrackerVisible(bool visible) {
     g_trackerVisible = visible;
     g_partyTracker.clear();

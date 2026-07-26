@@ -515,6 +515,38 @@ void CUIDamageRank::ToggleByHotkey() {
     instance.Redraw();
 }
 
+bool CUIDamageRank::IsPanelOpen() {
+    auto& instance = GetInstance();
+    return instance.IsVisible() && !instance.m_minimized;
+}
+
+void CUIDamageRank::ClosePanel() {
+    auto& instance = GetInstance();
+    if (!instance.IsVisible()) {
+        return;
+    }
+    SendControlClose();
+    instance.SetVisible(false);
+    instance.m_minimized = false;
+    instance.m_mode = Mode::Player;
+}
+
+void CUIDamageRank::ToggleBySidebar() {
+    if (IsPanelOpen()) {
+        ClosePanel();
+        return;
+    }
+    auto& instance = GetInstance();
+    if (!instance.EnsureCreated()) {
+        return;
+    }
+    SendControlOpen();
+    instance.SetMode(Mode::Player);
+    instance.m_minimized = false;
+    instance.SetVisible(true);
+    instance.Redraw();
+}
+
 bool CUIDamageRank::EnsureCreated() {
     if (m_created && m_layer) {
         return true;

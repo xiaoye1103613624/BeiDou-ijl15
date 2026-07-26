@@ -413,6 +413,18 @@ public:
     virtual int OnMouseMove(int rx, int ry) override;
     virtual void OnDestroy() override;
     virtual void Update() override;
+    virtual int OnSetFocus(int /*bFocus*/) override { return 0; }
+    virtual void OnKey(unsigned int wParam, unsigned int lParam) override {
+        const bool isKeyUp = (lParam & 0x80000000) != 0;
+        if (!isKeyUp && wParam == VK_ESCAPE) {
+            Destroy();
+            return;
+        }
+        void* ctx = *reinterpret_cast<void**>(kAddr_CWvsContext_Instance);
+        if (ctx) {
+            reinterpret_cast<int(__thiscall*)(void*, unsigned int, unsigned int)>(0x00A07431)(ctx, wParam, lParam);
+        }
+    }
 
     virtual const CRTTI* GetRTTI() const override { return &ms_RTTI; }
     virtual int IsKindOf(const CRTTI* pRTTI) const override { return ms_RTTI.IsKindOf(pRTTI); }
@@ -1222,6 +1234,24 @@ void BeautyShop_SendUnlockSlot(int nPOS) {
 
 void BeautyShop_OpenWindow() {
     OpenBeautyShop();
+}
+
+void BeautyShop_CloseWindow() {
+    if (CBeautyShop::ms_pInstance) {
+        CBeautyShop::ms_pInstance->Destroy();
+    }
+}
+
+void BeautyShop_ToggleWindow() {
+    if (BeautyShop_IsOpen()) {
+        BeautyShop_CloseWindow();
+    } else {
+        BeautyShop_OpenWindow();
+    }
+}
+
+bool BeautyShop_IsOpen() {
+    return CBeautyShop::ms_pInstance != nullptr;
 }
 
 static int g_cachedUnlockedSlots = -1;
