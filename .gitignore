@@ -47,3 +47,9 @@ tools/*.img
 tools/*.png
 *.err
 _build_*.err
+_tmp*/
+_boot_test/
+_cmp*/
+*_HEAD.cpp
+*_HEAD.h
+probe_*.json
