@@ -51,4 +51,8 @@ public:
 	static int serverIP_Port;
 	static bool talkRepeat;
 	static int talkTime;
+	static bool quickLogin;
+	static bool allowCashTrade;
+	/** 装备成长属性旁挂 tip；默认 true，仅悬停时懒创建，启动路径零 tip。 */
+	static bool enableGrowthCompanionTip;
 };

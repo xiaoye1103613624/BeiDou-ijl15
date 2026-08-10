@@ -18,6 +18,8 @@ public:
     MEMBER_AT(IWzGr2DLayerPtr, 0x15C, m_pLayerObject)
     MEMBER_AT(IWzGr2DLayerPtr, 0x174, m_pLayerBack)
     MEMBER_AT(IWzGr2DLayerPtr, 0x180, m_pLayerFront)
+    // ShowMobHPTag stores gage layer at this+0x1E4 (IDA: *((_DWORD*)this+121)).
+    MEMBER_AT(IWzGr2DLayerPtr, 0x1E4, m_pLayerHPTag)
     MEMBER_AT(ZRef<CWnd>, 0x1C8, m_pClock) // ZRef<CClock>
 
     inline static auto OnKey =

@@ -1,4 +1,4 @@
-// dllmain.cpp : Defines the entry point for the DLL application.
+﻿// dllmain.cpp : Defines the entry point for the DLL application.
 #include "stdafx.h"
 #include "NMCO.h"
 #include "ijl15.h"
@@ -10,24 +10,46 @@
 #endif
 #include "HpMpAlert.h"
 #include "SelectCharMacFix.h"
+#include "compat/rs/rs.h"
+#include <iostream>
 #ifndef BEIDOU_MINIMAL_PLUGIN
 #include "compat/LazyCompatInit.h"
 #include "higherstoragelist/HigherStorageListApi.h"
 #include "highershoplist/HigherShopListApi.h"
 #include "maxhpmp/MaxHpMpApi.h"
 #include "level300/Level300Api.h"
+#include "mesouncap/MesoUncapApi.h"
 #include "personalshop/PersonalShopApi.h"
 #include "charslots/CharSlotsApi.h"
 #include "shoulders/ShoulderApi.h"
+#include "equipaddon/EquipAddonApi.h"
 #include "pendant2/Pendant2Api.h"
 #include "gamedata/GameDataGuardApi.h"
+#include "quicklogin/QuickLoginApi.h"
+#include "bootlog/LoadTraceApi.h"
 #endif
+#include "bootlog/BootLog.h"
+#include "bootlog/CrashDiag.h"
 #pragma comment(lib, "ws2_32.lib")
 
 // Keep in sync with LazyCompatInit.cpp / ModRegistry.cpp.
 // 0 = full late UI (C497-class). Skill.wz restored; K hang was Data not Level300.
 #ifndef BISECT_DISABLE_LATE_UI_HOOKS
 #define BISECT_DISABLE_LATE_UI_HOOKS 0
+#endif
+
+// Boot bisect 2026-08-07: full Release → InitializeGr2D E_FAIL (0x80004005) on native
+// Gr2D while stock ijl15 boots GREEN.
+// 0 = full attach path; 1 = ijl15+IP only (LOGIN GREEN proven).
+// Stages (when LOGIN_ONLY=0): use BEIDOU_BOOT_STAGE to re-enable chunks.
+//   1=core hooks  2=+rs_resman  3=+UpdateResolution  4=+Client patches  5=+features/LoadTrace
+// 2026-08-07 flash-crash: LOGIN_ONLY=1 skips UpdateResolution → soft Exit(0) ~5s/16MB.
+// Full attach + ImmDisableIME + AttachLoadTrace OFF; pair with DX9 proxy on Client_1.
+#ifndef BEIDOU_BOOT_LOGIN_ONLY
+#define BEIDOU_BOOT_LOGIN_ONLY 0
+#endif
+#ifndef BEIDOU_BOOT_STAGE
+#define BEIDOU_BOOT_STAGE 5
 #endif
 
 // config.ini can use IP or hostname (ServerIP_Address=...).
@@ -49,34 +71,17 @@ static std::string GetConfigIniPath(HMODULE module)
 	return path.substr(0, slash + 1) + "config.ini";
 }
 
-// SEH helper must not live in DllMain (C2712: no __try with C++ unwinding).
-static void WriteBootLine(HMODULE hModule, const char* line)
+#ifndef BEIDOU_MINIMAL_PLUGIN
+static void AttachLevel300ModWithBootLog(HMODULE /*hModule*/)
 {
-	char bootPath[MAX_PATH]{};
-	GetModuleFileNameA(hModule, bootPath, MAX_PATH);
-	if (char* slash = strrchr(bootPath, '\\')) {
-		*(slash + 1) = '\0';
-	}
-	strcat_s(bootPath, "plugin_boot.txt");
-	HANDLE boot = CreateFileA(bootPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
-		nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-	if (boot != INVALID_HANDLE_VALUE) {
-		DWORD w = 0;
-		WriteFile(boot, line, (DWORD)strlen(line), &w, nullptr);
-		FlushFileBuffers(boot);
-		CloseHandle(boot);
-	}
-}
-
-static void AttachLevel300ModWithBootLog(HMODULE hModule)
-{
-	WriteBootLine(hModule, "AttachLevel300Mod BEGIN (LVL3 sentinel)\r\n");
+	BootLogStage("AttachLevel300Mod BEGIN");
 	AttachLevel300Mod();
-	WriteBootLine(hModule, "AttachLevel300Mod END\r\n");
+	BootLogStage("AttachLevel300Mod END");
 #if BISECT_DISABLE_LATE_UI_HOOKS
-	WriteBootLine(hModule, "BISECT_DISABLE_LATE_UI_HOOKS=1 (worldmap/damageskin/fusionanvil/setitem-ui OFF)\r\n");
+	BootLog("BISECT_DISABLE_LATE_UI_HOOKS=1 (worldmap/damageskin/fusionanvil/setitem-ui OFF)");
 #endif
 }
+#endif
 
 static std::string ResolveToIpv4String(const std::string& hostOrIp)
 {
@@ -119,9 +124,22 @@ static std::string ResolveToIpv4String(const std::string& hostOrIp)
 }
 
 void CreateConsole() {
-	AllocConsole();
-	FILE* stream;
-	freopen_s(&stream, "CONOUT$", "w", stdout); //CONOUT$
+	// Native Gr2D_DX8 (AB1C9422): AllocConsole/CONOUT$ freopen during DllMain
+	// breaks IWzGr2D::Initialize (E_FAIL → softfail). Stock ijl has no console.
+	// Do NOT AllocConsole. Silence iostreams so accidental std::cout in DllMain
+	// cannot trip ucrtbase abort (0xc0000409) on a detached stdout.
+	std::cout.setstate(std::ios_base::failbit);
+	std::cerr.setstate(std::ios_base::failbit);
+	std::clog.setstate(std::ios_base::failbit);
+
+	// SogouPY.ime has AV'd mid-boot (beidou-crash @ SogouPY.ime+…). Disable IME
+	// for this process before CreateWindow/Gr2D — stock has no IME hook either.
+	if (HMODULE imm = LoadLibraryA("imm32.dll")) {
+		using ImmDisableIME_t = BOOL(WINAPI*)(DWORD);
+		if (auto fn = reinterpret_cast<ImmDisableIME_t>(GetProcAddress(imm, "ImmDisableIME"))) {
+			fn(static_cast<DWORD>(-1));
+		}
+	}
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReserved)
@@ -129,8 +147,21 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 	switch (ul_reason_for_call) {
 	case DLL_PROCESS_ATTACH:
 	{
-		//CreateConsole();	//console for devs, use this to log stuff if you want
+		CreateConsole();	//console for devs, use this to log stuff if you want
+		BootLog_Init(hModule);
+#if !BEIDOU_SIZE_TRIM_DLLMAIN
+		BootLog_InstallCrashVeh();
+#if !BEIDOU_BOOT_LOGIN_ONLY
+		CrashDiag_Init(hModule);
+		// CrashDiag_AttachHooks Detours _com_raise_error / GetObjectA — leave OFF
+		// until native Gr2D login is stable (same family as AttachLoadTrace E_FAIL).
+		// CrashDiag_AttachHooks();
+#endif
+#endif
+		BootLogStage("DllMain ATTACH begin");
+		BootLog("BEIDOU_BOOT_LOGIN_ONLY=%d STAGE=%d", BEIDOU_BOOT_LOGIN_ONLY, BEIDOU_BOOT_STAGE);
 		const std::string configPath = GetConfigIniPath(hModule);
+		BootLog("config.ini path=%s", configPath.c_str());
 		INIReader reader(configPath);
 		if (reader.ParseError() == 0) {
 			Client::m_nGameWidth = reader.GetInteger("general", "width", 1280);
@@ -165,8 +196,24 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 			Client::climbSpeed = reader.GetFloat("optional", "climbSpeed", 1.0);
 			Client::talkRepeat = reader.GetBoolean("optional", "talkRepeat", false);
 			Client::talkTime = reader.GetInteger("optional", "talkTime", 2000);
+			Client::quickLogin = reader.GetBoolean("optional", "quickLogin", true);
+			Client::allowCashTrade = reader.GetBoolean("optional", "allowCashTrade", true);
+			// Prefer enableGrowthCompanion; also accept legacy enableEquipGrowthTip.
+			Client::enableGrowthCompanionTip =
+					reader.GetBoolean("optional", "enableGrowthCompanion",
+							reader.GetBoolean("optional", "enableEquipGrowthTip", true));
+			rs_tier = reader.GetInteger("general", "soScreenResolution", -1);
+			rs_field_follow_login = (rs_tier < 0);
+			BootLog("config.ini OK %dx%d ip=%s:%d", Client::m_nGameWidth, Client::m_nGameHeight,
+				Client::ServerIP_AddressFromINI.c_str(), Client::serverIP_Port);
+		} else {
+			BootLog("config.ini PARSE FAIL code=%d (using defaults)", reader.ParseError());
 		}
 
+		BootLogStage("DllMain Client::UpdateGameStartup");
+		Client::UpdateGameStartup();
+#if !BEIDOU_BOOT_LOGIN_ONLY && (BEIDOU_BOOT_STAGE >= 1)
+		BootLogStage("DllMain core hooks");
 		Hook_CreateMutexA(true); //multiclient //ty darter, angel, and alias!
 		HookCreateWindowExA(true); //default ezorsia
 		HookGetModuleFileName(true); //default ezorsia
@@ -183,15 +230,29 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		Hook_lpfn_NextLevel(true);
 		HookSaveGlobal(true);
 		HookSelectCharMacFix(true);
-		//Hook_get_unknown(true);
-		//Hook_get_resource_object(true); //helper function hooks  //ty teto for helping me get started
-		//Hook_com_ptr_t_IWzProperty__ctor(true);
-		//Hook_com_ptr_t_IWzProperty__dtor(true);
-
-		Client::UpdateGameStartup();
-
-		std::cout << "Applying resolution " << Client::m_nGameWidth << "x" << Client::m_nGameHeight << std::endl;
-		Client::UpdateResolution();
+#endif
+#if !BEIDOU_BOOT_LOGIN_ONLY && (BEIDOU_BOOT_STAGE >= 2)
+		// Custom.wz SysOpt UI stretch — fail-soft mount (never abort boot on E_FAIL).
+		BootLogStage("DllMain rs_resman_init");
+		rs_resman_init();
+		if (rs_tier < 0) {
+			rs_tier = rs_tier_from_dims(Client::m_nGameWidth, Client::m_nGameHeight);
+			rs_field_follow_login = true;
+		}
+		if (rs_tier > RS_TIER_MAX) rs_tier = 0;
+		BootLog("RS login %dx%d field_tier=%d follow=%d", Client::m_nGameWidth, Client::m_nGameHeight,
+			rs_tier, rs_field_follow_login ? 1 : 0);
+#endif
+#if !BEIDOU_BOOT_LOGIN_ONLY && (BEIDOU_BOOT_STAGE >= 3)
+		BootLogStage("DllMain UpdateResolution");
+		Client::UpdateResolution(); // WindowedMode + BeiDou login resolution
+		rs_set_login_dims(Client::m_nGameWidth, Client::m_nGameHeight);
+		rs_width = Client::m_nGameWidth;
+		rs_height = Client::m_nGameHeight;
+		rs_adjust_cy = (rs_height > 600) ? (rs_height - 600) / 2 : 0;
+#endif
+#if !BEIDOU_BOOT_LOGIN_ONLY && (BEIDOU_BOOT_STAGE >= 4)
+		BootLogStage("DllMain Client patches");
 		Client::FixMouseWheel();
 		Client::Chinese();
 		Client::LongQuickSlot();
@@ -201,48 +262,51 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		Client::FixChatPosHook();
 		Client::NoPassword();
 		Client::MoreHook();
-		// TEMP disabled 2026-07-19: isolate error-38 on item drop (UIWindow/ExpandItem redraw).
-		// Client::ExpandItem();
 		Client::DeleteChar();
-#ifndef BEIDOU_MINIMAL_PLUGIN
-		// Trunk / shop list row patches are pure WriteByte — safe at DllMain (before any UI).
-		HigherStorageList::ApplyPatches();
-		// HigherShopList 5→9: requires Shop/backgrnd ~463x499 (+160). PatchStorageBg extend-shop.
-		HigherShopList::ApplyPatches();
-		// HP/MP 4-byte expansion: Decode2->Decode4 + FakeTear + Fuse hooks + FixMovsx.
-		// Must run before first char-stat packet decode (login / map enter).
-		AttachMaxHpMpMod();
-		// Level ushort expansion + EXP Decode8 caves (server writeLong).
-		AttachLevel300ModWithBootLog(hModule);
-		// Soften InitializeGameData EC_INVALID_GAME_DATA (StringPool#86) after Data appends.
-		AttachGameDataGuard();
-		// Player/hired shop: server slotMax=32; UI canvas lengthening still WZ-side.
-		AttachPersonalShopMod();
-		// DISABLED 2026-07-16: CharSlots addresses are for Characterslot-30/kaentake client,
-		// NOT BeiDou.exe. Patch1 overwrites 0F-prefix of jge/jl (0F 8D/0F 7C) with 0x1E,
-		// corrupting jumps -> ZException -21E (0x21E) on channel->charselect.
-		// CharSlots::ApplyPatches();
-		// Shoulder 115/BP20/-20 + pendant2 112 + rings (FIX_RING_UNEQUIP_PERSIST_20260727aj).
-		// get_bodypart x6 ON (52/53 first); draw max fixed 53; bind ON; bag dblclick
-		// restores ring empty-search count; equipped dblclick → native wear@4F0B89;
-		// login apply slot max 53 / walk −52.
-		AttachShoulderSlotsFix();
-		// Second pendant 112/BP51/-51: DllMain attach stays OFF (2026-07-26b/d).
-		// Root cause: ForceDrawLoop@7FEFB9 + GetSlotXY/HitTest at DllMain → AuthSuccess→ALL_IDLE.
-		// Post-field UI (LazyCompatInit): EnsurePendant2AfterFieldEnter when pendant2_ui=true;
-		// cave@7FDE8B forces drawer this+0x5E8; r-fix zeros +0x21 layout deltas + parks BP23 draw.
-		// Draw: loop-end mov eax,53 (ae); NOT add-imm 0x35 (ad BP54 hang). NEVER pet HT@801214.
-		// aa hang: [ebp-14] decimal; ad hang: imm 0x35+flag1=>BP54 OOB;
-		// ae/af E hang: ForceNormal special path skipped mov edx,[ebp-14h] @7FEEC9.
-		// InstallBootstrapHook: RefreshRate early (login-safe); other mods at first CField.
-		LazyCompatInit::InstallBootstrapHook();
-#else
-		// Ultra-minimal: ijl15 proxy + IP/res hooks only — no feature hooks at DllMain.
 #endif
-		std::cout << "GetModuleFileName hook created" << std::endl;
-		ijl15::CreateHook(); //NMCO::CreateHook();
-
-		std::cout << "NMCO hook initialized" << std::endl;
+#if !BEIDOU_BOOT_LOGIN_ONLY && (BEIDOU_BOOT_STAGE >= 5)
+#ifndef BEIDOU_MINIMAL_PLUGIN
+		BootLogStage("DllMain feature mods");
+		HigherStorageList::ApplyPatches();
+		BootLog("HigherStorageList OK");
+		HigherShopList::ApplyPatches();
+		BootLog("HigherShopList OK");
+		AttachMaxHpMpMod();
+		BootLog("MaxHpMp OK");
+		AttachLevel300ModWithBootLog(hModule);
+		AttachMesoUncapMod();
+		BootLog("MesoUncap OK");
+		AttachGameDataGuard();
+		BootLog("GameDataGuard OK");
+		AttachPersonalShopMod();
+		BootLog("PersonalShop OK");
+		if (Client::quickLogin) {
+			AttachQuickLoginMod();
+			BootLog("QuickLogin OK");
+		}
+		if (Client::allowCashTrade) {
+			AttachAllowCashTradeMod();
+			BootLog("AllowCashTrade OK");
+		}
+		AttachShoulderSlotsFix();
+		BootLog("ShoulderSlots OK");
+		LazyCompatInit::InstallBootstrapHook();
+		BootLog("LazyCompat bootstrap OK");
+		// LoadTrace Detours InitializeGr2D/throw_hr — on this host causes
+		// IWzGr2D::Initialize E_FAIL (0x80004005) → softfail ExitProcess.
+		// Keep OFF until Gr2D A/B with native AB1C9422 stays green.
+		BootLog("AttachLoadTrace BEGIN (re-enabled 08-10 A/B)");
+		AttachLoadTrace();
+		BootLog("AttachLoadTrace END");
+#else
+		BootLog("BEIDOU_MINIMAL_PLUGIN — feature mods skipped");
+#endif
+		BootLogStage("DllMain rs_register");
+		rs_register();
+#endif
+		BootLogStage("DllMain ijl15 proxy");
+		ijl15::CreateHook();
+		BootLogStage("DllMain ATTACH done — waiting for CWvsApp::Init");
 		break;
 	}
 	default: break;

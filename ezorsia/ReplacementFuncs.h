@@ -1,5 +1,6 @@
 #pragma once
 #include "AutoTypes.h"
+#include "potentialscroll/PotentialScrollApi.h"
 
 static bool ownLoginFrame;
 static bool ownCashShopFrame;
@@ -2170,6 +2171,8 @@ bool Hook_StringPool__GetString(bool bEnable)	//hook stringpool modification //t
 				}
 				break;
 		}
+		// Soft095: Hyper smash has no protect/white-scroll YesNo.
+		// Do NOT hijack StringPool#3963 for Hyper; normal scrolls keep¡¸×£¸£¾íÖá¡¹.
 		return ret;
 	};
 	return Memory::SetHook(bEnable, reinterpret_cast<void**>(&_StringPool__GetString), _StringPool__GetString_Hook);

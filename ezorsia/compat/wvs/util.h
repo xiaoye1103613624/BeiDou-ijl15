@@ -30,13 +30,17 @@ inline IUnknownPtr get_unknown(Ztl_variant_t v) {
     return pUnk;
 }
 
-// Resolution lives in Client::m_nGameWidth/Height (patched at startup).
-// Do NOT read 0x009F707E/7082 — those are code-section immediates; the old
-// get_screen_height() used 0x009F7082 (width+4) and returned garbage Y.
+// Runtime resolution from compat/rs (login = config.ini; field = soScreenResolution tier).
+#include "compat/rs/rs.h"
+
 inline int get_screen_width() {
-    return Client::m_nGameWidth;
+    return rs_get_width();
 }
 
 inline int get_screen_height() {
-    return Client::m_nGameHeight;
+    return rs_get_height();
+}
+
+inline int get_adjust_cy() {
+    return rs_get_adjust_cy();
 }

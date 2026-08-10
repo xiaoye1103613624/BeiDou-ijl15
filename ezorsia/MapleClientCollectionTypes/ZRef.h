@@ -89,6 +89,9 @@ public:
 
 	/// <summary>
 	/// Set this ZRef pointer equal to the given pointer. Only works for ZRefCounted types.
+	/// NOTE: for MI types where ZRefCounted is not at offset 0 (e.g. CCtrlWnd),
+	/// `zref = new T()` adjusts to the ZRefCounted subobject and stores it as T* —
+	/// that breaks method calls. Use a raw T* (or kaentake-style operator=(T*)) instead.
 	/// </summary>
 	ZRef<T>* operator=(ZRefCounted* pT)
 	{

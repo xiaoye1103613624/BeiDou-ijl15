@@ -30,9 +30,12 @@ std::string Client::ServerIP_AddressFromINI = "127.0.0.1"; // 服务器IP地址
 int Client::serverIP_Port = 8484; // 服务器端口
 bool Client::talkRepeat = false; // 重复说话
 int Client::talkTime = 2000; // 说话间隔时间
+bool Client::quickLogin = true; // 选区后自动聚焦频道（回车进1线）
+bool Client::allowCashTrade = true; // 允许现金道具进入交易栏（客户端 NOP）
 bool Client::disablePacketHook = false;
 bool Client::disableBossHP = false;
 bool Client::disableWorldMap = false;
+bool Client::enableGrowthCompanionTip = true; // 成长旁挂 tip；config optional.enableGrowthCompanion
 
 void Client::UpdateGameStartup() {
 	//Memory::CodeCave(cc0x0044E550, dw0x0044E550, dw0x0044E550Nops); //run from packed client //skip //sub_44E546
@@ -430,8 +433,11 @@ void Client::UpdateResolution() {
 
 	Memory::WriteInt(0x00A24D0B + 1, (m_nGameWidth / 2) - 129);//??
 
-	Memory::WriteInt(0x00BE273C, 128);//??
-	Memory::WriteByte(0x00A5FC2B, 0x05);//??
+	// FORBIDDEN (native Gr2D / _com_error path):
+	// Memory::WriteInt(0x00BE273C, 128) — undocumented data poke
+	// Memory::WriteByte(0x00A5FC2B, 0x05) — IDA: smashes unknown_libname_10
+	//   (std::logic_error EH @0xA5FC2B, bytes B8 D0 F5 AE…). Native Gr2D
+	//   Initialize E_FAIL → throw uses this; corrupted EH → SEH ExitProcess.
 	//Memory::WriteByte(0x008D1790 + 2, 0x01); //related to quickslots area presence		 originally 1U but changed because unsigned int crashes it after char select
 	Memory::WriteByte(0x0089B636 + 2, 0x01); //related to exp gain/item pick up msg, seems to affect msg height ! originally 1U but changed because unsigned int crashes it after char select
 	Memory::WriteByte(0x00592A06 + 1, 0x01);//???likely related to mouse pos
@@ -445,8 +451,15 @@ void Client::UpdateResolution() {
 	Memory::WriteInt(0x00897BB4 + 1, (m_nGameWidth / 2) - 143);//??related to exp gain/item pick up msg
 
 	if (WindowedMode) {
-		unsigned char forced_window[] = { 0xb8, 0x00, 0x00, 0x00, 0x00 }; //force window mode	//thanks stelmo for showing me how to do this
-		Memory::WriteByteArray(0x009F7A9B, forced_window, sizeof(forced_window));//force window mode
+		// dword_BF1AC8: nonzero = fullscreen CreateWindow (WS_POPUP|TOPMOST).
+		// CWvsApp::Init writes imm 16 at 0x9F5623 BEFORE CreateWindow (0x9F6D97)
+		// and InitializeGr2D (0x9F7A3B). Old Ezorsia only patched the Gr2D *read*
+		// at 0x9F7A9B (mov eax,[BF1AC8] → mov eax,0), leaving CreateWindow on
+		// fullscreen styles while Gr2D::Initialize got refresh/mode=0 → D3D8 E_FAIL.
+		// IDA: 9F5623 = C7 05 C8 1A BF 00 | 10 00 00 00
+		Memory::WriteByte(0x009F5629, 0x00); // mov dword_BF1AC8, 0
+		unsigned char forced_window[] = { 0xb8, 0x00, 0x00, 0x00, 0x00 }; // mov eax,0 at Gr2D read
+		Memory::WriteByteArray(0x009F7A9B, forced_window, sizeof(forced_window));
 	}
 	if (RemoveLogos) {
 		Memory::FillBytes(0x0062EE54, 0x90, 21);	//no Logo @launch //Thanks Denki!!
@@ -823,8 +836,10 @@ void Client::LongQuickSlot() {
 	Memory::WriteByte(0x008DE941 + 2, 0x1A); //change cmp 8 --> cmp 26
 
 	//CUIStatusBar::GetShortCutIndexByPos
+	// Loop: esi = &Y0, steps +8, jl vs end. Must bound to expanded 26-slot array
+	// (old WriteByte(+1,0x3E) corrupted `cmp esi,imm` into `cmp [esi],imm` → drop fail).
 	Memory::WriteInt(0x008DE8F4 + 1, (DWORD)&Array_ptShortKeyPos_Fixed_Tooltips + 4);
-	Memory::WriteByte(0x008DE926 + 1, 0x3E);
+	Memory::WriteInt(0x008DE926 + 2, (DWORD)&Array_ptShortKeyPos_Fixed_Tooltips + 4 + 26 * 8);
 
 	//CUIStatusBar::CQuickSlot::DrawSkillCooltime
 	Memory::WriteByte(0x008E099F + 3, 0x1A);
@@ -934,18 +949,17 @@ void Client::MoreHook() {
 	}
 	Memory::WriteInt(0x0049064B + 2, talkTime);
 
-	if (setAtkOutCap > 999999)
-	{
-		Memory::WriteInt(0x008C485A + 1, 192); // 面板关闭按钮x
-		Memory::WriteInt(0x008C4AB3 + 1, 210); // 面板宽度
-		Memory::WriteInt(0x008C510A + 1, 218); // 详情面板宽度
-		Memory::WriteInt(0x008C4EA2 + 1, 210); // 详情面板初始x
-		Memory::WriteInt(0x008C5760 + 1, 210); // 详情面板切换x
-		Memory::WriteInt(0x008C7AD9 + 1, 185); // 加属性按钮x
-		Memory::WriteInt(0x008C2754 + 1, 195); // 详情面板关闭按钮x
-		Memory::WriteInt(0x008C6C72 + 1, 210); // 移动时详情面板x
-		Memory::CodeCave(apDetailBtn, 0x008C4E1B, 7); // 详情按钮
-	}
+	// 能力属性框加宽（IDA 原值→加宽后）：关闭钮156→192、主窗宽176→210、详情宽177→218、
+	// 详情偏移170→210、AP钮x153→185、详情关闭155→195、详情钮x124→153(apDetailBtn)
+	Memory::WriteInt(0x008C485A + 1, 192); // CUIStat 关闭按钮 x (push 156)
+	Memory::WriteInt(0x008C4AB3 + 1, 210); // CUIStat 面板宽度 (push 176)
+	Memory::WriteInt(0x008C510A + 1, 218); // CUIStatDetail 宽度 (push 177)
+	Memory::WriteInt(0x008C4EA2 + 1, 210); // 详情面板初始 x (add 170)
+	Memory::WriteInt(0x008C5760 + 1, 210); // 详情面板切换 x (add 170)
+	Memory::WriteInt(0x008C7AD9 + 1, 185); // 加属性按钮 x (mov edi, 153)
+	Memory::WriteInt(0x008C2754 + 1, 195); // 详情面板关闭按钮 x (push 155)
+	Memory::WriteInt(0x008C6C72 + 1, 210); // 移动时详情面板 x (add 170)
+	Memory::CodeCave(apDetailBtn, 0x008C4E1B, 7); // 详情按钮 x 124→153
 	// 喇叭
 	Memory::WriteInt(0x0045A5BE + 1, 9999);
 
@@ -1028,10 +1042,13 @@ DWORD WINAPI RefreshRatePatchWorker(LPVOID) {
 }
 } // namespace
 
-typedef void(_cdecl* pfunPcCreateObject_IWzPackage)(int param1, DWORD param2, DWORD param3);
+// PcCreateObject @0x9FB0E9 is shared (Package/Gr2D/…). Must return HRESULT —
+// a void hook + post PatchRefreshRateTo60 clobber of EAX made callers see a
+// fake failure (_com_error) after a successful CoCreate (boot flash @Gr2D).
+typedef int(_cdecl* pfunPcCreateObject_IWzPackage)(int param1, DWORD param2, DWORD param3);
 pfunPcCreateObject_IWzPackage g_PcCreateObject_IWzPackage = nullptr;
 
-void
+int
 _cdecl
 HookPcCreateObject_IWzPackage(
 	int param1
@@ -1039,8 +1056,9 @@ HookPcCreateObject_IWzPackage(
 	, DWORD param3)
 {
 	PatchRefreshRateTo60();
-	g_PcCreateObject_IWzPackage(param1, param2, param3);
+	const int hr = g_PcCreateObject_IWzPackage(param1, param2, param3);
 	PatchRefreshRateTo60();
+	return hr;
 }
 void Client::RefreshRate()
 {
