@@ -15,13 +15,16 @@
 #include "storagebag/StorageBagApi.h"
 #include "damagerank/uiDamageRank.h"
 #include "partybuffs/PartyBuffsApi.h"
+#include "cashshop/CashShopApi.h"
 #include "compat/ClientAddresses.h"
+#include "compat/rs/rs.h"
 #include "wvs/packet_legacy.h"
 #include "wvs/wnd.h"
 #include "wvs/util.h"
 #include "ztl/ztl.h"
 
 #include <windows.h>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 
@@ -45,30 +48,71 @@ static constexpr int kIconW = 32;
 static constexpr int kIconH = 36;
 static constexpr int kIconPad = 2;
 static constexpr int kGap = 4;
-static constexpr int kPanelW = 108;
-static constexpr int kItemH = 24;
+static constexpr int kPanelW = 120;
+static constexpr int kItemH = 22;
 static constexpr int kItemPadX = 6;
-static constexpr int kItemPadY = 4;
+static constexpr int kItemPadY = 3;
 static constexpr int kAnimIntervalMs = 250;
 static constexpr int kAnimFrameCount = 3; // Omok black 0..2
 
+// 0..8 match SidebarToolHandler.java (SIDEBAR_TOOL 0xC6).
+// 9..13 are local client UI toggles (no server packet).
 enum FeatureId : int {
-    kFeatBeauty = 0,
-    kFeatCheckin,
-    kFeatDamageRank,
-    kFeatStorageBag,
-    kFeatPartyTracker,
+    kToolConvenient = 0, // 便民工具
+    kToolEquipCenter,    // 装备中心
+    kToolExchange,       // 兑换中心
+    kToolVip,            // VIP会员
+    kToolGrowth,         // 成长系统
+    kToolDaily,          // 每日任务
+    kToolSocial,         // 社交系统
+    kToolCollect,        // 收集系统
+    kToolGm,             // GM工具
+    kServerToolCount = 9,
+    kFeatStorageBag = 9, // 收纳背包
+    kFeatDamageRank,     // 伤害统计
+    kFeatPartyTracker,   // 队伍追踪
+    kFeatBeauty,         // 美容美发
+    kFeatCheckin,        // 每日签到
+    kFeatCashShop,       // 现金商城
     kFeatCount
 };
+
+static constexpr unsigned short kOpcode_SidebarTool = 0xC6;
+
+static auto ClientSocket_SendPacket =
+    reinterpret_cast<void(__thiscall*)(void*, const COutPacket&)>(ClientAddresses::kSendPacket);
+
+static void SendSidebarTool(int toolIndex) {
+    if (toolIndex < 0 || toolIndex >= kServerToolCount) {
+        return;
+    }
+    void* sock = *reinterpret_cast<void**>(ClientAddresses::kClientSocketPtr);
+    if (!sock) {
+        return;
+    }
+    COutPacket o(kOpcode_SidebarTool);
+    o.Encode1(static_cast<unsigned char>(toolIndex));
+    ClientSocket_SendPacket(sock, o);
+}
 
 // GBK labels (client Dotum font expects ANSI/GBK on CN client).
 static const char* FeatureLabel(int id) {
     switch (id) {
+    case kToolConvenient:   return "\xB1\xE3\xC3\xF1\xB9\xA4\xBE\xDF"; // 便民工具
+    case kToolEquipCenter:  return "\xD7\xB0\xB1\xB8\xD6\xD0\xD0\xC4"; // 装备中心
+    case kToolExchange:     return "\xB6\xD2\xBB\xBB\xD6\xD0\xD0\xC4"; // 兑换中心
+    case kToolVip:          return "VIP\xBB\xE1\xD4\xB1";             // VIP会员
+    case kToolGrowth:       return "\xB3\xC9\xB3\xA4\xCF\xB5\xCD\xB3"; // 成长系统
+    case kToolDaily:        return "\xC3\xBF\xC8\xD5\xC8\xCE\xCE\xF1"; // 每日任务
+    case kToolSocial:       return "\xC9\xE7\xBD\xBB\xCF\xB5\xCD\xB3"; // 社交系统
+    case kToolCollect:      return "\xCA\xD5\xBC\xAF\xCF\xB5\xCD\xB3"; // 收集系统
+    case kToolGm:           return "GM\xB9\xA4\xBE\xDF";               // GM工具
+    case kFeatStorageBag:  return "\xCA\xD5\xC4\xC9\xB1\xB3\xB0\xFC"; // 收纳背包
+    case kFeatDamageRank:   return "\xC9\xCB\xBA\xA6\xCD\xB3\xBC\xC6"; // 伤害统计
+    case kFeatPartyTracker: return "\xB6\xD3\xCE\xE9\xD7\xB7\xD7\xD9"; // 队伍追踪
     case kFeatBeauty:       return "\xC3\xC0\xC8\xDD\xC3\xC0\xB7\xA2"; // 美容美发
     case kFeatCheckin:      return "\xC3\xBF\xC8\xD5\xC7\xA9\xB5\xBD"; // 每日签到
-    case kFeatDamageRank:   return "\xC9\xCB\xBA\xA6\xCD\xB3\xBC\xC6"; // 伤害统计
-    case kFeatStorageBag:  return "\xCA\xD5\xC4\xC9\xB1\xB3\xB0\xFC"; // 收纳背包
-    case kFeatPartyTracker: return "\xB6\xD3\xCE\xE9\xD7\xB7\xD7\xD9"; // 队伍追踪
+    case kFeatCashShop:     return "\xCF\xD6\xBD\xF0\xC9\xCC\xB3\xC7"; // 现金商城
     default:                return "?";
     }
 }
@@ -85,6 +129,8 @@ static bool IsFeatureOpen(int id) {
         return BagWindow_IsOpen();
     case kFeatPartyTracker:
         return PartyBuffs_IsTrackerVisible();
+    case kFeatCashShop:
+        return CashShopWnd_IsOpen();
     default:
         return false;
     }
@@ -117,12 +163,19 @@ static void CloseFeature(int id) {
     case kFeatPartyTracker:
         PartyBuffs_SetTrackerVisible(false);
         break;
+    case kFeatCashShop:
+        CashShopWnd_Close();
+        break;
     default:
         break;
     }
 }
 
 static void OpenFeature(int id) {
+    if (id >= 0 && id < kServerToolCount) {
+        SendSidebarTool(id);
+        return;
+    }
     switch (id) {
     case kFeatBeauty:
         BeautyShop_OpenWindow();
@@ -139,13 +192,16 @@ static void OpenFeature(int id) {
     case kFeatPartyTracker:
         PartyBuffs_SetTrackerVisible(true);
         break;
+    case kFeatCashShop:
+        CashShopWnd_RequestOpen();
+        break;
     default:
         break;
     }
 }
 
 static void InvokeFeature(int id) {
-    if (IsFeatureOpen(id)) {
+    if (id >= kServerToolCount && IsFeatureOpen(id)) {
         CloseFeature(id);
     } else {
         OpenFeature(id);
@@ -201,11 +257,13 @@ public:
         const int listH = kItemPadY * 2 + kFeatCount * kItemH;
         return listH > kIconH ? listH : kIconH;
     }
+    // Icon centered inside the tall layer (list expands around the same axis).
+    static int IconLocalY() { return (WndH() - kIconH) / 2; }
+    static int ListStartY() { return (WndH() - kFeatCount * kItemH) / 2; }
 
-    // Icon on the LEFT — sprite only, no chrome.
     RECT IconRect() const {
         const int x = kIconPad;
-        const int y = (WndH() - kIconH) / 2;
+        const int y = IconLocalY();
         return {x, y, x + kIconW, y + kIconH};
     }
 
@@ -217,7 +275,7 @@ public:
 
     RECT ItemRect(int index) const {
         RECT panel = PanelRect();
-        const int y = kItemPadY + index * kItemH;
+        const int y = ListStartY() + index * kItemH;
         return {panel.left + kItemPadX, y, panel.right - kItemPadX, y + kItemH - 2};
     }
 
@@ -279,13 +337,36 @@ public:
     }
 
     void LoadAssets() {
-        static const wchar_t* kFrames[kAnimFrameCount] = {
-            L"UI/UIWindow.img/Minigame/Omok/stone/3/black/0",
-            L"UI/UIWindow.img/Minigame/Omok/stone/3/black/1",
-            L"UI/UIWindow.img/Minigame/Omok/stone/3/black/2",
+        // Primary: Omok stones. Fallbacks: Quest marker / CashShop tab (always in v083 UI).
+        static const wchar_t* kFrameSets[][kAnimFrameCount] = {
+            {
+                L"UI/UIWindow.img/Minigame/Omok/stone/3/black/0",
+                L"UI/UIWindow.img/Minigame/Omok/stone/3/black/1",
+                L"UI/UIWindow.img/Minigame/Omok/stone/3/black/2",
+            },
+            {
+                L"UI/UIWindow.img/Quest/icon3/6",
+                L"UI/UIWindow.img/Quest/icon3/6",
+                L"UI/UIWindow.img/Quest/icon3/6",
+            },
+            {
+                L"UI/Basic.img/Cursor/0/0",
+                L"UI/Basic.img/Cursor/0/0",
+                L"UI/Basic.img/Cursor/0/0",
+            },
         };
-        for (int i = 0; i < kAnimFrameCount; ++i) {
-            m_icon[i] = LoadSprite(kFrames[i]);
+        bool any = false;
+        for (const auto& set : kFrameSets) {
+            any = false;
+            for (int i = 0; i < kAnimFrameCount; ++i) {
+                m_icon[i] = LoadSprite(set[i]);
+                if (m_icon[i]) {
+                    any = true;
+                }
+            }
+            if (any) {
+                break;
+            }
         }
         m_font = nullptr;
         m_fontShadow = nullptr;
@@ -360,7 +441,6 @@ public:
 };
 
 CUISideToolbar::CUISideToolbar() {
-    ms_pInstance = this;
     LoadAssets();
     m_lastAnimTick = GetTickCount();
     m_openMask = QueryOpenMask();
@@ -368,10 +448,14 @@ CUISideToolbar::CUISideToolbar() {
 
     const int w = WndW();
     const int h = WndH();
-    // Always pin to left edge; list draw/hit is gated by m_expanded.
-    const int left = 2;
-    const int top = Client::m_nGameHeight / 3;
+    const int screenH = get_screen_height();
+    // Icon centered in layer + window vertically centered → icon at screen mid.
+    const int left = 6;
+    const int top = (std::max)(0, (screenH - h) / 2);
     CreateWnd(left, top, w, h, 12, 1, nullptr, 0);
+    const bool pinned = rs_force_wnd_lt_abs(this, left, top);
+    (void)pinned; // tip-drawonly: no fopen(sidebar_debug) — absent from green 6D612F01
+    ms_pInstance = this;
 }
 
 void CUISideToolbar::OnDestroy() {
@@ -442,8 +526,11 @@ void CUISideToolbar::Draw(const RECT* pRect) {
         }
     }
 
-    // Icon: sprite only — no square/U background or border.
+    // Always draw solid chrome first — sprite-only icons can load but blit as fully
+    // transparent on some UIWindow.img formats, which looked like "toolbar missing".
     RECT irc = IconRect();
+    Fill(canvas, irc, m_iconHover ? 0xFF6A5018 : 0xFF4A3A10);
+    Stroke(canvas, irc, 0xFFFFD070);
     IWzCanvasPtr icon = m_icon[m_animFrame];
     if (icon) {
         int sw = 24, sh = 32;
@@ -455,10 +542,6 @@ void CUISideToolbar::Draw(const RECT* pRect) {
         const int sx = irc.left + (kIconW - sw) / 2;
         const int sy = irc.top + (kIconH - sh) / 2;
         BlitA(canvas, icon, sx, sy);
-    } else {
-        // Fallback so the toggle target stays visible if WZ frames fail to load.
-        Fill(canvas, irc, m_iconHover ? 0xFF6A5018 : 0xFF4A3A10);
-        Stroke(canvas, irc, 0xFFFFD070);
     }
 }
 
@@ -543,13 +626,31 @@ void EnsureInstance() {
         }
         new CUISideToolbar();
     } catch (...) {
+        CUISideToolbar::ms_pInstance = nullptr;
     }
+}
+
+void DestroySideToolbarForLogout() {
+    CUISideToolbar* p = CUISideToolbar::ms_pInstance;
+    if (!p) {
+        return;
+    }
+    CUISideToolbar::ms_pInstance = nullptr;
+    // Destroy removes Gr2D/layers. Skip `delete` — ZALLOC + multi-inherit (A041FF uses
+    // ZRefCounted release on registered singletons; this toolbar is not in that list).
+    p->Destroy();
 }
 
 } // namespace
 
 void AttachSideToolbarMod() {
     EnsureInstance();
+}
+
+namespace SideToolbar {
+void DestroyForLogout() {
+    DestroySideToolbarForLogout();
+}
 }
 
 // SideToolbar::EnsureHooks / OnTick live in SideToolbarBridge.cpp
