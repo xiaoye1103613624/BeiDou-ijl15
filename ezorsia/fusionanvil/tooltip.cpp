@@ -10,6 +10,8 @@
 #include "../setitem/equiptooltip_style.h"
 #include "../setitem/SetItemApi.h"
 #include "../equipcompare/EquipCompareApi.h"
+#include "../equipgrowth/EquipGrowthApi.h"
+#include "FusionAnvilApi.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -17,6 +19,11 @@
 #include <vector>
 
 #include "itemoption_tip_data.inc"
+
+// 1 = enter-green baseline (no EQUIP_TIP stamps / no color-strip symbols in .obj).
+#ifndef GREEN_ENTER_BASELINE
+#define GREEN_ENTER_BASELINE 0
+#endif
 
 // Temporary equip-marker UI mock — disable when real marker packets exist.
 #ifndef MOCK_EQUIP_MARKERS
@@ -126,6 +133,7 @@ public:
     // Hyper / Potential + Bonus + Soul/Socket — size 0x140 (Phase10 socket3).
     MEMBER_AT(unsigned char, 0x10D, nEnhance)
     MEMBER_AT(unsigned char, 0x10E, nPotentialGrade)
+    MEMBER_AT(unsigned short, 0x10F, nInfusion)
     MEMBER_AT(int, 0x110, nPotential1)
     MEMBER_AT(int, 0x114, nPotential2)
     MEMBER_AT(int, 0x118, nPotential3)
@@ -138,6 +146,10 @@ public:
     MEMBER_AT(int, 0x134, nSocket1)
     MEMBER_AT(int, 0x138, nSocket2)
     MEMBER_AT(int, 0x13C, nSocket3)
+    // 破界等级 — short @ 0x140 (struct grew to 0x142).
+    MEMBER_AT(unsigned short, 0x140, nBreakthrough)
+    // 宝石镶嵌等级 宝X — 服务端写入 bonus 尾段 reserved short 低字节(0~16)。
+    MEMBER_AT(unsigned char, 0x11E, nGemInlay)
 };
 
 
@@ -146,7 +158,7 @@ public:
 // Decode hook that fills the tail — leftover heap garbage then shows as fake
 // 幻化 / 灵韵 / 过期 / [当前等级: huge] / Hyper +20. Sanitize on read.
 static constexpr int kMaxEquipSkillLevel = 30;
-static constexpr int kMaxHyperEnhance = 10;
+static constexpr int kMaxHyperEnhance = 25;
 
 static bool IsPlausibleAnvilItemId(int itemId) {
     // Skin must be a Character equip id (incl. pet equips 18xxxxxx).
@@ -165,6 +177,51 @@ static int SafeGetItemId(GW_ItemSlotEquip* pe) {
     __try { itemId = static_cast<int>(pe->nItemID); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
     return itemId;
+}
+
+// 注能等级 ⚡ — 服务端写 nInfusion 低字节(0~10); 本地/模板装备未走 Decode hook,
+// 尾部残留堆垃圾需跨安全校验(0~10)，仿 SafeGetHyper 的 clamp。
+static int SafeGetInfusion(GW_ItemSlotEquip* pe) {
+    if (!pe) {
+        return 0;
+    }
+    unsigned int raw = 0;
+    __try { raw = static_cast<unsigned int>(pe->nInfusion & 0xFF); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    if (raw <= 0 || raw > 10) {
+        return 0;
+    }
+    return static_cast<int>(raw);
+}
+
+// 破界等级 — short @ 0x140 (0~50); 未走 Decode hook 的本地/模板装备尾部
+// 残留堆垃圾需跨安全校验(0~50)，仿 SafeGetInfusion。
+static int SafeGetBreakthrough(GW_ItemSlotEquip* pe) {
+    if (!pe) {
+        return 0;
+    }
+    unsigned int raw = 0;
+    __try { raw = static_cast<unsigned int>(pe->nBreakthrough); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    if (raw <= 0 || raw > 50) {
+        return 0;
+    }
+    return static_cast<int>(raw);
+}
+
+// 宝石镶嵌等级 宝X — 服务端写 nGemInlay 低字节(0~16); 未走 Decode hook 的
+// 本地/模板装备尾部残留堆垃圾需跨安全校验(0~16)，仿 SafeGetInfusion。
+static int SafeGetGemInlay(GW_ItemSlotEquip* pe) {
+    if (!pe) {
+        return 0;
+    }
+    unsigned int raw = 0;
+    __try { raw = static_cast<unsigned int>(pe->nGemInlay & 0xFF); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    if (raw <= 0 || raw > 16) {
+        return 0;
+    }
+    return static_cast<int>(raw);
 }
 
 static int SafeGetAnvilItemId(GW_ItemSlotEquip* pe) {
@@ -817,6 +874,21 @@ static void DrawWrappedGbk(
     flush();
 }
 
+// ---------------------------------------------------------------------------
+// 083 IDA map (BeiDou.exe.i64, imagebase 0x400000) — verified 2026-08-03 MCP.
+// Hex-Rays may label these __stdcall; prologues use ecx=this + retn N.
+// ---------------------------------------------------------------------------
+// VA            | Symbol                         | Convention (hook as __fastcall)
+// 0x008ECA0C    | SetToolTip_Equip_Basic         | thiscall; retn 4;  (this, GW_ItemSlotEquip*)
+// 0x008E7836    | PrintValue                     | thiscall; retn 10h; (this, nType, nValue, ZXString, bShowAlways)
+//                                               | → AddInfoEx(14, 0x10, …) vanilla
+// 0x008F39E1    | AddInfoEx                      | thiscall; (this, nType, nSubType, sCtx, sSub, bDot, nAlign)
+// 0x008ED0D2    | DrawToolTip_Equip              | thiscall; retn 8;  (this, layout/a2, GW_ItemSlotEquip*)
+// 0x008F36A1    | GetFontByType                  | thiscall; retn 8;  case N → this+off
+// 0x008E8252    | SetToolTip_Equip (full)        | calls Basic @0x8E8E67 + Draw @0x8E9EA2
+// 0x008E7975    | SetToolTip_Equip_Simple        | calls Basic @0x8E7B1C + Draw @0x8E8035
+// GetFontByType offsets (ASM): 2→+0x428  14→+0x460  15→+0x464  16→+0x468
+// ---------------------------------------------------------------------------
 static constexpr uintptr_t kAddr_GetItemName            = 0x005CF63E;
 static constexpr uintptr_t kAddr_SetToolTip_Equip_Basic = 0x008ECA0C;
 static constexpr uintptr_t kAddr_DrawToolTip_Equip      = 0x008ED0D2;
@@ -824,6 +896,8 @@ static constexpr uintptr_t kAddr_get_basic_font         = 0x0098A707;
 static constexpr uintptr_t kAddr_PrintValue             = 0x008E7836;
 static constexpr uintptr_t kAddr_StringPoolGet          = 0x0079E993;
 static constexpr uintptr_t kAddr_StringPoolInstance     = 0x0079E805;
+static constexpr uintptr_t kAddr_GetFontByType          = 0x008F36A1;
+static constexpr uintptr_t kAddr_AddInfoEx              = 0x008F39E1;
 
 static auto get_basic_font =
     reinterpret_cast<IWzFontPtr*(__cdecl*)(IWzFontPtr*, int)>(kAddr_get_basic_font);
@@ -831,42 +905,39 @@ static auto get_basic_font =
 static int g_spiritTipExtraH = 0;
 
 // ---------------------------------------------------------------------------
-// Equip stat breakdown (Hyper / Potential / scroll) — display-only.
-// AddInfoEx = 2 fonts/line only → best partial of official 四色多段:
-//   left (white):  属性 : +合计 (底板+砸卷
-//   right (color): +星 +潜能[+N%])
-// Full cyan/orange/yellow/purple per-segment needs custom canvas (deferred).
-// Packet already embeds Hyper+flat Potential; tip subtracts to paint segments.
+// Equip stat breakdown — §10.3 palette (萧曳083玩法.md).
+// AddInfoEx = 2 fonts/line → monochrome paren on main line; colored strip via
+// DrawTextA under tip (extra height), one strip per stat with sources.
 // ---------------------------------------------------------------------------
-// HyperEnhanceTable.java sync (cumulative; see HyperBonusForStat)
-static constexpr int kHyperStarMaxTip = 10; // sync PotentialHyperConfig.MAX_ENHANCE
-// true: packet nValue already includes Hyper+Potential flats (current server).
+static constexpr int kHyperStarMaxTip = 25;
 static constexpr bool kTipPacketIncludesHyperPotential = true;
-// BeiDou tip fonts (equipcompare / potential AddInfoEx): 14 label,
-// 2 gold/yellow (Hyper), 15 purple (Potential).
-static constexpr int kFontTipLabel = 14;
-static constexpr int kFontTipYellow = 2;
-static constexpr int kFontTipPurple = 15;
-// CUIToolTip::GetFont (0x8F36A1) case → member offsets (v083).
-static constexpr uintptr_t kOffFontTipLabel = 0x464;  // case 14
-static constexpr uintptr_t kOffFontTipPurple = 0x468; // case 15
-// Official-ish grade RGB (ARGB), closest readable on dark tip chrome.
-// 普通灰 / 稀有蓝 / 史诗紫 / 独特黄 / 传说绿 — letter C/B/A/S/SS title colors.
+static constexpr int kFontTipLabel = 14;   // GetFontByType case 14 → +0x460
+static constexpr int kFontTipYellow = 2;   // case 2 → +0x428
+static constexpr int kFontTipPurple = 15;  // case 15 → +0x464
+// Was wrongly 0x464/0x468 (types 15/16). Remap must hit the slots AddInfoEx(14,15) resolves.
+static constexpr uintptr_t kOffFontTipLabel = 0x460;
+static constexpr uintptr_t kOffFontTipPurple = 0x464;
+
+// §10.3 ARGB
+static constexpr unsigned long kArgbBase = 0xFFFFFFFFu;
+static constexpr unsigned long kArgbScroll = 0xFFFFAA40u;   // 橙 强化
+static constexpr unsigned long kArgbChaos = 0xFF2DB84Du;    // 深绿 混沌
+static constexpr unsigned long kArgbHyper = 0xFFE8C840u;    // 金黄 星力
+static constexpr unsigned long kArgbPot = 0xFFC070E8u;      // 紫 主潜能
+static constexpr unsigned long kArgbBonus = 0xFF48D0D8u;    // 青 附加
+static constexpr unsigned long kArgbSoul = 0xFFE060C0u;     // 品红 灵魂
+static constexpr unsigned long kArgbSocket = 0xFF90A0B0u;   // 银灰 星岩
+static constexpr unsigned long kArgbReforge = 0xFFFF6B6Bu;  // 珊瑚 洗炼
+static constexpr unsigned long kGrowthBonusArgb = 0xFF48D0D8u;
+
 static constexpr unsigned long kPotGradeArgb[6] = {
-    0xFFAAAAAAu, // 0 fallback
-    0xFFB0B0B0u, // 1 普通/C
-    0xFF5BA8E0u, // 2 稀有/B
-    0xFFC070E8u, // 3 史诗/A
-    0xFFE8C040u, // 4 独特/S
-    0xFF6ED86Eu, // 5 传说/SS
+    0xFFAAAAAAu, 0xFFB0B0B0u, 0xFF5BA8E0u, 0xFFC070E8u, 0xFFE8C040u, 0xFF6ED86Eu,
 };
-// Fig3-style section header bars (main=yellow, bonus=cyan, soul=magenta).
 static constexpr unsigned long kPotHeaderBarMain = 0xFFE8C840u;
 static constexpr unsigned long kPotHeaderBarBonus = 0xFF48D0D8u;
 static constexpr unsigned long kPotHeaderBarSoul = 0xFFC070E8u;
 static constexpr unsigned long kPotHeaderBarSocket = 0xFF90A0B0u;
 static constexpr unsigned long kPotHeaderTextDark = 0xFF101010u;
-// Fig3 parenthetical bonus (base+bonus) — light green.
 static constexpr unsigned long kPotParenGreenArgb = 0xFF6ED86Eu;
 static constexpr int kFontTipGreen = 15; // remap slot shared with purple when needed
 
@@ -1044,7 +1115,7 @@ static int HyperBonusForStat(int statIdx, int stars, int itemId) {
         all += (s <= 5) ? 2 : 3;
         if (weapon) {
             if (s <= 5) atk += 3;
-            else if (s <= 8) atk += 4;
+            else if (s <= 9) atk += 4;
             else atk += 5;
         }
     }
@@ -1094,7 +1165,9 @@ static int EquipDefaultForStat(int itemId, int statIdx) {
     }
 }
 
-static void CollectPotentialOpts(GW_ItemSlotEquip* pe, int* optsOut /*[10]*/, int* countOut) {
+static void CollectOptsGroup(
+    GW_ItemSlotEquip* pe, int* optsOut, int* countOut, int group /*0 main 1 bonus 2 soul 3 socket*/)
+{
     unsigned char grade = 0;
     int p1 = 0, p2 = 0, p3 = 0;
     SafeGetHyperPotential(pe, nullptr, &grade, &p1, &p2, &p3);
@@ -1103,27 +1176,43 @@ static void CollectPotentialOpts(GW_ItemSlotEquip* pe, int* optsOut /*[10]*/, in
     SafeGetBonusPotential(pe, &bGrade, &b1, &b2, &b3);
     int soulId = 0, soulOption = 0, socket1 = 0, socket2 = 0, socket3 = 0;
     SafeGetSoulSocket(pe, &soulId, &soulOption, &socket1, &socket2, &socket3);
-    const int opts[10] = { p1, p2, p3, b1, b2, b3, soulOption, socket1, socket2, socket3 };
+    int raw[4] = {};
+    int nRaw = 0;
+    if (group == 0) {
+        raw[0] = p1; raw[1] = p2; raw[2] = p3; nRaw = 3;
+    } else if (group == 1) {
+        raw[0] = b1; raw[1] = b2; raw[2] = b3; nRaw = 3;
+    } else if (group == 2) {
+        raw[0] = soulOption; nRaw = 1;
+    } else {
+        raw[0] = socket1; raw[1] = socket2; raw[2] = socket3; nRaw = 3;
+    }
     int n = 0;
-    for (int i = 0; i < 10; ++i) {
-        if (opts[i] > 0) {
-            optsOut[n++] = opts[i];
+    for (int i = 0; i < nRaw; ++i) {
+        if (raw[i] > 0) {
+            optsOut[n++] = raw[i];
         }
     }
     *countOut = n;
 }
 
-static int SumOptKey(GW_ItemSlotEquip* pe, const char* key) {
-    if (!pe || !key) {
-        return 0;
-    }
-    int opts[10] = {};
+static void CollectPotentialOpts(GW_ItemSlotEquip* pe, int* optsOut /*[10]*/, int* countOut) {
     int n = 0;
-    CollectPotentialOpts(pe, opts, &n);
-    if (n <= 0) {
+    int tmp[4] = {};
+    int tn = 0;
+    for (int g = 0; g < 4; ++g) {
+        CollectOptsGroup(pe, tmp, &tn, g);
+        for (int i = 0; i < tn && n < 10; ++i) {
+            optsOut[n++] = tmp[i];
+        }
+    }
+    *countOut = n;
+}
+
+static int SumOptKeyFromOpts(const int* opts, int n, int potLevel, const char* key) {
+    if (!opts || n <= 0 || !key) {
         return 0;
     }
-    const int potLevel = PotLevelFromReq(SafeGetEquipReqLevel(SafeGetItemId(pe)));
     int sum = 0;
     for (int oi = 0; oi < n; ++oi) {
         const ItemOptTipEntry* tip = FindItemOptTip(opts[oi]);
@@ -1141,6 +1230,28 @@ static int SumOptKey(GW_ItemSlotEquip* pe, const char* key) {
     return sum;
 }
 
+static int SumOptKey(GW_ItemSlotEquip* pe, const char* key) {
+    if (!pe || !key) {
+        return 0;
+    }
+    int opts[10] = {};
+    int n = 0;
+    CollectPotentialOpts(pe, opts, &n);
+    const int potLevel = PotLevelFromReq(SafeGetEquipReqLevel(SafeGetItemId(pe)));
+    return SumOptKeyFromOpts(opts, n, potLevel, key);
+}
+
+static int SumOptKeyGroup(GW_ItemSlotEquip* pe, int group, const char* key) {
+    if (!pe || !key) {
+        return 0;
+    }
+    int opts[4] = {};
+    int n = 0;
+    CollectOptsGroup(pe, opts, &n, group);
+    const int potLevel = PotLevelFromReq(SafeGetEquipReqLevel(SafeGetItemId(pe)));
+    return SumOptKeyFromOpts(opts, n, potLevel, key);
+}
+
 static int PotentialFlatForStat(GW_ItemSlotEquip* pe, int statIdx) {
     if (!pe || statIdx < 0 || statIdx >= 15 || !kPotFlatKeys[statIdx]) {
         return 0;
@@ -1155,101 +1266,174 @@ static int PotentialPercentForStat(GW_ItemSlotEquip* pe, int statIdx) {
     return SumOptKey(pe, kPotPercentKeys[statIdx]);
 }
 
+static int FlatForGroupStat(GW_ItemSlotEquip* pe, int group, int statIdx) {
+    if (!pe || statIdx < 0 || statIdx >= 15 || !kPotFlatKeys[statIdx]) {
+        return 0;
+    }
+    return SumOptKeyGroup(pe, group, kPotFlatKeys[statIdx]);
+}
+
 static IWzFontPtr EnsureMockFont(unsigned long color, int size);
+
+struct TipSeg {
+    char text[24];
+    unsigned long argb;
+};
+
+struct TipColorStrip {
+    CUIToolTip* tip;
+    TipSeg segs[12];
+    int nSeg;
+};
+
+static TipColorStrip g_tipStrips[48];
+static int g_tipStripCount = 0;
+static int g_tipStripExtraH = 0;
+static constexpr int kTipStripLineH = 14;
+
+#if !GREEN_ENTER_BASELINE
+// Survives /OPT:REF — tip-only builds must not rely on fusionanvil.obj stamps.
+// GREEN_ENTER_BASELINE=1 omits these so enter-green frozen objs stay tip-clean.
+extern "C" __declspec(dllexport) const char* EquipTip_GetStamp() {
+    return "EQUIP_TIP_TOOLTIP_ONLY_20260803";
+}
+extern "C" __declspec(dllexport) const char* EquipTip_GetColorStamp() {
+    return "EQUIP_TIP_COLOR_20260803";
+}
+#endif
+
+static void ClearTipColorStrips() {
+    g_tipStripCount = 0;
+    g_tipStripExtraH = 0;
+}
+
+static void PushTipSeg(TipColorStrip& strip, const char* fmt, int v, unsigned long argb) {
+    if (strip.nSeg >= 12 || v == 0) {
+        return;
+    }
+    TipSeg& s = strip.segs[strip.nSeg++];
+    s.argb = argb;
+    if (v > 0) {
+        sprintf_s(s.text, "+%d", v);
+    } else {
+        sprintf_s(s.text, "%d", v);
+    }
+}
 
 static void EmitStatBreakdownLine(
     CUIToolTip* tip,
     int nType,
     int baseStat,
     int scrollDelta,
+    int chaosDelta,
+    int flameDelta,
+    int growthBonus,
     int hyperBonus,
+    int potMain,
     int potBonus,
+    int soulBonus,
+    int socketBonus,
     int potPercent,
     ZXString<char> sProperty)
 {
-    const int board = baseStat + scrollDelta;
-    const int total = board + hyperBonus + potBonus;
+    const int board = baseStat + scrollDelta + chaosDelta + flameDelta + growthBonus;
+    const int total = board + hyperBonus + potMain + potBonus + soulBonus + socketBonus;
     ZXString<char> sLeft;
-    ZXString<char> sRight;
 
-    // left: total + (底板[+砸卷] ; right: Hyper / Potential[+%]
-    if (scrollDelta > 0) {
-        if (nType == CUIToolTip::PT_VALUE) {
-            sLeft.Format("%s %d (%d+%d ", static_cast<const char*>(sProperty),
-                total, baseStat, scrollDelta);
-        } else if (total >= 0) {
-            sLeft.Format("%s +%d (%d+%d ", static_cast<const char*>(sProperty),
-                total, baseStat, scrollDelta);
-        } else {
-            sLeft.Format("%s %d (%d+%d ", static_cast<const char*>(sProperty),
-                total, baseStat, scrollDelta);
-        }
-    } else {
-        if (nType == CUIToolTip::PT_VALUE) {
-            sLeft.Format("%s %d (%d ", static_cast<const char*>(sProperty), total, baseStat);
-        } else if (total >= 0) {
-            sLeft.Format("%s +%d (%d ", static_cast<const char*>(sProperty), total, baseStat);
-        } else {
-            sLeft.Format("%s %d (%d ", static_cast<const char*>(sProperty), total, baseStat);
-        }
-    }
-
-    // Build right extras text (single color — AddInfoEx 2-font limit).
-    char rightBuf[96] = {};
+    // Compact monochrome paren: 底板 强化 混沌 火花 成长 星力 潜能 附加 灵魂 星岩
+    char paren[160] = {};
     size_t off = 0;
-    auto append = [&](const char* fmt, int v) {
-        if (off + 24 >= sizeof(rightBuf)) {
+    auto ap = [&](const char* fmt, int v) {
+        if (off + 20 >= sizeof(paren)) {
             return;
         }
-        off += static_cast<size_t>(sprintf_s(rightBuf + off, sizeof(rightBuf) - off, fmt, v));
+        off += static_cast<size_t>(sprintf_s(paren + off, sizeof(paren) - off, fmt, v));
     };
+    ap("%d", baseStat);
+    if (scrollDelta != 0) {
+        ap(scrollDelta > 0 ? "+%d" : "%d", scrollDelta);
+    }
+    if (chaosDelta != 0) {
+        ap(chaosDelta > 0 ? "+%d" : "%d", chaosDelta);
+    }
+    if (flameDelta != 0) {
+        ap(flameDelta > 0 ? "+%d" : "%d", flameDelta);
+    }
+    if (growthBonus > 0) {
+        ap("+%d", growthBonus);
+    }
     if (hyperBonus > 0) {
-        append("+%d", hyperBonus);
+        ap("+%d", hyperBonus);
+    }
+    if (potMain > 0) {
+        ap("+%d", potMain);
     }
     if (potBonus > 0) {
-        append(off ? " +%d" : "+%d", potBonus);
+        ap("+%d", potBonus);
+    }
+    if (soulBonus > 0) {
+        ap("+%d", soulBonus);
+    }
+    if (socketBonus > 0) {
+        ap("+%d", socketBonus);
     }
     if (potPercent > 0) {
-        append(off ? " +%d%%" : "+%d%%", potPercent);
+        ap("+%d%%", potPercent);
     }
-    if (off == 0) {
-        // Only base/scroll — close paren on left.
-        if (scrollDelta > 0) {
-            if (nType == CUIToolTip::PT_VALUE) {
-                sLeft.Format("%s %d (%d+%d)", static_cast<const char*>(sProperty),
-                    total, baseStat, scrollDelta);
-            } else if (total >= 0) {
-                sLeft.Format("%s +%d (%d+%d)", static_cast<const char*>(sProperty),
-                    total, baseStat, scrollDelta);
-            } else {
-                sLeft.Format("%s %d (%d+%d)", static_cast<const char*>(sProperty),
-                    total, baseStat, scrollDelta);
-            }
+
+    const bool hasBreak = (scrollDelta != 0 || chaosDelta != 0 || flameDelta != 0 || growthBonus > 0 || hyperBonus > 0
+            || potMain > 0 || potBonus > 0 || soulBonus > 0 || socketBonus > 0 || potPercent > 0);
+    if (!hasBreak) {
+        if (nType == CUIToolTip::PT_VALUE) {
+            sLeft.Format("%s %d", static_cast<const char*>(sProperty), total);
+        } else if (total >= 0) {
+            sLeft.Format("%s +%d", static_cast<const char*>(sProperty), total);
         } else {
-            if (nType == CUIToolTip::PT_VALUE) {
-                sLeft.Format("%s %d", static_cast<const char*>(sProperty), total);
-            } else if (total >= 0) {
-                sLeft.Format("%s +%d", static_cast<const char*>(sProperty), total);
-            } else {
-                sLeft.Format("%s %d", static_cast<const char*>(sProperty), total);
-            }
+            sLeft.Format("%s %d", static_cast<const char*>(sProperty), total);
         }
         tip->AddInfoEx(kFontTipLabel, kFontTipYellow, sLeft, ZXString<char>(), 1, 1001);
         return;
     }
-    sRight.Format("%s)", rightBuf);
 
-    if (hyperBonus > 0) {
-        tip->AddInfoEx(kFontTipLabel, kFontTipYellow, sLeft, sRight, 1, 1001);
+    if (nType == CUIToolTip::PT_VALUE) {
+        sLeft.Format("%s %d (%s)", static_cast<const char*>(sProperty), total, paren);
+    } else if (total >= 0) {
+        sLeft.Format("%s +%d (%s)", static_cast<const char*>(sProperty), total, paren);
     } else {
-        IWzFontPtr green = EnsureMockFont(kPotParenGreenArgb, 12);
-        char* base = reinterpret_cast<char*>(tip);
-        void* saved15 = *reinterpret_cast<void**>(base + kOffFontTipPurple);
-        if (green) {
-            *reinterpret_cast<void**>(base + kOffFontTipPurple) = static_cast<IWzFont*>(green);
+        sLeft.Format("%s %d (%s)", static_cast<const char*>(sProperty), total, paren);
+    }
+    // Prefer Hyper yellow, else pot purple for AddInfoEx right-slot (fallback).
+    if (hyperBonus > 0) {
+        tip->AddInfoEx(kFontTipLabel, kFontTipYellow, sLeft, ZXString<char>(), 1, 1001);
+    } else {
+        tip->AddInfoEx(kFontTipLabel, kFontTipPurple, sLeft, ZXString<char>(), 1, 1001);
+    }
+
+    // Colored strip drawn in DrawToolTip_Equip_hook
+    if (g_tipStripCount < 48 && tip) {
+        TipColorStrip& strip = g_tipStrips[g_tipStripCount++];
+        strip.tip = tip;
+        strip.nSeg = 0;
+        {
+            TipSeg& s = strip.segs[strip.nSeg++];
+            s.argb = kArgbBase;
+            sprintf_s(s.text, "%d", baseStat);
         }
-        tip->AddInfoEx(kFontTipLabel, kFontTipPurple, sLeft, sRight, 1, 1001);
-        *reinterpret_cast<void**>(base + kOffFontTipPurple) = saved15;
+        PushTipSeg(strip, "+%d", scrollDelta, kArgbScroll);
+        PushTipSeg(strip, "%d", chaosDelta, kArgbChaos);
+        PushTipSeg(strip, "+%d", flameDelta, kArgbChaos); // 火花同深绿（对齐 265 tip 绿）
+        PushTipSeg(strip, "+%d", growthBonus, kGrowthBonusArgb);
+        PushTipSeg(strip, "+%d", hyperBonus, kArgbHyper);
+        PushTipSeg(strip, "+%d", potMain, kArgbPot);
+        PushTipSeg(strip, "+%d", potBonus, kArgbBonus);
+        PushTipSeg(strip, "+%d", soulBonus, kArgbSoul);
+        PushTipSeg(strip, "+%d", socketBonus, kArgbSocket);
+        if (strip.nSeg > 1) {
+            tip->m_nHeight += kTipStripLineH;
+            g_tipStripExtraH += kTipStripLineH;
+        } else {
+            --g_tipStripCount;
+        }
     }
 }
 
@@ -1264,7 +1448,6 @@ void __fastcall Hook_PrintValue_HyperBreakdown(
     ZXString<char> sProperty,
     int bShowAlways)
 {
-    // EquipCompare attaches PrintValue first; we may be outer — yield during delta rewrite.
     if (EquipCompare::IsDeltaPrintValueActive()) {
         Original_PrintValue(tip, nType, nValue, sProperty, bShowAlways);
         return;
@@ -1288,10 +1471,16 @@ void __fastcall Hook_PrintValue_HyperBreakdown(
     const int stars = ClampEnhanceStars(enhance);
     const int itemId = SafeGetItemId(g_breakdownPe);
     const int hyperBonus = HyperBonusForStat(idx, stars, itemId);
-    const int potBonus = PotentialFlatForStat(g_breakdownPe, idx);
+    const int potMain = FlatForGroupStat(g_breakdownPe, 0, idx);
+    const int potBonusFlat = FlatForGroupStat(g_breakdownPe, 1, idx);
+    const int soulBonus = FlatForGroupStat(g_breakdownPe, 2, idx);
+    const int socketBonus = FlatForGroupStat(g_breakdownPe, 3, idx);
+    const int potBonus = potMain + potBonusFlat + soulBonus + socketBonus;
     const int potPercent = PotentialPercentForStat(g_breakdownPe, idx);
+    int growthBonus = EquipGrowth::GetGrowthBonusForStat(itemId, idx);
+    const int flameDelta = EquipGrowth::GetFlameBonusForStat(itemId, idx);
+    const int chaosDelta = static_cast<int>(FusionAnvil_GetChaosStat(g_breakdownPe, idx));
 
-    // Packet board (= 底板+砸卷) vs CItemInfo default (底板).
     int board = nValue;
     if (kTipPacketIncludesHyperPotential) {
         board = nValue - hyperBonus - potBonus;
@@ -1300,29 +1489,84 @@ void __fastcall Hook_PrintValue_HyperBreakdown(
         }
     }
     const int baseStat = EquipDefaultForStat(itemId, idx);
-    int scrollDelta = board - baseStat;
+    int scrollDelta = board - baseStat - chaosDelta - flameDelta;
     int baseShow;
     int scrollShow;
-    if (baseStat <= 0 || scrollDelta < 0) {
-        // Missing template, or chaos/anvil below default → don't invent scroll/base.
+    int growthShow = 0;
+    int chaosShow = chaosDelta;
+    int flameShow = flameDelta;
+    if (baseStat <= 0 || ((scrollDelta + chaosDelta + flameDelta) < 0 && chaosDelta == 0 && flameDelta == 0)) {
         baseShow = board;
         scrollShow = 0;
+        growthShow = 0;
+        chaosShow = 0;
+        flameShow = 0;
     } else {
         baseShow = baseStat;
-        scrollShow = scrollDelta;
+        if (growthBonus > 0 && scrollDelta >= growthBonus) {
+            scrollShow = scrollDelta - growthBonus;
+            growthShow = growthBonus;
+        } else {
+            scrollShow = scrollDelta;
+            growthShow = 0;
+        }
     }
 
-    if (hyperBonus <= 0 && potBonus <= 0 && potPercent <= 0 && scrollShow <= 0) {
+    if (hyperBonus <= 0 && potBonus <= 0 && potPercent <= 0 && scrollShow == 0
+            && growthShow <= 0 && chaosShow == 0 && flameShow == 0) {
         Original_PrintValue(tip, nType, nValue, sProperty, bShowAlways);
         return;
     }
 
-    if (!bShowAlways && nValue <= 0 && hyperBonus <= 0 && potBonus <= 0 && potPercent <= 0) {
+    if (!bShowAlways && nValue <= 0 && hyperBonus <= 0 && potBonus <= 0 && potPercent <= 0
+            && growthShow <= 0 && chaosShow == 0 && flameShow == 0) {
         return;
     }
 
-    EmitStatBreakdownLine(tip, nType, baseShow, scrollShow, hyperBonus, potBonus, potPercent, sProperty);
+    EmitStatBreakdownLine(tip, nType, baseShow, scrollShow, chaosShow, flameShow, growthShow, hyperBonus,
+            potMain, potBonusFlat, soulBonus, socketBonus, potPercent, sProperty);
 }
+
+#if !GREEN_ENTER_BASELINE
+static void DrawTipColorStrips(CUIToolTip* tip) {
+    if (!tip || !tip->m_pLayer || g_tipStripCount <= 0) {
+        return;
+    }
+    try {
+        Ztl_variant_t vIdx;
+        V_VT(&vIdx) = VT_I4;
+        V_I4(&vIdx) = 0;
+        IWzCanvasPtr canvas = tip->m_pLayer->Getcanvas(vIdx);
+        if (!canvas) {
+            return;
+        }
+        int y = tip->m_nHeight - g_spiritTipExtraH - g_tipStripExtraH + 2;
+        for (int i = 0; i < g_tipStripCount; ++i) {
+            TipColorStrip& strip = g_tipStrips[i];
+            if (strip.tip != tip || strip.nSeg <= 0) {
+                continue;
+            }
+            int x = 12;
+            for (int s = 0; s < strip.nSeg; ++s) {
+                IWzFontPtr font = EnsureMockFont(strip.segs[s].argb, 11);
+                if (!font) {
+                    continue;
+                }
+                wchar_t wbuf[32] = {};
+                MultiByteToWideChar(CP_ACP, 0, strip.segs[s].text, -1, wbuf, 32);
+                const Ztl_bstr_t bs(wbuf);
+                const int tw = static_cast<int>(font->CalcTextWidth(bs, Ztl_variant_t()));
+                canvas->DrawTextA(x, y, bs, font, Ztl_variant_t(), Ztl_variant_t());
+                x += tw + 4;
+            }
+            y += kTipStripLineH;
+        }
+    } catch (...) {
+    }
+}
+#endif
+
+// Growth segment color kept for companions — alias above.
 
 static void DrawSpiritSkillBlock(CUIToolTip* tip, GW_ItemSlotEquip* pe) {
     if (!tip || !pe || g_spiritTipExtraH <= 0 || !tip->m_pLayer) {
@@ -1437,6 +1681,7 @@ void __fastcall CUIToolTip__SetToolTip_Equip_Basic_hook(
     }
 
     // PrintValue hook reads g_breakdownPe to append Hyper/Potential colored split.
+    ClearTipColorStrips();
     g_breakdownPe = pe;
     g_inEquipBasicTip = true;
     // Keep vanilla zh-CN stat/type labels from String.wz/ToolTipHelp.img.
@@ -1504,10 +1749,13 @@ static constexpr int kMarkerBorderOverlap = 2;
 static constexpr unsigned long kMarkerTipFillColor = 0xA0000000u;
 static constexpr unsigned long kMarkerTipOutlineColor = 0xFFFFFFFFu;
 static constexpr int kMarkerEquipTopScrubH = 2;
-static constexpr int kHyperStarMax = 10; // sync PotentialHyperConfig.MAX_ENHANCE
+static constexpr int kHyperStarMax = 25; // sync PotentialHyperConfig.MAX_ENHANCE / 095
+static constexpr int kHyperStarsPerRow = 10; // 一行最多 10 星，超出换行
 static constexpr int kStarDrawMaxPx = 10;   // slightly smaller than full WZ sprite
 static constexpr int kStarGapNormal = 1;    // between adjacent stars
 static constexpr int kStarGapGroup = 6;     // extra gap after every 5th star
+static constexpr int kInfusionMax = 10;     // 注能等级上限 0~10
+static constexpr int kInfusionPerRow = 10;  // 注能 ⚡ 一行最多 10 个
 
 static int ClampHyperStars(unsigned char enhance);
 
@@ -1518,6 +1766,7 @@ static auto WzFontCreate = reinterpret_cast<WzFontCreate_t>(0x0046341A);
 enum class MarkerLineKind : int {
     Stars = 0,
     GbkText = 1,
+    Infusion = 2,
 };
 
 struct MarkerLine {
@@ -1537,6 +1786,9 @@ static bool g_markerTipInited = false;
 static CUIToolTip* g_markerMainTip = nullptr;
 static int g_markerLastItemId = 0;
 static int g_markerLastEnhance = 0;
+static int g_markerLastInfusion = 0;
+static int g_markerLastGem = 0;
+static int g_markerLastBreakthrough = 0;
 static int g_markerLastX = -1;
 static int g_markerLastY = -1;
 static int g_markerLastW = 0;
@@ -1783,6 +2035,22 @@ static std::wstring BuildStarWide(int filled) {
     return s;
 }
 
+// 注能 ⚡ 行 — 用闪电字形(借鉴星之力行式布局)，满 5 空一格，最多 10 个。
+static std::wstring BuildInfusionWide(int level) {
+    std::wstring s;
+    if (level <= 0 || level > kInfusionPerRow) {
+        return s;
+    }
+    s.reserve(static_cast<size_t>(level + 2));
+    for (int i = 0; i < level; ++i) {
+        if (i > 0 && (i % 5) == 0) {
+            s.push_back(L' ');
+        }
+        s.push_back(L'\x26A1'); // BLACK LIGHTNING ⚡
+    }
+    return s;
+}
+
 static IWzCanvasPtr GetMarkerTipCanvas(CUIToolTip* tip) {
     if (!tip || !tip->m_pLayer) {
         return nullptr;
@@ -1856,6 +2124,9 @@ static void HideMarkerTip() {
     g_markerMainTip = nullptr;
     g_markerLastItemId = 0;
     g_markerLastEnhance = 0;
+    g_markerLastInfusion = 0;
+    g_markerLastGem = 0;
+    g_markerLastBreakthrough = 0;
     g_markerLastX = -1;
     g_markerLastY = -1;
     g_markerLastW = 0;
@@ -1925,9 +2196,31 @@ static std::vector<MarkerLine> CollectHyperStarLines(GW_ItemSlotEquip* pe) {
     std::vector<MarkerLine> lines;
     unsigned char enhance = 0;
     SafeGetHyperPotential(pe, &enhance, nullptr, nullptr, nullptr, nullptr);
-    const int stars = ClampHyperStars(enhance);
-    if (stars > 0) {
-        lines.push_back({MarkerLineKind::Stars, stars, nullptr});
+    int stars = ClampHyperStars(enhance);
+    // 一行 10 星；超过另起一行（★11–20、★21–25…）
+    while (stars > 0) {
+        const int row = (stars > kHyperStarsPerRow) ? kHyperStarsPerRow : stars;
+        lines.push_back({MarkerLineKind::Stars, row, nullptr});
+        stars -= row;
+    }
+    // 注能 ⚡ 等级：挂在同一 companion 里（Hyper 之上/下)，仅注入>0 时追加。
+    const int infusion = SafeGetInfusion(pe);
+    if (infusion > 0) {
+        lines.push_back({MarkerLineKind::Infusion, infusion, nullptr});
+    }
+    // 宝石镶嵌 宝X：仅>0 时追加一行 GbkText（服务端 reserved short 低字节）。
+    const int gemInlay = SafeGetGemInlay(pe);
+    if (gemInlay > 0) {
+        char gbk[16] = {0};
+        sprintf_s(gbk, "\xB1\xA6%d", gemInlay); // 宝X (GBK 宝=0xB1A6)
+        lines.push_back({MarkerLineKind::GbkText, 0, gbk});
+    }
+    // 破界+N：仅>0 时追加一行 GbkText（服务端独立尾short）。
+    const int breakthrough = SafeGetBreakthrough(pe);
+    if (breakthrough > 0) {
+        char gbk[16] = {0};
+        sprintf_s(gbk, "\xC6\xC6\xBD\xE7+%d", breakthrough); // 破界+N (GBK)
+        lines.push_back({MarkerLineKind::GbkText, 0, gbk});
     }
     return lines;
 }
@@ -1940,6 +2233,10 @@ static std::vector<MarkerVisualLine> ExpandMarkerVisualLines(
     for (const MarkerLine& line : lines) {
         if (line.kind == MarkerLineKind::Stars) {
             visual.push_back({MarkerLineKind::Stars, line.starCount, L""});
+            continue;
+        }
+        if (line.kind == MarkerLineKind::Infusion) {
+            visual.push_back({MarkerLineKind::Infusion, line.starCount, L""});
             continue;
         }
         if (!line.gbkText) {
@@ -1984,6 +2281,15 @@ static void RenderMarkerVisualLines(
                 DrawCenteredWide(canvas, tipWidth, y, stars.c_str(), starFont);
             }
             usedH = starH;
+        } else if (line.kind == MarkerLineKind::Infusion && rowFont) {
+            const int lvl = (line.starCount > 0 && line.starCount <= kInfusionPerRow)
+                ? line.starCount : 0;
+            if (lvl > 0) {
+                const std::wstring bolts = BuildInfusionWide(lvl);
+                if (!bolts.empty()) {
+                    DrawCenteredWide(canvas, tipWidth, y, bolts.c_str(), rowFont);
+                }
+            }
         } else if (line.kind == MarkerLineKind::GbkText && !line.text.empty() && rowFont) {
             DrawCenteredWide(canvas, tipWidth, y, line.text.c_str(), rowFont);
         }
@@ -2046,8 +2352,11 @@ static void UpdateHyperStarCompanionTip(CUIToolTip* mainTip, GW_ItemSlotEquip* p
     unsigned char enhance = 0;
     SafeGetHyperPotential(pe, &enhance, nullptr, nullptr, nullptr, nullptr);
     const int starCount = ClampHyperStars(enhance);
+    const int infusion = SafeGetInfusion(pe);
+    const int gemInlay = SafeGetGemInlay(pe);
+    const int breakthrough = SafeGetBreakthrough(pe);
     const int itemId = SafeGetItemId(pe);
-    if (!mainTip || itemId <= 0 || starCount <= 0) {
+    if (!mainTip || itemId <= 0 || (starCount <= 0 && infusion <= 0 && gemInlay <= 0 && breakthrough <= 0)) {
         HideMarkerTip();
         return;
     }
@@ -2093,8 +2402,11 @@ static void UpdateHyperStarCompanionTip(CUIToolTip* mainTip, GW_ItemSlotEquip* p
             }
         };
 
-        // Reuse: same item / stars / geometry — only re-dock + scrub seam.
+        // Reuse: same item / stars / infusion / gem / geometry — only re-dock + scrub seam.
         if (itemId == g_markerLastItemId && starCount == g_markerLastEnhance
+            && infusion == g_markerLastInfusion
+            && gemInlay == g_markerLastGem
+            && breakthrough == g_markerLastBreakthrough
             && tipX == g_markerLastX && tipW == g_markerLastW
             && visualCount == g_markerLastVisualCount
             && HasMarkerTipLayer() && tip->m_pLayer) {
@@ -2132,6 +2444,9 @@ static void UpdateHyperStarCompanionTip(CUIToolTip* mainTip, GW_ItemSlotEquip* p
         g_markerMainTip = mainTip;
         g_markerLastItemId = itemId;
         g_markerLastEnhance = starCount;
+        g_markerLastInfusion = infusion;
+        g_markerLastGem = gemInlay;
+        g_markerLastBreakthrough = breakthrough;
         g_markerLastX = tipX;
         g_markerLastY = tipY;
         g_markerLastW = tipW;
@@ -2320,7 +2635,7 @@ static std::vector<PotTipRow> CollectPotTipRows(GW_ItemSlotEquip* pe, unsigned c
     }
 
     const int potLevel = PotLevelFromReq(SafeGetEquipReqLevel(SafeGetItemId(pe)));
-    auto pushFormattedOption = [&](int optionId) {
+    auto pushFormattedOption = [&](int optionId, unsigned char lineGrade) {
         if (optionId <= 0) {
             return;
         }
@@ -2330,14 +2645,19 @@ static std::vector<PotTipRow> CollectPotTipRows(GW_ItemSlotEquip* pe, unsigned c
         }
         size_t start = 0;
         while (start <= blob.size()) {
-            size_t nl = blob.find('\n', start);
+            // memchr avoids MSVC ___std_find_trivial link flake (toolset/CRT skew).
+            const char* base = blob.data() + start;
+            const size_t remain = blob.size() - start;
+            const void* p = remain ? std::memchr(base, '\n', remain) : nullptr;
+            const size_t nl = p ? static_cast<size_t>(static_cast<const char*>(p) - blob.data())
+                                : std::string::npos;
             std::string line = (nl == std::string::npos)
                 ? blob.substr(start)
                 : blob.substr(start, nl - start);
             if (!line.empty()) {
                 PotTipRow row{};
                 row.kind = PotTipRowKind::Option;
-                row.grade = 0;
+                row.grade = lineGrade;
                 row.text = GbkToWide(line.c_str());
                 rows.push_back(row);
             }
@@ -2347,19 +2667,18 @@ static std::vector<PotTipRow> CollectPotTipRows(GW_ItemSlotEquip* pe, unsigned c
             start = nl + 1;
         }
     };
-    auto pushOpts = [&](const int* opts, PotTipRowKind /*section*/) {
+    auto pushOpts = [&](const int* opts, unsigned char lineGrade) {
         for (int oi = 0; oi < 3; ++oi) {
-            pushFormattedOption(opts[oi]);
+            pushFormattedOption(opts[oi], lineGrade);
         }
     };
 
     if (hasMain) {
         // Fig3: 「潜能 : SS级」(+ cube name in brackets for clarity)
         char header[96];
-        sprintf_s(header, "%s : %s [%s]",
+        sprintf_s(header, "%s : %s",
             kLabelPotentialShort,
-            PotentialGradeLetterGbk(grade > 0 ? grade : 1),
-            PotentialGradeNameGbk(grade > 0 ? grade : 1));
+            PotentialGradeLetterGbk(grade > 0 ? grade : 1));
         PotTipRow h{};
         h.kind = PotTipRowKind::MainHeader;
         h.grade = grade > 0 ? grade : 1;
@@ -2370,12 +2689,12 @@ static std::vector<PotTipRow> CollectPotTipRows(GW_ItemSlotEquip* pe, unsigned c
         if (mainHidden) {
             PotTipRow sealed{};
             sealed.kind = PotTipRowKind::Option;
-            sealed.grade = 0;
+            sealed.grade = grade > 0 ? grade : 1;
             sealed.text = GbkToWide(kLabelUnrevealedPotential);
             rows.push_back(sealed);
         } else {
             const int opts[3] = { p1, p2, p3 };
-            pushOpts(opts, PotTipRowKind::MainHeader);
+            pushOpts(opts, grade > 0 ? grade : 1);
         }
     }
 
@@ -2386,17 +2705,16 @@ static std::vector<PotTipRow> CollectPotTipRows(GW_ItemSlotEquip* pe, unsigned c
             rows.push_back(sep);
         }
         char header[96];
-        sprintf_s(header, "%s : %s [%s]",
+        sprintf_s(header, "%s : %s",
             kLabelBonusPotential,
-            PotentialGradeLetterGbk(bGrade > 0 ? bGrade : 1),
-            PotentialGradeNameGbk(bGrade > 0 ? bGrade : 1));
+            PotentialGradeLetterGbk(bGrade > 0 ? bGrade : 1));
         PotTipRow h{};
         h.kind = PotTipRowKind::BonusHeader;
         h.grade = bGrade > 0 ? bGrade : 1;
         h.text = GbkToWide(header);
         rows.push_back(h);
         const int opts[3] = { b1, b2, b3 };
-        pushOpts(opts, PotTipRowKind::BonusHeader);
+        pushOpts(opts, bGrade > 0 ? bGrade : 1);
     }
 
     // Soul / socket: dedicated blocks AFTER pot lines (not jammed as fake pot options).
@@ -2427,7 +2745,7 @@ static std::vector<PotTipRow> CollectPotTipRows(GW_ItemSlotEquip* pe, unsigned c
         }
         rows.push_back(h);
         if (soulOption > 0) {
-            pushFormattedOption(soulOption);
+            pushFormattedOption(soulOption, 0);
         }
     }
 
@@ -2441,9 +2759,9 @@ static std::vector<PotTipRow> CollectPotTipRows(GW_ItemSlotEquip* pe, unsigned c
         h.kind = PotTipRowKind::SocketHeader;
         h.text = GbkToWide(kLabelSocket);
         rows.push_back(h);
-        pushFormattedOption(socket1);
-        if (socket2 > 0) pushFormattedOption(socket2);
-        if (socket3 > 0) pushFormattedOption(socket3);
+        pushFormattedOption(socket1, 0);
+        if (socket2 > 0) pushFormattedOption(socket2, 0);
+        if (socket3 > 0) pushFormattedOption(socket3, 0);
     }
     return rows;
 }
@@ -2498,9 +2816,9 @@ static void RenderPotTipRows(
     for (size_t i = 0; i < rows.size(); ++i) {
         const PotTipRow& row = rows[i];
         if (row.kind == PotTipRowKind::Sep) {
-            // Thin separator between sections
+            // 095 DrawOptionInfo: solid white 1px separator across tip.
             try {
-                canvas->DrawRectangle(6, y + 4, tipWidth - 12, 1, 0x60FFFFFFu);
+                canvas->DrawRectangle(6, y + 4, tipWidth - 12, 1, 0xFFFFFFFFu);
             } catch (...) {
             }
             y += 10;
@@ -2521,32 +2839,47 @@ static void RenderPotTipRows(
                 bar = kPotHeaderBarSoul;
             } else if (row.kind == PotTipRowKind::SocketHeader) {
                 bar = kPotHeaderBarSocket;
-            } else if (row.grade >= 1 && row.grade <= 5) {
-                // Main header: keep yellow bar (fig3); grade color on letter via dark text bar.
-                bar = kPotHeaderBarMain;
             }
             try {
                 canvas->DrawRectangle(4, y, tipWidth - 8, kPotHeaderBarH, bar);
             } catch (...) {
             }
-            // Grade-colored letter square (MVP icon substitute when WZ grade art missing).
+            // Grade-colored letter badge (small icon substitute).
             if (row.kind == PotTipRowKind::MainHeader || row.kind == PotTipRowKind::BonusHeader) {
-                const unsigned long gCol =
-                    (row.grade >= 1 && row.grade <= 5) ? kPotGradeArgb[row.grade] : kPotGradeArgb[1];
+                const unsigned char g =
+                    (row.grade >= 1 && row.grade <= 5) ? row.grade : 1;
+                const unsigned long gCol = kPotGradeArgb[g];
+                const int badgeW = (g == 5) ? 18 : 12;
                 try {
-                    canvas->DrawRectangle(6, y + 2, 12, 12, gCol);
+                    canvas->DrawRectangle(6, y + 2, badgeW, 12, gCol);
                 } catch (...) {
                 }
+                IWzFontPtr letterFont = EnsurePotentialGradeFont(g);
+                if (letterFont) {
+                    try {
+                        // White-ish letter via dark font on bright plate is poor;
+                        // use white mock font for badge glyph.
+                        IWzFontPtr white = EnsureMockFont(0xFFFFFFFFu, 11);
+                        if (white) {
+                            const wchar_t* letter =
+                                (g == 1) ? L"C" :
+                                (g == 2) ? L"B" :
+                                (g == 3) ? L"A" :
+                                (g == 4) ? L"S" : L"SS";
+                            canvas->DrawTextA(
+                                7, y + 1, Ztl_bstr_t(letter), white,
+                                Ztl_variant_t(), Ztl_variant_t());
+                        }
+                    } catch (...) {
+                    }
+                }
+                (void)letterFont;
             }
             IWzFontPtr hdrFont = darkFont ? darkFont : optFont;
-            // Prefer grade-colored header text for letter readability on yellow/cyan bars.
-            if (row.kind == PotTipRowKind::MainHeader || row.kind == PotTipRowKind::BonusHeader) {
-                IWzFontPtr gf = EnsurePotentialGradeFont(row.grade > 0 ? row.grade : 1);
-                // Dark text on bright bar is more fig3-like; keep darkFont.
-                (void)gf;
-            }
             const int textX = (row.kind == PotTipRowKind::MainHeader
-                || row.kind == PotTipRowKind::BonusHeader) ? 22 : kMarkerTipMarginX;
+                || row.kind == PotTipRowKind::BonusHeader)
+                ? ((row.grade == 5) ? 28 : 22)
+                : kMarkerTipMarginX;
             if (hdrFont && !row.text.empty()) {
                 try {
                     canvas->DrawTextA(
@@ -2557,11 +2890,15 @@ static void RenderPotTipRows(
             }
             y += kPotHeaderBarH + 2;
         } else {
-            // Option lines — white; colored square bullet (Unicode • → ? on v083 fonts).
+            // Option lines — white text + grade-colored bullet (095-ish).
+            const unsigned long bullet =
+                (row.grade >= 1 && row.grade <= 5)
+                    ? kPotGradeArgb[row.grade]
+                    : 0xFF90EE90u;
             if (optFont && !row.text.empty()) {
                 try {
                     canvas->DrawRectangle(
-                        kMarkerTipMarginX + 1, y + 4, 6, 6, 0xFF90EE90u);
+                        kMarkerTipMarginX + 1, y + 4, 6, 6, bullet);
                     canvas->DrawTextA(
                         kMarkerTipMarginX + 12, y, Ztl_bstr_t(row.text.c_str()), optFont,
                         Ztl_variant_t(), Ztl_variant_t());
@@ -2757,6 +3094,9 @@ void __fastcall CUIToolTip__DrawToolTip_Equip_hook(
 
     // 灵韵技能区块（图标 + 说明 + 当前等级）画在 tip 底部预留高度内
     DrawSpiritSkillBlock(pThis, pe);
+#if !GREEN_ENTER_BASELINE
+    DrawTipColorStrips(pThis);
+#endif
 
     const int nAnvilItemID = SafeGetAnvilItemId(pe);
     if (!pe || !nAnvilItemID || !pThis || !pThis->m_pLayer) {

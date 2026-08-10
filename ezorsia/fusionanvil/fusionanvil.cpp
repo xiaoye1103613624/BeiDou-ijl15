@@ -9,6 +9,12 @@
 
 #include <windows.h>
 #include <cstring>
+#include <array>
+#include <unordered_map>
+
+#ifndef GREEN_ENTER_BASELINE
+#define GREEN_ENTER_BASELINE 0
+#endif
 
 
 // ===========================================================================
@@ -46,7 +52,7 @@ static constexpr uintptr_t kPatch_SubtypeAllocSizeImm         = 0x004E3580;
 //   tEquipSkillExp   @ 0x105 (FILETIME / uint64)
 //   nEnhance         @ 0x10D (byte)   — Hyper ★
 //   nPotentialGrade  @ 0x10E (byte)
-//   nPotentialPad    @ 0x10F (short)  — reserved
+//   nInfusion        @ 0x10F (short)  — 注能等级 ⚡ (低字节; 服务端写低8位)
 //   nPotential1/2/3  @ 0x110/114/118 (int)
 //   nBonusPotGrade   @ 0x11C (byte)   — Phase3 附加潜能
 //   nBonusPotPad     @ 0x11D (byte) + short @ 0x11E
@@ -56,14 +62,19 @@ static constexpr uintptr_t kPatch_SubtypeAllocSizeImm         = 0x004E3580;
 //   nSocket1         @ 0x134 (int)    — 星岩
 //   nSocket2         @ 0x138 (int)    — 星岩槽2
 //   nSocket3         @ 0x13C (int)    — 星岩槽3 Phase10
-// New size 0x140. Keep PacketCreator.addItemInfo tail in sync.
-static constexpr uint32_t  kNewItemSlotEquipSize              = 0x140;
+//   nBreakthrough    @ 0x140 (short)  — 破界等级 0~50 Phase12
+// Chaos ledger is NOT in-struct (avoid alloc churn); sidecar map after Decode.
+// Struct grew 0x140 → 0x142 (server writes breakthrough short at tail). Keep
+// PacketCreator.addItemInfo tail in sync — mismatch desyncs inventory decode.
+// New size 0x142 (0x140 → +breakthrough short). Keep PacketCreator tail in sync.
+static constexpr uint32_t  kNewItemSlotEquipSize              = 0x142;
 static constexpr size_t    kOffset_nAnvilItemID               = 0xF9;
 static constexpr size_t    kOffset_nEquipSkillID              = 0xFD;
 static constexpr size_t    kOffset_nEquipSkillLevel           = 0x101;
 static constexpr size_t    kOffset_tEquipSkillExpire          = 0x105;
 static constexpr size_t    kOffset_nEnhance                   = 0x10D;
 static constexpr size_t    kOffset_nPotentialGrade            = 0x10E;
+static constexpr size_t    kOffset_nInfusion                  = 0x10F;
 static constexpr size_t    kOffset_nPotential1                = 0x110;
 static constexpr size_t    kOffset_nPotential2                = 0x114;
 static constexpr size_t    kOffset_nPotential3                = 0x118;
@@ -76,6 +87,7 @@ static constexpr size_t    kOffset_nSoulOption                = 0x130;
 static constexpr size_t    kOffset_nSocket1                   = 0x134;
 static constexpr size_t    kOffset_nSocket2                   = 0x138;
 static constexpr size_t    kOffset_nSocket3                   = 0x13C;
+static constexpr size_t    kOffset_nBreakthrough              = 0x140;
 
 // Fusion Anvil cash item (Item.wz/Cash/0590.img/05900000.img)
 static constexpr int32_t   kFusionAnvilItemID                 = 5900000;
@@ -108,6 +120,7 @@ struct GW_ItemSlotEquip {
     MEMBER_AT(uint64_t, kOffset_tEquipSkillExpire, tEquipSkillExpire)
     MEMBER_AT(unsigned char, kOffset_nEnhance, nEnhance)
     MEMBER_AT(unsigned char, kOffset_nPotentialGrade, nPotentialGrade)
+    MEMBER_AT(unsigned short, kOffset_nInfusion, nInfusion)
     MEMBER_AT(int32_t, kOffset_nPotential1, nPotential1)
     MEMBER_AT(int32_t, kOffset_nPotential2, nPotential2)
     MEMBER_AT(int32_t, kOffset_nPotential3, nPotential3)
@@ -120,6 +133,7 @@ struct GW_ItemSlotEquip {
     MEMBER_AT(int32_t, kOffset_nSocket1, nSocket1)
     MEMBER_AT(int32_t, kOffset_nSocket2, nSocket2)
     MEMBER_AT(int32_t, kOffset_nSocket3, nSocket3)
+    MEMBER_AT(unsigned short, kOffset_nBreakthrough, nBreakthrough)
 };
 
 struct AvatarLook {
@@ -556,9 +570,36 @@ void CUIFusionAnvil::SendRequestPacket() {
 static auto CInPacket__Decode1 =
     reinterpret_cast<unsigned char(__thiscall*)(CInPacket*)>(kAddr_InPacket_Decode1);
 static auto CInPacket__Decode2 =
-    reinterpret_cast<unsigned short(__thiscall*)(CInPacket*)>(kAddr_InPacket_Decode2);
+    reinterpret_cast<uint16_t(__thiscall*)(CInPacket*)>(kAddr_InPacket_Decode2);
 static auto CInPacket__Decode4 =
     reinterpret_cast<uint32_t(__thiscall*)(CInPacket*)>(kAddr_InPacket_Decode4);
+
+// tip 深绿：按 Equip* 存混沌累计（不扩 GW_ItemSlotEquip 体积）
+static std::unordered_map<uintptr_t, std::array<short, 15>> g_chaosByEquip;
+
+extern "C" short FusionAnvil_GetChaosStat(void* pe, int statIdx) {
+    if (!pe || statIdx < 0 || statIdx >= 15) {
+        return 0;
+    }
+    auto it = g_chaosByEquip.find(reinterpret_cast<uintptr_t>(pe));
+    if (it == g_chaosByEquip.end()) {
+        return 0;
+    }
+    return it->second[static_cast<size_t>(statIdx)];
+}
+
+#if !defined(GREEN_ENTER_BASELINE) || !GREEN_ENTER_BASELINE
+// Survives /OPT:REF so deploy gates can prove tip/fusionanvil linked.
+// Omit under GREEN_ENTER_BASELINE=1 (enter-green frozen / login-hover-safe).
+extern "C" __declspec(dllexport) const char* FusionAnvil_GetTipStamp() {
+    return "EQUIP_TIP_COLOR_20260803";
+}
+
+extern "C" __declspec(dllexport) const char* FusionAnvil_GetTooltipOnlyStamp() {
+    return "EQUIP_TIP_TOOLTIP_ONLY_20260803";
+}
+#endif
+
 static auto GW_ItemSlotBase__Decode =
     reinterpret_cast<int(__cdecl*)(void*, CInPacket*)>(kAddr_ItemSlotBase_Decode);
 
@@ -589,6 +630,7 @@ int __cdecl GW_ItemSlotBase__Decode_hook(void* pOutZRef, CInPacket* pPacket) {
     uint32_t expireHi = 0;
     unsigned char nEnhance = 0;
     unsigned char nPotGrade = 0;
+    uint16_t nInfusion = 0;
     uint32_t nPot1 = 0;
     uint32_t nPot2 = 0;
     uint32_t nPot3 = 0;
@@ -601,6 +643,7 @@ int __cdecl GW_ItemSlotBase__Decode_hook(void* pOutZRef, CInPacket* pPacket) {
     uint32_t nSocket1 = 0;
     uint32_t nSocket2 = 0;
     uint32_t nSocket3 = 0;
+    uint16_t nBreakthrough = 0;
     __try {
         nAnvilItemID = CInPacket__Decode4(pPacket);
         nSkillID = CInPacket__Decode4(pPacket);
@@ -610,7 +653,7 @@ int __cdecl GW_ItemSlotBase__Decode_hook(void* pOutZRef, CInPacket* pPacket) {
         // Phase2 Hyper/Potential — after spirit expire (PacketCreator tail)
         nEnhance = CInPacket__Decode1(pPacket);
         nPotGrade = CInPacket__Decode1(pPacket);
-        (void)CInPacket__Decode2(pPacket); // reserved
+        nInfusion = CInPacket__Decode2(pPacket); // 0x10F → 注能等级 (低字节)
         nPot1 = CInPacket__Decode4(pPacket);
         nPot2 = CInPacket__Decode4(pPacket);
         nPot3 = CInPacket__Decode4(pPacket);
@@ -627,6 +670,11 @@ int __cdecl GW_ItemSlotBase__Decode_hook(void* pOutZRef, CInPacket* pPacket) {
         nSocket1 = CInPacket__Decode4(pPacket);
         nSocket2 = CInPacket__Decode4(pPacket);
         nSocket3 = CInPacket__Decode4(pPacket);
+        // Phase12 破界等级 (short) — must consume exactly 2 bytes to keep the
+        // following item decode aligned. Server writes it after socket3.
+        nBreakthrough = CInPacket__Decode2(pPacket);
+        // Chaos ledger stays DB-only — do NOT decode extra bytes here.
+        g_chaosByEquip.erase(reinterpret_cast<uintptr_t>(pEquip));
     } __except (EXCEPTION_EXECUTE_HANDLER) { return ret; }
     __try {
         pEquip->nAnvilItemID = static_cast<int32_t>(nAnvilItemID);
@@ -636,6 +684,7 @@ int __cdecl GW_ItemSlotBase__Decode_hook(void* pOutZRef, CInPacket* pPacket) {
             (static_cast<uint64_t>(expireHi) << 32) | expireLo;
         pEquip->nEnhance = nEnhance;
         pEquip->nPotentialGrade = nPotGrade;
+        pEquip->nInfusion = nInfusion;
         pEquip->nPotential1 = static_cast<int32_t>(nPot1);
         pEquip->nPotential2 = static_cast<int32_t>(nPot2);
         pEquip->nPotential3 = static_cast<int32_t>(nPot3);
@@ -648,6 +697,7 @@ int __cdecl GW_ItemSlotBase__Decode_hook(void* pOutZRef, CInPacket* pPacket) {
         pEquip->nSocket1 = static_cast<int32_t>(nSocket1);
         pEquip->nSocket2 = static_cast<int32_t>(nSocket2);
         pEquip->nSocket3 = static_cast<int32_t>(nSocket3);
+        pEquip->nBreakthrough = nBreakthrough;
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return ret;
 }

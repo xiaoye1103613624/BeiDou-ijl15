@@ -1,549 +1,325 @@
 #include "stdafx.h"
-
 #include "compat/hook.h"
-
 #include "compat/wvs/iteminfo.h"
-
 #include "compat/ztl/ztl.h"
-
 #include <intrin.h>
 
-
-
 // ===========================================================================
-
-// Equip-slot grid transmog badge — jmp patch at the DrawItemIconForSlot call
-
-// inside CUIItem::Draw only (NOT a global hook on sub_5D6458).
-
-// IDA-confirmed v083 addresses (image base 0x400000):
-
-//   CUIItem::Draw              sub_81DC20  [0x0081DC20 .. 0x0081E255) size 0x635
-
-//   hook call site             0x0081DEE9  call sub_5D6458
-
-//   resume after call          0x0081DEEE
-
-//   CUIItem singleton          dword_BED654 0x00BED654  (ctor sub_81C414)
-
-//   CUIItem::SlotAtPoint       sub_81DB7E  0x0081DB7E
-
-//   Draw loop slot index       [ebp+0x84]  (arg_0) in CUIItem::Draw
-
-//   CUIEquip singleton         dword_BED650 0x00BED650  (ctor sub_832586)
-
-//   CUIEquip::Draw             sub_83451B  [0x0083451B .. 0x008351CA) — also calls
-
-//                              sub_5D6458 @ 0x8346F3 / 0x834F02 but never through this jmp
-
-//   DrawItemIconForSlot        sub_5D6458  0x005D6458
-
+// Potential grade overlay on inventory / equip icons (095 DrawGradeFrame style):
+//   1) Colored rectangular border around equip icon
+//   2) Small letter badge (C/B/A/S/SS) at top-right
+//
+// Stamp (grep DLL): HYPER_STARS_ROW_20260804
+static const char kPotentialGradeUiStamp[] = "HYPER_STARS_ROW_20260804";
+volatile const char* PotentialGradeUiStampRef() { return kPotentialGradeUiStamp; }
+//
+// IDA v083 (image base 0x400000):
+//   CUIItem::Draw           0x0081DC20 .. 0x0081E255
+//   call DrawItemIcon       0x0081DEE9  (esi = GW_ItemSlotEquip*)
+//   CUIEquip::Draw          0x0083451B
+//   call DrawItemIcon       0x008346F3  (esi = GW_ItemSlotEquip*)
+//   DrawItemIconForSlot     0x005D6458
+//
+// Hook via PatchCall (NOT PatchJmp): keeps call/ret stack correct. The older
+// PatchJmp naked path crashed on backpack open (bisect 2026-07-10).
 // ===========================================================================
-
-
 
 struct GW_ItemSlotBase : public ZRefCounted {
-
     virtual ~GW_ItemSlotBase() = 0;
-
     virtual int IsProtectedItem() = 0;
-
     virtual int IsPreventSlipItem() = 0;
-
     virtual int IsSupportWarmItem() = 0;
-
     virtual int IsBindedItem() = 0;
-
     virtual int IsPossibleTradingItem() = 0;
-
     virtual int GetType() = 0; // 1 = Equip
-
 };
 
-
-
-struct GW_ItemSlotEquip {
-
-    MEMBER_AT(int, 0xF9, nAnvilItemID)
-
+// Matches fusionanvil PacketCreator / tooltip Decode tail (size 0x140).
+struct GW_ItemSlotEquipPot {
+    MEMBER_AT(unsigned char, 0x10D, nEnhance)
+    MEMBER_AT(unsigned char, 0x10E, nPotentialGrade)
+    MEMBER_AT(int, 0x110, nPotential1)
+    MEMBER_AT(int, 0x114, nPotential2)
+    MEMBER_AT(int, 0x118, nPotential3)
 };
 
+static constexpr uintptr_t kAddr_DrawItemIconForSlot = 0x005D6458;
+static constexpr uintptr_t kAddr_CUIItem_Call = 0x0081DEE9;
+static constexpr uintptr_t kAddr_CUIEquip_Call = 0x008346F3;
+static constexpr uintptr_t kAddr_WzFontCreate = 0x0046341A;
 
+static constexpr int kIconSize = 32;
 
-static constexpr uintptr_t kAddr_CUIItem_Draw          = 0x0081DC20;
-
-static constexpr uintptr_t kAddr_CUIItem_Draw_End      = 0x0081E255; // +0x635
-
-static constexpr uintptr_t kAddr_DrawItemIconForSlot_Call = 0x0081DEE9;
-
-static constexpr uintptr_t kAddr_DrawItemIconForSlot_Ret  = 0x0081DEEE;
-
-static constexpr uintptr_t kAddr_DrawItemIconForSlot      = 0x005D6458;
-
-
-
-static constexpr uintptr_t kAddr_CUIItem_Instance   = 0x00BED654;
-
-static constexpr uintptr_t kAddr_CUIEquip_Instance  = 0x00BED650;
-
-static constexpr uintptr_t kAddr_CUIItem_SlotAtPoint = 0x0081DB7E;
-
-
-
-static constexpr uintptr_t kAddr_InputSystem        = 0x00BEC33C;
-
-static constexpr uintptr_t kAddr_GetCursorPos       = 0x0059A388;
-
-static constexpr uintptr_t kAddr_GetWndAbsLeft      = 0x009E03C5;
-
-static constexpr uintptr_t kAddr_GetWndAbsTop       = 0x009E0447;
-
-
-
-static constexpr int kCUIItem_LayerOffset = 0x18;
-
-
-
-struct SavedIconDrawCtx {
-
-    IWzCanvasPtr pCanvas;
-
-    int x;
-
-    int y;
-
+// 095 DrawGradeFrame ARGB (+ SS green). Index by BeiDou grade 1..5; [0]=hidden.
+static constexpr unsigned long kGradeFrameArgb[6] = {
+    0xFFFF4444u, // hidden / unrevealed
+    0xFFB0B0B0u, // C
+    0xFF5CA1FFu, // B ≈ Rare
+    0xFFC24BFFu, // A ≈ Epic
+    0xFFFFCC00u, // S ≈ Unique
+    0xFF6ED86Eu, // SS ≈ Legendary
 };
 
+static GW_ItemSlotBase* g_ovItem = nullptr;
+static IWzCanvas* g_ovCanvas = nullptr;
+static int g_ovX = 0;
+static int g_ovY = 0;
 
+static IWzFontPtr g_badgeFonts[6];
 
-static SavedIconDrawCtx g_iconDrawCtx;
-
-
+typedef HRESULT(__thiscall* WzFontCreate_t)(
+    IWzFont*, Ztl_bstr_t, unsigned long, unsigned long, const Ztl_variant_t&);
+static auto WzFontCreate = reinterpret_cast<WzFontCreate_t>(kAddr_WzFontCreate);
 
 static int SafeGetItemType(GW_ItemSlotBase* pItem) {
-
     if (!pItem) {
-
         return 0;
-
     }
-
     int nType = 0;
-
-    __try { nType = pItem->GetType(); }
-
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-
-    return nType;
-
-}
-
-
-
-static int SafeGetAnvilItemId(GW_ItemSlotBase* pItem) {
-
-    if (!pItem) {
-
-        return 0;
-
-    }
-
-    int nAnvilItemID = 0;
-
-    __try { nAnvilItemID = reinterpret_cast<GW_ItemSlotEquip*>(pItem)->nAnvilItemID; }
-
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-
-    // Same range as tooltip.cpp — CS preview heap garbage must not paint 幻化.
-    if (nAnvilItemID < 1000000 || nAnvilItemID >= 2000000) {
-
-        return 0;
-
-    }
-
-    return nAnvilItemID;
-
-}
-
-
-
-static bool IsUiWindowVisible(uintptr_t singletonAddr) {
-
-    void* ui = nullptr;
-
-    __try { ui = *reinterpret_cast<void**>(singletonAddr); }
-
-    __except (EXCEPTION_EXECUTE_HANDLER) { ui = nullptr; }
-
-    if (!ui) {
-
-        return false;
-
-    }
-
-    void* layer = nullptr;
-
-    __try { layer = *reinterpret_cast<void**>(reinterpret_cast<char*>(ui) + kCUIItem_LayerOffset); }
-
-    __except (EXCEPTION_EXECUTE_HANDLER) { layer = nullptr; }
-
-    if (!layer) {
-
-        return false;
-
-    }
-
-    int vis = 0;
-
-    __try { vis = reinterpret_cast<IWzGr2DLayer*>(layer)->visible; }
-
-    __except (EXCEPTION_EXECUTE_HANDLER) { vis = 0; }
-
-    return vis != 0;
-
-}
-
-
-
-static bool IsInventoryShown() {
-
-    return IsUiWindowVisible(kAddr_CUIItem_Instance);
-
-}
-
-
-
-static bool IsEquipWindowShown() {
-
-    return IsUiWindowVisible(kAddr_CUIEquip_Instance);
-
-}
-
-
-
-static bool GetEngineCursor(POINT& sp) {
-
-    sp.x = 0;
-
-    sp.y = 0;
-
-    void* pInputSystem = nullptr;
-
-    __try { pInputSystem = *reinterpret_cast<void**>(kAddr_InputSystem); }
-
-    __except (EXCEPTION_EXECUTE_HANDLER) { pInputSystem = nullptr; }
-
-    if (!pInputSystem) {
-
-        return false;
-
-    }
-
     __try {
-
-        reinterpret_cast<void(__thiscall*)(void*, POINT*)>(kAddr_GetCursorPos)(
-
-            pInputSystem, &sp);
-
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-
-    return true;
-
-}
-
-
-
-static void GetInvWndAbs(void* inv, int& absL, int& absT) {
-
-    absL = 0;
-
-    absT = 0;
-
-    if (!inv) {
-
-        return;
-
-    }
-
-    void* pHandler = reinterpret_cast<char*>(inv) + 4;
-
-    __try {
-
-        absL = reinterpret_cast<int(__thiscall*)(void*)>(kAddr_GetWndAbsLeft)(pHandler);
-
-        absT = reinterpret_cast<int(__thiscall*)(void*)>(kAddr_GetWndAbsTop)(pHandler);
-
+        nType = pItem->GetType();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-
-        absL = 0;
-
-        absT = 0;
-
-    }
-
-}
-
-
-
-static int QueryInventoryHoveredSlot() {
-
-    if (!IsInventoryShown() || IsEquipWindowShown()) {
-
         return 0;
-
     }
-
-
-
-    void* inv = nullptr;
-
-    __try { inv = *reinterpret_cast<void**>(kAddr_CUIItem_Instance); }
-
-    __except (EXCEPTION_EXECUTE_HANDLER) { inv = nullptr; }
-
-    if (!inv) {
-
-        return 0;
-
-    }
-
-
-
-    POINT sp;
-
-    if (!GetEngineCursor(sp)) {
-
-        return 0;
-
-    }
-
-
-
-    int absL = 0;
-
-    int absT = 0;
-
-    GetInvWndAbs(inv, absL, absT);
-
-    if (absL <= 0 && absT <= 0) {
-
-        return 0;
-
-    }
-
-
-
-    int slot = 0;
-
-    __try {
-
-        slot = reinterpret_cast<int(__thiscall*)(void*, int, int)>(
-
-            kAddr_CUIItem_SlotAtPoint)(inv, sp.x - absL, sp.y - absT);
-
-    } __except (EXCEPTION_EXECUTE_HANDLER) { slot = 0; }
-
-    return (slot >= 1 && slot <= 96) ? slot : 0;
-
+    return nType;
 }
 
-
-
-static int GetInventoryHoveredSlotCached() {
-
-    static DWORD s_lastTick = 0;
-
-    static int s_hoveredSlot = 0;
-
-    const DWORD tick = GetTickCount();
-
-    if (tick != s_lastTick) {
-
-        s_lastTick = tick;
-
-        s_hoveredSlot = QueryInventoryHoveredSlot();
-
-    }
-
-    return s_hoveredSlot;
-
-}
-
-
-
-static bool IsCallerInsideCUIItemDraw() {
-
-    const uintptr_t ret = reinterpret_cast<uintptr_t>(_ReturnAddress());
-
-    return ret >= kAddr_CUIItem_Draw && ret < kAddr_CUIItem_Draw_End;
-
-}
-
-
-
-static bool IsCUIItemDrawContext(void* pCUIItemThis, int nSlot) {
-
-    if (!pCUIItemThis || nSlot < 1 || nSlot > 96) {
-
-        return false;
-
-    }
-
-    void* inv = nullptr;
-
-    __try { inv = *reinterpret_cast<void**>(kAddr_CUIItem_Instance); }
-
-    __except (EXCEPTION_EXECUTE_HANDLER) { inv = nullptr; }
-
-    return inv != nullptr && inv == pCUIItemThis;
-
-}
-
-
-
-// Badge overlay only — vanilla icon draw runs via sub_5D6458 in naked hook first.
-
-void __cdecl TryDrawTransmogBadge(
-
-    CItemInfo* pThis,
-
+static bool SafeReadPotential(
     GW_ItemSlotBase* pItem,
-
-    void* pCUIItemThis,
-
-    int nSlot)
-
+    unsigned char* outGrade,
+    int* outP1,
+    int* outP2,
+    int* outP3)
 {
-
-    if (!pItem || !pThis || !g_iconDrawCtx.pCanvas) {
-
-        return;
-
+    if (outGrade) {
+        *outGrade = 0;
     }
-
-    if (!IsCallerInsideCUIItemDraw()) {
-
-        return;
-
+    if (outP1) {
+        *outP1 = 0;
     }
-
-    if (!IsCUIItemDrawContext(pCUIItemThis, nSlot)) {
-
-        return;
-
+    if (outP2) {
+        *outP2 = 0;
     }
-
-    if (IsEquipWindowShown()) {
-
-        return;
-
+    if (outP3) {
+        *outP3 = 0;
     }
-
-    if (SafeGetItemType(pItem) != 1) {
-
-        return;
-
+    if (!pItem || SafeGetItemType(pItem) != 1) {
+        return false;
     }
-
-    const int nAnvilItemID = SafeGetAnvilItemId(pItem);
-
-    if (!nAnvilItemID) {
-
-        return;
-
+    unsigned char grade = 0;
+    int p1 = 0, p2 = 0, p3 = 0;
+    __try {
+        auto* pe = reinterpret_cast<GW_ItemSlotEquipPot*>(pItem);
+        grade = pe->nPotentialGrade;
+        p1 = pe->nPotential1;
+        p2 = pe->nPotential2;
+        p3 = pe->nPotential3;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
     }
-
-    if (!IsInventoryShown() || GetInventoryHoveredSlotCached() != nSlot) {
-
-        return;
-
+    // Guard CS/heap garbage (same idea as tooltip SafeGetHyperPotential).
+    if (grade > 5) {
+        grade = 0;
     }
-
-    pThis->DrawItemIconForSlot(
-
-        g_iconDrawCtx.pCanvas, nAnvilItemID,
-
-        g_iconDrawCtx.x + 18, g_iconDrawCtx.y,
-
-        0, 0, 0, 1, 0, 1);
-
+    if (p1 < 0 || p1 > 70000) {
+        p1 = 0;
+    }
+    if (p2 < 0 || p2 > 70000) {
+        p2 = 0;
+    }
+    if (p3 < 0 || p3 > 70000) {
+        p3 = 0;
+    }
+    if (outGrade) {
+        *outGrade = grade;
+    }
+    if (outP1) {
+        *outP1 = p1;
+    }
+    if (outP2) {
+        *outP2 = p2;
+    }
+    if (outP3) {
+        *outP3 = p3;
+    }
+    return grade > 0 || p1 > 0 || p2 > 0 || p3 > 0;
 }
 
+static IWzFontPtr EnsureBadgeFont(unsigned char grade) {
+    unsigned char g = grade;
+    if (g > 5) {
+        g = 0;
+    }
+    if (g_badgeFonts[g]) {
+        return g_badgeFonts[g];
+    }
+    try {
+        PcCreateObject<IWzFontPtr>(L"Canvas#Font", g_badgeFonts[g], nullptr);
+        if (!g_badgeFonts[g]) {
+            return nullptr;
+        }
+        const Ztl_variant_t style(L"");
+        // White letter on colored badge plate.
+        if (FAILED(WzFontCreate(g_badgeFonts[g], L"Dotum", 11, 0xFFFFFFFFu, style))) {
+            g_badgeFonts[g] = nullptr;
+            return nullptr;
+        }
+        return g_badgeFonts[g];
+    } catch (...) {
+        g_badgeFonts[g] = nullptr;
+        return nullptr;
+    }
+}
 
+static const wchar_t* GradeLetterW(unsigned char grade) {
+    switch (grade) {
+    case 1: return L"C";
+    case 2: return L"B";
+    case 3: return L"A";
+    case 4: return L"S";
+    case 5: return L"SS";
+    default: return L"?";
+    }
+}
 
-// At 0x0081DEE9: ecx=pThis, esi=GW_ItemSlotBase*, ebx=CUIItem*, [esp]=canvas,
+static void DrawGradeFrameRects(IWzCanvas* canvas, int left, int top, int right, int bottom, unsigned long frameColor) {
+    const int w = right - left;
+    const int h = bottom - top;
+    if (!canvas || w <= 0 || h <= 0) {
+        return;
+    }
+    __try {
+        canvas->DrawRectangle(left, top, static_cast<unsigned>(w), 1u, frameColor);
+        canvas->DrawRectangle(left, bottom - 1, static_cast<unsigned>(w), 1u, frameColor);
+        canvas->DrawRectangle(left, top, 1u, static_cast<unsigned>(h), frameColor);
+        canvas->DrawRectangle(right - 1, top, 1u, static_cast<unsigned>(h), frameColor);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
 
-// [esp+8]=x, [esp+0xC]=y for sub_5D6458.  Save draw coords, call original, then badge.
+static void DrawHiddenChip(IWzCanvas* canvas, int right, int top, unsigned long frameColor) {
+    if (!canvas) {
+        return;
+    }
+    __try {
+        canvas->DrawRectangle(right - 10, top + 1, 9u, 9u, frameColor);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
 
-void __declspec(naked) CItemInfo__DrawItemIconForSlot_hook() {
+static void DrawBadgePlate(IWzCanvas* canvas, int bx, int by, int badgeW, int badgeH, unsigned long frameColor) {
+    if (!canvas) {
+        return;
+    }
+    __try {
+        canvas->DrawRectangle(
+            bx, by, static_cast<unsigned>(badgeW), static_cast<unsigned>(badgeH), frameColor);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
 
+static void DrawBadgeLetter(IWzCanvas* canvas, int bx, int by, unsigned char grade) {
+    if (!canvas || grade < 1 || grade > 5) {
+        return;
+    }
+    IWzFontPtr font = EnsureBadgeFont(grade);
+    if (!font) {
+        return;
+    }
+    try {
+        canvas->DrawTextA(
+            bx + 1, by - 1, Ztl_bstr_t(GradeLetterW(grade)), font,
+            Ztl_variant_t(), Ztl_variant_t());
+    } catch (...) {
+    }
+}
+
+static void DrawGradeFrameAndBadge(IWzCanvas* canvas, int x, int y, unsigned char grade, bool hidden) {
+    if (!canvas) {
+        return;
+    }
+    const unsigned long frameColor =
+        hidden ? kGradeFrameArgb[0]
+               : kGradeFrameArgb[(grade >= 1 && grade <= 5) ? grade : 1];
+
+    // DrawItemIconForSlot: bottom-left baseline → icon covers [x, y-kIconSize]..[x+kIconSize, y].
+    const int left = x;
+    const int top = y - kIconSize;
+    const int right = x + kIconSize;
+    const int bottom = y;
+    DrawGradeFrameRects(canvas, left, top, right, bottom, frameColor);
+
+    if (hidden || grade < 1 || grade > 5) {
+        DrawHiddenChip(canvas, right, top, frameColor);
+        return;
+    }
+
+    const int badgeW = (grade == 5) ? 16 : 11;
+    const int badgeH = 11;
+    const int bx = right - badgeW - 1;
+    const int by = top + 1;
+    DrawBadgePlate(canvas, bx, by, badgeW, badgeH, frameColor);
+    DrawBadgeLetter(canvas, bx, by, grade);
+}
+
+// Called after vanilla icon draw; uses thread-local-ish globals set by naked hook.
+static void __cdecl AfterDrawIconGradeOverlay() {
+    GW_ItemSlotBase* item = g_ovItem;
+    IWzCanvas* canvas = g_ovCanvas;
+    const int x = g_ovX;
+    const int y = g_ovY;
+    g_ovItem = nullptr;
+    g_ovCanvas = nullptr;
+
+    if (!item || !canvas) {
+        return;
+    }
+    unsigned char grade = 0;
+    int p1 = 0, p2 = 0, p3 = 0;
+    if (!SafeReadPotential(item, &grade, &p1, &p2, &p3)) {
+        return;
+    }
+    const bool hidden = (grade > 0 && p1 <= 0 && p2 <= 0 && p3 <= 0);
+    unsigned char showGrade = grade;
+    if (showGrade == 0) {
+        // Revealed lines but grade byte missing — treat as B for color.
+        showGrade = 2;
+    }
+    DrawGradeFrameAndBadge(canvas, x, y, showGrade, hidden);
+}
+
+// PatchCall entry: stack already has ret to next insn; ecx=CItemInfo*; esi=item*.
+void __declspec(naked) DrawItemIconForSlot_CallSiteHook() {
     __asm {
-
-        push    edi
-
+        // [esp]=ret, [esp+4]=canvas, [esp+8]=itemId, [esp+0C]=x, [esp+10]=y, ...
+        mov     g_ovItem, esi
         mov     eax, [esp+4]
-
-        mov     g_iconDrawCtx.pCanvas, eax
-
+        mov     g_ovCanvas, eax
         mov     eax, [esp+0Ch]
-
-        mov     g_iconDrawCtx.x, eax
-
+        mov     g_ovX, eax
         mov     eax, [esp+10h]
-
-        mov     g_iconDrawCtx.y, eax
-
-
-
-        mov     edi, [ebp+84h]
+        mov     g_ovY, eax
 
         call    dword ptr [kAddr_DrawItemIconForSlot]
+        // thiscall popped its stack args; [esp] is still return to Draw caller
 
-
-
-        push    ebx
-
-        push    edi
-
-        push    esi
-
-        push    ecx
-
-        call    TryDrawTransmogBadge
-
-        add     esp, 10h
-
-
-
-        pop     edi
-
-        jmp     dword ptr [kAddr_DrawItemIconForSlot_Ret]
-
+        call    AfterDrawIconGradeOverlay
+        ret
     }
-
 }
-
-
 
 namespace {
-
 bool g_itemIconHooksAttached = false;
-
 } // namespace
 
-
-
-// Bisect + IDA (2026-07-10): PatchJmp naked hook at 0x0081DEE9 still crashes on
-// backpack open. Disabled — transmog shown via tooltip.cpp only until a safe
-// post-Draw or trampoline hook is implemented (see kaentake __fastcall helper).
-static constexpr bool kItemIconHookEnabled = false;
-
 void AttachFusionAnvilItemIconHooks() {
-    if (!kItemIconHookEnabled || g_itemIconHooksAttached) {
+    if (g_itemIconHooksAttached) {
         return;
     }
-
     g_itemIconHooksAttached = true;
-    PatchJmp(kAddr_DrawItemIconForSlot_Call, &CItemInfo__DrawItemIconForSlot_hook);
+    // Keep stamp string alive under /OPT:REF.
+    (void)PotentialGradeUiStampRef();
+    // PatchCall preserves call semantics (unlike the old PatchJmp that crashed).
+    PatchCall(kAddr_CUIItem_Call, &DrawItemIconForSlot_CallSiteHook);
+    PatchCall(kAddr_CUIEquip_Call, &DrawItemIconForSlot_CallSiteHook);
 }
-

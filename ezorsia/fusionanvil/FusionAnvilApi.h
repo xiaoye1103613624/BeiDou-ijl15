@@ -7,6 +7,14 @@ void AttachFusionAnvilPacketHooks();
 void AttachFusionAnvilUiHooks();
 void AttachFusionAnvilTooltipHooks();
 void FusionAnvil_BindDrawToolTipEquipTarget(void** outPtr);
+#ifdef __cplusplus
+extern "C" {
+#endif
+/** tip 深绿：statIdx 0..14，无记录则 0。 */
+short FusionAnvil_GetChaosStat(void* pe, int statIdx);
+#ifdef __cplusplus
+}
+#endif
 void AttachFusionAnvilItemIconHooks();
 
 namespace FusionAnvil {
