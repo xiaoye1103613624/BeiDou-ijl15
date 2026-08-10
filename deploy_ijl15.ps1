@@ -51,6 +51,60 @@ if (-not (Test-Path -LiteralPath $DllPath)) {
     throw "源 DLL 不存在: $DllPath"
 }
 
+# --- EXECAVE stub hard gate (2026-08-10) ---
+# Guard boot-safety of the main ijl15.dll only: refuse to deploy when the
+# EXECAVE bridge @RVA 0xAB30C is gone (stub clobber flashes boot before login).
+# Root cause of the 08-08 23:58 full-MSBuild incident + the live A5CA983D flash:
+# the .text 0xAB30C slot no longer carried 53 E8.  Never overwrite live from a
+# build whose stub is unusable; quarantine the bad artifact and abort instead.
+if ($DestName -eq 'ijl15.dll') {
+    function Get-RvaFileStub([byte[]]$pe, [uint32]$rva) {
+            $e = [BitConverter]::ToInt32($pe, 0x3C)
+            $n = [BitConverter]::ToUInt16($pe, $e + 6)
+            $osz = [BitConverter]::ToUInt16($pe, $e + 20)
+            $sec = $e + 24 + $osz
+            for ($i = 0; $i -lt $n; $i++) {
+                $o = $sec + $i * 40
+                $va = [BitConverter]::ToUInt32($pe, $o + 12)
+                $raw = [BitConverter]::ToUInt32($pe, $o + 20)
+                $rsz = [BitConverter]::ToUInt32($pe, $o + 16)
+                if ($rva -ge $va -and $rva -lt ($va + $rsz)) { return [int]($raw + ($rva - $va)) }
+            }
+            return -1
+        }
+        $stubBytes = [IO.File]::ReadAllBytes($DllPath)
+        $stubOff = Get-RvaFileStub $stubBytes 0xAB30C
+        $stubLen = $stubBytes.Length
+        $sha16 = (([Security.Cryptography.SHA256]::Create().ComputeHash($stubBytes) | ForEach-Object { $_.ToString('X2') }) -join '').Substring(0, 16)
+        if ($stubOff -lt 0 -or $stubBytes[$stubOff] -ne 0x53 -or $stubBytes[$stubOff + 1] -ne 0xE8) {
+            $quar = Join-Path $ClientDir '_stub_bad'
+            if (-not (Test-Path -LiteralPath $quar)) {
+                New-Item -ItemType Directory -Path $quar -Force | Out-Null
+            }
+            $moved = Join-Path $quar ((Get-Date -Format 'yyyyMMdd_HHmmss') + ".ijl15.dll.sha$sha16.stubBAD")
+            Copy-Item -LiteralPath $DllPath -Destination $moved -Force
+            throw @"
+[StubGate] 拒绝部署: ijl15.dll stub@RVA 0xAB30C 非 53 E8 (EXECAVE clobber)。
+  src=$DllPath (len=$stubLen sha16=$sha16)
+  已隔离 -> $moved
+  请改用 stub-safe 管线重编 (见 _build_native_gr2d.bat / preserve_execave_stub.ps1)。
+"@
+        }
+        Write-Info "StubGate OK: stub@AB30C=53 E8 (len=$stubLen sha16=$sha16)"
+        $donorF3 = 'E:\pro\BeiDou-ijl15\golden\ijl15.ADDON_SETITEM_FG_20260808.F3F8D0F2.dll'
+        if (Test-Path -LiteralPath $donorF3) {
+            $refBytes = [IO.File]::ReadAllBytes($donorF3)
+            $refOff = Get-RvaFileStub $refBytes 0xAB30C
+            $same = $true
+            for ($i = 0; $i -lt 50; $i++) {
+                if ($stubBytes[$stubOff + $i] -ne $refBytes[$refOff + $i]) { $same = $false; break }
+            }
+            if (-not $same) {
+                Write-Info "WARN: stub 50B 与 F3F8D0F2 供体不一致 (仅标记位 53 E8 合格，跨编布局可能漂移)"
+            }
+        }
+}
+
 if (-not $ClientDir.EndsWith('\') -and -not $ClientDir.EndsWith('/')) {
     $ClientDir += '\'
 }
