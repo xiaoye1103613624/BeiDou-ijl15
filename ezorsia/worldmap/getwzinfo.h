@@ -12,4 +12,17 @@ std::string GetMobNameById(int mobId);
 
 int GetMobLevelById(int mobId);
 
+struct MobCombatInfo {
+    int level = 0;
+    int paDamage = 0;
+    int pdDamage = 0;
+    int maDamage = 0;
+    int mdDamage = 0;
+    int acc = 0;
+    int eva = 0;
+    std::string elemAttr;
+};
+
+MobCombatInfo GetMobCombatInfoById(int mobId);
+
 std::string GetNpcById(int npcId);

@@ -17,6 +17,7 @@
 #include <cstdarg>
 
 #include "hook.h"
+#include "Memory.h"
 #include "ztl/ztl.h"
 #include "wvs/tooltip.h"
 #include "wvs/util.h"
@@ -144,22 +145,25 @@ void ClearDlgToolTip(void* ecx) {
 }
 
 namespace dbg {
-constexpr bool kEnabled = false;
+constexpr bool kEnabled = false; // tip-drawonly: no sidebar_debug fopen (green 6D612F01)
+
+inline void ExeDirFile(char* out, size_t outLen, const char* name) {
+    out[0] = 0;
+    char mod[MAX_PATH] = {};
+    if (GetModuleFileNameA(nullptr, mod, MAX_PATH) > 0) {
+        char* slash = strrchr(mod, '\\');
+        if (slash) {
+            *slash = 0;
+            sprintf_s(out, outLen, "%s\\%s", mod, name);
+            return;
+        }
+    }
+    strcpy_s(out, outLen, name);
+}
 
 inline void Log(const char* fmt, ...) {
-    if (!kEnabled) {
-        return;
-    }
-    FILE* file = nullptr;
-    if (fopen_s(&file, "C:\\worldmap_tip.log", "a") != 0 || !file) {
-        return;
-    }
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(file, fmt, args);
-    va_end(args);
-    fputc('\n', file);
-    fclose(file);
+    (void)fmt;
+    // tip-drawonly: logging disabled — do not embed sidebar_debug path.
 }
 } // namespace dbg
 
@@ -205,7 +209,7 @@ constexpr int Y          = 1;
 constexpr int FIELD_ARR  = 11;
 constexpr int ORIGIN_X   = 13;
 constexpr int ORIGIN_Y   = 35;
-constexpr int HIT_RADIUS = 8;
+constexpr int HIT_RADIUS = 12;
 
 inline int* getPtr(const void* base, int idx) {
     return *reinterpret_cast<int* const*>(
@@ -230,7 +234,8 @@ bool HasSpotTable(void* ecx) {
         return false;
     }
     __try {
-        static const int kBaseAdjust[] = { -4, 0 };
+        // Must match GetSpotFromDialog adjusts (handler may be CWnd+4).
+        static const int kBaseAdjust[] = { -4, 0, 4 };
         for (int adjust : kBaseAdjust) {
             void* base = static_cast<char*>(ecx) + adjust;
             int* spots = getPtr(base, OFF_SPOTS);
@@ -247,7 +252,7 @@ bool HasSpotTable(void* ecx) {
     return false;
 }
 
-static Spot GetSpotAtSafe(void* base, int rx, int ry, int hitRadius) {
+static Spot GetSpotAtSafe(void* base, int rx, int ry, int hitRadius, int originX, int originY) {
     Spot out{};
     __try {
         int* spots = getPtr(base, OFF_SPOTS);
@@ -263,8 +268,8 @@ static Spot GetSpotAtSafe(void* base, int rx, int ry, int hitRadius) {
             count = MAX_SPOT_COUNT;
         }
 
-        int cx = rx - ORIGIN_X;
-        int cy = ry - ORIGIN_Y;
+        int cx = rx - originX;
+        int cy = ry - originY;
 
         int best = -1;
         int bestDist = INT_MAX;
@@ -304,8 +309,8 @@ static Spot GetSpotAtSafe(void* base, int rx, int ry, int hitRadius) {
 
         out.index = best;
         out.mapId = mapId;
-        out.anchorX = s[X] + ORIGIN_X;
-        out.anchorY = s[Y] + ORIGIN_Y;
+        out.anchorX = s[X] + originX;
+        out.anchorY = s[Y] + originY;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         out = {};
     }
@@ -313,10 +318,10 @@ static Spot GetSpotAtSafe(void* base, int rx, int ry, int hitRadius) {
 }
 
 Spot GetSpot(void* base, int rx, int ry) {
-    return GetSpotAtSafe(base, rx, ry, HIT_RADIUS);
+    return GetSpotAtSafe(base, rx, ry, HIT_RADIUS, ORIGIN_X, ORIGIN_Y);
 }
 
-static Spot GetClosestSpotAt(void* base, int rx, int ry, int maxDistPx) {
+static Spot GetClosestSpotAt(void* base, int rx, int ry, int maxDistPx, int originX, int originY) {
     Spot out{};
     __try {
         int* spots = getPtr(base, OFF_SPOTS);
@@ -332,8 +337,8 @@ static Spot GetClosestSpotAt(void* base, int rx, int ry, int maxDistPx) {
             count = MAX_SPOT_COUNT;
         }
 
-        const int cx = rx - ORIGIN_X;
-        const int cy = ry - ORIGIN_Y;
+        const int cx = rx - originX;
+        const int cy = ry - originY;
         const int maxR2 = maxDistPx * maxDistPx;
 
         int best = -1;
@@ -368,8 +373,8 @@ static Spot GetClosestSpotAt(void* base, int rx, int ry, int maxDistPx) {
 
         out.index = best;
         out.mapId = mapId;
-        out.anchorX = s[X] + ORIGIN_X;
-        out.anchorY = s[Y] + ORIGIN_Y;
+        out.anchorX = s[X] + originX;
+        out.anchorY = s[Y] + originY;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         out = {};
     }
@@ -377,20 +382,31 @@ static Spot GetClosestSpotAt(void* base, int rx, int ry, int maxDistPx) {
 }
 
 Spot GetSpotFromDialog(void* ecx, int rx, int ry) {
-    static const int kBaseAdjust[] = { -4, 0 };
-    static const int kRadii[] = { HIT_RADIUS, 12, 18, 28 };
+    static const int kBaseAdjust[] = { -4, 0, 4 };
+    static const int kRadii[] = { HIT_RADIUS, 18, 28, 40 };
+    // RS / multi-res WorldMap chrome shifts the map image origin inside the dlg.
+    static const int kOrigins[][2] = {
+            {ORIGIN_X, ORIGIN_Y},
+            {13, 50},
+            {13, 70},
+            {20, 40},
+            {0, 0},
+            {13, 98},
+    };
 
     for (int adjust : kBaseAdjust) {
         void* base = static_cast<char*>(ecx) + adjust;
-        for (int radius : kRadii) {
-            Spot spot = GetSpotAtSafe(base, rx, ry, radius);
-            if (spot.index >= 0 && IsValidMapId(spot.mapId)) {
-                return spot;
+        for (const auto& origin : kOrigins) {
+            for (int radius : kRadii) {
+                Spot spot = GetSpotAtSafe(base, rx, ry, radius, origin[0], origin[1]);
+                if (spot.index >= 0 && IsValidMapId(spot.mapId)) {
+                    return spot;
+                }
             }
-        }
-        Spot closest = GetClosestSpotAt(base, rx, ry, 48);
-        if (closest.index >= 0) {
-            return closest;
+            Spot closest = GetClosestSpotAt(base, rx, ry, 64, origin[0], origin[1]);
+            if (closest.index >= 0) {
+                return closest;
+            }
         }
     }
     return {};
@@ -820,6 +836,17 @@ void DrawMarker(IWzCanvasPtr canvas, IWzCanvasPtr mark, int x, int y, int maxSiz
     canvas->CopyEx(x, y, mark, CA_OVERWRITE, nw, nh, 0, 0, w, h, vtEmpty);
 }
 
+// SEH-only helper — must not live in ShowTooltip (C++ objects + __try = C2712).
+static void RaiseTooltipLayer(CUIToolTip* tt) {
+    if (!tt || !tt->m_pLayer) {
+        return;
+    }
+    __try {
+        tt->m_pLayer->Putz(12000);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 // =====================================================
 // TOOLTIP RENDER — Canvas panel via SetToolTip_String2 sizing + manual draw.
 // Returns: 0 = use Orig native name, 1 = minimal g_ttBuf text, 2 = full canvas panel.
@@ -886,6 +913,8 @@ static int ShowTooltip(const std::string& street, const std::string& map, int ma
             mapId, tt->m_pLayer ? 1 : 0, tt->m_nHeight, need, h2, h12);
         return tt->m_pLayer ? 1 : 0;
     }
+
+    RaiseTooltipLayer(tt);
 
     IWzCanvasPtr canvas = tt->m_pLayer->canvas[0];
     if (!canvas) {
@@ -1082,7 +1111,16 @@ static int ShowSpotTooltip(const wm::Spot& spot) {
 int __fastcall OnMouseMove_Hook(void* ecx, void*, int x, int y) {
     const int ret = CallOnMouseMoveOrig(ecx, x, y);
 
-    if (!ecx || !GetFieldCtx() || !wm::HasSpotTable(ecx)) {
+    // OnMouseMove `this` is IUIMsgHandler* (CUIWorldMap+4). HasSpotTable /
+    // GetSpotFromDialog already try base adjust {-4,0,4}.
+    static int s_moveLog = 0;
+    if (s_moveLog < 8) {
+        ++s_moveLog;
+        dbg::Log("mousemove #%d ecx=%p xy=%d,%d hasSpot=%d",
+                 s_moveLog, ecx, x, y, wm::HasSpotTable(ecx) ? 1 : 0);
+    }
+
+    if (!ecx || !wm::HasSpotTable(ecx)) {
         wm_tick::Stop();
         return ret;
     }
@@ -1110,13 +1148,33 @@ void __fastcall OnDestroy_Hook(void* ecx, void*) {
     OnDestroy_Orig(ecx);
 }
 
+void AttachMapInfoToolTip();
+
 namespace WorldMapInfo {
 void TickTooltip() {
+    // Retry attach if first SetHook raced / failed — diagnostics always go to sidebar_debug.
+    AttachMapInfoToolTip();
     wm_tick::TickRefresh();
 }
 } // namespace WorldMapInfo
 
+static bool g_wmAttachAttempted = false;
+static bool g_wmHookMoveOk = false;
+
 void AttachMapInfoToolTip() {
-    ATTACH_HOOK(OnMouseMove_Orig, OnMouseMove_Hook);
-    ATTACH_HOOK(OnDestroy_Orig, OnDestroy_Hook);
+    if (g_wmAttachAttempted && g_wmHookMoveOk) {
+        return;
+    }
+    g_wmAttachAttempted = true;
+    dbg::Log("AttachMapInfoToolTip: begin OnMouseMove@%08X", addr::WM_OnMouseMove);
+    g_wmHookMoveOk = Memory::SetHook(true, reinterpret_cast<void**>(&OnMouseMove_Orig),
+                                     CastHook(&OnMouseMove_Hook));
+    const bool okDestroy = Memory::SetHook(true, reinterpret_cast<void**>(&OnDestroy_Orig),
+                                           CastHook(&OnDestroy_Hook));
+    dbg::Log("AttachMapInfoToolTip: SetHook move=%d destroy=%d trampoline=%p",
+             g_wmHookMoveOk ? 1 : 0, okDestroy ? 1 : 0, reinterpret_cast<void*>(OnMouseMove_Orig));
+    if (!g_wmHookMoveOk) {
+        // Allow TickTooltip retry next frame.
+        g_wmAttachAttempted = false;
+    }
 }

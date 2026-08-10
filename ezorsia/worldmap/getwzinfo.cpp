@@ -6,6 +6,7 @@
 #include <unordered_map>
 
 #include "wvs/util.h"
+#include "getwzinfo.h"
 
 // =====================================================
 // CACHE
@@ -13,6 +14,7 @@
 static std::unordered_map<int, std::string> g_mapNames;
 static std::unordered_map<int, std::string> g_mobNames;
 static std::unordered_map<int, int> g_mobLevels;
+static std::unordered_map<int, MobCombatInfo> g_mobCombat;
 static std::unordered_map<int, std::string> g_npcNames;
 
 static std::unordered_map<int, int> g_mobToCard;
@@ -181,6 +183,37 @@ int GetMobLevelById(int id) {
 
     g_mobLevels[id] = level;
     return level;
+}
+
+MobCombatInfo GetMobCombatInfoById(int id) {
+    auto it = g_mobCombat.find(id);
+    if (it != g_mobCombat.end()) {
+        return it->second;
+    }
+
+    MobCombatInfo info{};
+    wchar_t path[64];
+    swprintf(path, L"Mob/%07d.img", id);
+    IWzPropertyPtr mob = wz::Get(path);
+    IWzPropertyPtr node = mob ? wz::GetItem(mob, L"info") : nullptr;
+    if (node) {
+        info.level = wz::GetInt(node, L"level", 0);
+        info.paDamage = wz::GetInt(node, L"PADamage", 0);
+        info.pdDamage = wz::GetInt(node, L"PDDamage", 0);
+        info.maDamage = wz::GetInt(node, L"MADamage", 0);
+        info.mdDamage = wz::GetInt(node, L"MDDamage", 0);
+        info.acc = wz::GetInt(node, L"acc", 0);
+        info.eva = wz::GetInt(node, L"eva", 0);
+        info.elemAttr = wz::GetStr(node, L"elemAttr", "");
+        if (info.elemAttr == "Unknown") {
+            info.elemAttr.clear();
+        }
+    }
+    if (info.level <= 0) {
+        info.level = GetMobLevelById(id);
+    }
+    g_mobCombat[id] = info;
+    return info;
 }
 
 // =====================================================
