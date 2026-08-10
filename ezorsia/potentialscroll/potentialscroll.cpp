@@ -9,10 +9,16 @@
 // Call sites (verified): 0x004F4E1C, 0x0082CCC5.
 //
 // Hook B (Phase11): Cash cubes 5062000/01/02/2100 drag onto 背包装备栏.
-// Native 083 has no MiracleCube pick-UI and does not treat Cash as upgrade scrolls.
-// Intercept CDraggableItem::OnDropped (via FusionAnvil chain): when Cash cube is
-// dropped on CUIItem Equip tab slot, send USE_CASH_ITEM (0x4F) with equip slot int
-// — same body resolveCashCubeTarget expects after itemId.
+//
+// Soft095 protect model (PROTECT_SOFT095_FULL):
+//   Four protect families are PRE-APPLIED onto the equip (Cash UseCashItem /
+//   USE special scroll paint flags). Hyper smash never prompts which protect
+//   to use — SHIELD_WARD already on the equip absorbs destroy.
+//   Therefore: NO StringPool#3963 hijack, NO CountProtectItems inventory
+//   consume UX. For Hyper only, suppress vanilla white-scroll YesNo
+//   (CountItem USE 2340000 → 0) so Hyper does not ask 祝福卷轴 either
+//   (Soft095 scrollEnhance ignores ws for destroy; white scroll is normal-
+//   scroll slot protect only).
 
 #include "stdafx.h"
 #include "PotentialScrollApi.h"
@@ -22,8 +28,13 @@
 #include <cstdint>
 #include <windows.h>
 
+// Stamp (grep DLL): PROTECT_SOFT095_FULL_20260804
+static const char kProtectSoft095FullStamp[] = "PROTECT_SOFT095_FULL_20260804";
+
 namespace {
 constexpr uintptr_t kIsCorrectUpgradeEquip = 0x004F5497;
+constexpr uintptr_t kAddr_CountItem = 0x004E6FD2;       // CharacterData::CountItem(ti, itemId)
+constexpr uintptr_t kAddr_SendUpgradeScroll = 0x00A09221; // CWvsContext::SendUpgradeScroll
 constexpr uintptr_t kAddr_CUIItem_Instance = 0x00BED654;
 constexpr uintptr_t kAddr_CUIItem_SlotAtPoint = 0x0081DB7E;
 constexpr uintptr_t kAddr_CharacterData_GetItem = 0x004282F7;
@@ -38,17 +49,40 @@ constexpr int kOpcode_UseCashItem = 0x4F;
 constexpr int kInventory_Equip = 1;
 constexpr int kInventory_Cash = 5;
 constexpr int kCUIItem_ItemTI_Offset = 0x05E4;
+constexpr int kWhiteScrollItemId = 2340000;
 
 using IsCorrectUpgradeEquip_t = int(__cdecl*)(int nUItemID, int nEItemID);
 IsCorrectUpgradeEquip_t Real_is_correct_upgrade_equip =
     reinterpret_cast<IsCorrectUpgradeEquip_t>(kIsCorrectUpgradeEquip);
 
+using CountItem_t = int(__thiscall*)(void* pCharData, int invType, int itemId);
+CountItem_t Real_CountItem = reinterpret_cast<CountItem_t>(kAddr_CountItem);
+
+using SendUpgradeScroll_t = int(__thiscall*)(
+    void* pCtx, short scrollSlot, short equipSlot, short wsFlag, int legendary);
+SendUpgradeScroll_t Real_SendUpgradeScroll =
+    reinterpret_cast<SendUpgradeScroll_t>(kAddr_SendUpgradeScroll);
+
 bool g_scrollHookAttached = false;
 
+// Set while Hyper scroll drop is being validated → CountItem → Send.
+// Used only to suppress vanilla white-scroll YesNo for Hyper (Soft095).
+thread_local int g_hyperScrollActive = 0;
+
+static bool IsHyperScrollId(int itemId) {
+    return itemId / 100 == 20493;
+}
+
 int __cdecl Hook_is_correct_upgrade_equip(int nUItemID, int nEItemID) {
+    // Always clear first; set only for Hyper so leftover flags cannot leak.
+    g_hyperScrollActive = 0;
     const int family = nUItemID / 100;
-    if ((family == 20493 || family == 20494 || family == 20497
-         || family == 20498 || family == 20499)
+    if (IsHyperScrollId(nUItemID) && (nEItemID / 1000000) == 1) {
+        g_hyperScrollActive = 1;
+        (void)kProtectSoft095FullStamp; // keep stamp linked
+        return 1;
+    }
+    if ((family == 20494 || family == 20497 || family == 20498 || family == 20499)
         && (nEItemID / 1000000) == 1) {
         return 1;
     }
@@ -58,6 +92,30 @@ int __cdecl Hook_is_correct_upgrade_equip(int nUItemID, int nEItemID) {
         return 1;
     }
     return Real_is_correct_upgrade_equip(nUItemID, nEItemID);
+}
+
+int __fastcall Hook_CountItem(void* pCharData, void* /*edx*/, int invType, int itemId) {
+    // Soft095: Hyper smash never prompts protect OR white scroll.
+    // Suppress vanilla CountItem(USE, 2340000) gate so YesNo does not fire.
+    // Normal scrolls keep vanilla white-scroll YesNo unchanged.
+    if (g_hyperScrollActive && itemId == kWhiteScrollItemId) {
+        (void)invType;
+        return 0;
+    }
+    return Real_CountItem(pCharData, invType, itemId);
+}
+
+int __fastcall Hook_SendUpgradeScroll(
+    void* pCtx, void* /*edx*/, short scrollSlot, short equipSlot, short wsFlag, int legendary)
+{
+    // Force ws=0 for Hyper: Soft095 scrollEnhance ignores white scroll for destroy.
+    short sendWs = wsFlag;
+    if (g_hyperScrollActive) {
+        sendWs = 0;
+    }
+    const int r = Real_SendUpgradeScroll(pCtx, scrollSlot, equipSlot, sendWs, legendary);
+    g_hyperScrollActive = 0;
+    return r;
 }
 
 // Align with server PotentialHyperConfig.isCashCube (Cash drag-onto-equip).
@@ -110,7 +168,6 @@ static void SendUseCashCube(int cashPos, int itemId, int equipSlot) {
     COutPacket oPacket(kOpcode_UseCashItem);
     oPacket.Encode2(static_cast<unsigned short>(cashPos));
     oPacket.Encode4(static_cast<unsigned int>(itemId));
-    // resolveCashCubeTarget: prefer int slot (bag >0 / worn <0)
     oPacket.Encode4(static_cast<unsigned int>(equipSlot));
     void* sock = *reinterpret_cast<void**>(kAddr_ClientSocket_Instance);
     if (sock) {
@@ -132,7 +189,6 @@ static void* ResolveCUIItemFromDropTarget(void* pTo) {
     if (!inv) {
         return nullptr;
     }
-    // pTo is IUIMsgHandler* (+4 into CWnd/CUIItem). Match both.
     if (pTo == inv) {
         return inv;
     }
@@ -140,7 +196,6 @@ static void* ResolveCUIItemFromDropTarget(void* pTo) {
     if (adj == inv) {
         return inv;
     }
-    // Some paths pass CWnd* directly.
     auto* adj2 = reinterpret_cast<void*>(reinterpret_cast<char*>(pTo) + 4);
     if (adj2 == inv) {
         return inv;
@@ -182,7 +237,6 @@ bool PotentialScroll_TryHandleCashCubeDrop(
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
-    // Prefer 背包装备栏 (tab EQUIP). Cash tab drop onto self is not use.
     if (tabTI != kInventory_Equip) {
         return false;
     }
@@ -226,6 +280,8 @@ void AttachPotentialScrollMod() {
     }
     g_scrollHookAttached = true;
     ATTACH_HOOK(Real_is_correct_upgrade_equip, Hook_is_correct_upgrade_equip);
+    ATTACH_HOOK(Real_CountItem, Hook_CountItem);
+    ATTACH_HOOK(Real_SendUpgradeScroll, Hook_SendUpgradeScroll);
 }
 
 namespace PotentialScroll {

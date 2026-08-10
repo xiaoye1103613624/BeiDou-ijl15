@@ -6,6 +6,9 @@
 //
 // Phase11: Cash cubes 5062000/01/02/2100 — TryHandleCashCubeDrop intercepts
 // inventory drop onto 背包装备栏 and sends USE_CASH_ITEM with equip slot.
+//
+// Soft095 protect: NO Hyper YesNo for protect/white-scroll. Protect flags are
+// pre-applied on the equip; Hyper CountItem suppresses 2340000 YesNo only.
 
 void AttachPotentialScrollMod();
 
