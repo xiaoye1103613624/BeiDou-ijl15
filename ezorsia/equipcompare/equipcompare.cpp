@@ -9,6 +9,7 @@
 #include "compat/ztl/ztl.h"
 #include "../setitem/SetItemApi.h"
 #include "../setitem/equiptooltip_style.h"
+#include "../equipgrowth/EquipGrowthApi.h"
 
 #include <algorithm>
 #include <cstring>
@@ -497,6 +498,7 @@ static void ComputeCompareDockLeft(
     int sourceTop,
     int& outLeft,
     int& outTop) {
+    // Chain: 装备 → 套装 → 成长 → 对比（缺则左吸）
     outLeft = sourceLeft;
     outTop = sourceTop;
     if (sourceTooltip && sourceTooltip->m_nWidth > 0) {
@@ -509,6 +511,15 @@ static void ComputeCompareDockLeft(
     if (SetItem::TryGetActiveSetTooltipRect(setX, setY, setW, setH) && setW > 0) {
         outLeft = setX + setW + kCompareTooltipGap;
         outTop = setY;
+    }
+    int growthX = 0;
+    int growthY = 0;
+    int growthW = 0;
+    int growthH = 0;
+    if (EquipGrowth::TryGetActiveGrowthTooltipRect(growthX, growthY, growthW, growthH)
+            && growthW > 0) {
+        outLeft = growthX + growthW + kCompareTooltipGap;
+        outTop = growthY;
     }
     const int screenW = get_screen_width();
     int cmpW = 0;

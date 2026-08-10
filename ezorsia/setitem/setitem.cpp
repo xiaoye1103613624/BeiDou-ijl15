@@ -4,6 +4,7 @@
 #include "equiptooltip_style.h"
 #include "../fusionanvil/FusionAnvilApi.h"
 #include "../equipcompare/EquipCompareApi.h"
+#include "../equipgrowth/EquipGrowthApi.h"
 #include "compat/ClientAddresses.h"
 #include "compat/hook.h"
 #include "compat/wvs/secure.h"
@@ -12,6 +13,7 @@
 #include "compat/wvs/util.h"
 #include <comdef.h>
 #include <algorithm>
+#include <iostream>
 #include <map>
 #include <set>
 #include <string>
@@ -310,6 +312,8 @@ int g_lastLayoutY = 0;
 int g_lastSetId = 0;
 int g_lastHoverItemId = 0;
 int g_lastEquippedCount = 0;
+// ShowItemToolTip primary hover — AfterEquipTipDrawn must not switch to other set pieces.
+int g_primaryShowItemId = 0;
 bool g_inTooltipUpdate = false;
 bool g_uiHooksAttached = false;
 static thread_local bool g_inShowItemToolTip = false;
@@ -427,19 +431,35 @@ static const char* GetEquipSlotLabel(int itemId) {
     case 108:
         return "\xCA\xD6\xCC\xD7";
     case 109:
-        return "\xB6\xB7\xC5\xF0";
+        return "\xB6\xDC\xC5\xC6"; // 盾牌
     case 110:
-        return "\xB6\xDC\xC5\xC6";
+        return "\xC5\xFB\xB7\xE7"; // 披风
     case 111:
-        return "\xBD\xE4\xD6\xB8"; // ??
+        return "\xBD\xE4\xD6\xB8"; // 戒指
     case 112:
-        return "\xCF\xEE\xC1\xB3"; // ??
+        return "\xCF\xEE\xC1\xB4"; // 项链
     case 113:
-        return "\xD1\xFC\xB4\xF8"; // ??
+        return "\xD1\xFC\xB4\xF8"; // 腰带
     case 114:
-        return "\xD1\xAF\xD5\xC2"; // ??
+        return "\xD1\xAB\xD5\xC2"; // 勋章
     case 115:
-        return "\xBC\xE7\xCA\xCE"; // ?? (not ?? BCE1)
+        return "\xBC\xE7\xCA\xCE"; // 肩饰
+    case 116:
+        return "\xBF\xDA\xB4\xFC\xB5\xC0\xBE\xDF"; // 口袋道具
+    case 118:
+        return "\xBB\xD5\xD5\xC2"; // 徽章
+    case 119:
+        return "\xCE\xC6\xD5\xC2"; // 纹章
+    case 120:
+        return "\xCD\xBC\xCC\xDA"; // 图腾
+    case 134:
+        return "\xCB\xAB\xB5\xB6"; // 双刀
+    case 135:
+        return "\xB8\xA8\xD6\xFA\xCE\xE4\xC6\xF7"; // 辅助武器
+    case 166:
+        return "\xD6\xC7\xC4\xDC\xBB\xFA\xC6\xF7\xC8\xCB"; // 智能机器人
+    case 167:
+        return "\xBB\xFA\xD0\xB5\xD0\xC4\xD4\xE0"; // 机械心脏
     default:
         if (itemId >= 1300000 && itemId < 1500000) {
             return "\xCE\xE4\xC6\xF7";
@@ -615,7 +635,8 @@ static std::vector<SetTipLine> BuildSetTooltipLayout(int setId, int hoverItemId)
     lines.push_back(SetTipLine{});
 
     std::vector<int> sortedIds = def->itemIds;
-    std::stable_sort(sortedIds.begin(), sortedIds.end(),
+    // Avoid std::stable_sort → ___std_rotate link flake across MSVC toolsets.
+    std::sort(sortedIds.begin(), sortedIds.end(),
             [](int a, int b) { return GetEquipSortKey(a) < GetEquipSortKey(b); });
 
     for (int id : sortedIds) {
@@ -1128,6 +1149,7 @@ static void HideSetTooltip() {
     g_lastSetId = 0;
     g_lastHoverItemId = 0;
     g_lastEquippedCount = 0;
+    g_primaryShowItemId = 0;
     // Compare tip may have been parked to the right of set ? pull back beside hover.
     EquipCompare::RelayoutActiveCompareTip();
 }
@@ -1144,6 +1166,13 @@ bool TryGetActiveSetTooltipRect(int& outX, int& outY, int& outW, int& outH) {
         }
         outW = setTip->m_nWidth;
         outH = setTip->m_nHeight;
+        // Layer size ready before m_nHeight in some create paths.
+        if (outW <= 0) {
+            outW = setTip->m_pLayer->width;
+        }
+        if (outH <= 0) {
+            outH = setTip->m_pLayer->height;
+        }
         outX = setTip->m_pLayer->rx;
         outY = setTip->m_pLayer->ry;
         return outW > 0;
@@ -1270,6 +1299,7 @@ static void ReadMainTooltipOrigin(CUIToolTip* mainTip, int fallbackX, int fallba
     __try {
         mainW = mainTip->m_nWidth;
         if (mainTip->m_pLayer) {
+            // rx/ry may be 0 at left/top — still valid screen coords
             mainX = mainTip->m_pLayer->rx;
             mainY = mainTip->m_pLayer->ry;
         }
@@ -1426,9 +1456,15 @@ void InitSetItemDatabase() {
         return;
     }
     try {
-        Ztl_variant_t vRoot = get_rm()->GetObjectA(L"Etc/SetItemInfo.img");
+        IWzResManPtr rm = get_rm();
+        if (!rm) {
+            std::cout << "[SetItem] InitSetItemDatabase: ResMan null" << std::endl;
+            return;
+        }
+        Ztl_variant_t vRoot = rm->GetObjectA(L"Etc/SetItemInfo.img");
         IWzPropertyPtr pRoot(get_unknown(vRoot));
         if (!pRoot) {
+            std::cout << "[SetItem] InitSetItemDatabase: SetItemInfo.img missing" << std::endl;
             return;
         }
 
@@ -1535,7 +1571,10 @@ void InitSetItemDatabase() {
             }
             VariantClear(&rgVar[0]);
         }
+        std::cout << "[SetItem] InitSetItemDatabase loaded sets=" << g_setDefs.size()
+                  << " items=" << g_itemToSet.size() << std::endl;
     } catch (...) {
+        std::cout << "[SetItem] InitSetItemDatabase exception" << std::endl;
     }
 }
 
@@ -1583,15 +1622,24 @@ auto CUIToolTip__DrawToolTip_Equip =
                 ClientAddresses::SetItem::kDrawToolTipEquip);
 
 static void AfterEquipTipDrawn(CUIToolTip* pThis, GW_ItemSlotEquip* pe) {
+    // During ShowItemToolTip, companion tips are refreshed AFTER Original returns
+    // (same as set tip). Skip here to avoid double-create while g_inShowItemToolTip.
     if (g_inShowItemToolTip || !pThis || !pe) {
         return;
     }
     const int itemId = SafeGetItemId(pe);
-    if (!IsEquipItemId(itemId) || ResolveSetIdForItem(itemId) <= 0) {
+    if (!IsEquipItemId(itemId)) {
         return;
     }
-    g_activeEquip = pe;
-    UpdateSetTooltip(pThis, 0, 0, itemId, true);
+    // Other set-piece DrawToolTip_Equip must not steal set/growth companions.
+    if (g_primaryShowItemId > 0 && itemId != g_primaryShowItemId) {
+        return;
+    }
+    if (ResolveSetIdForItem(itemId) > 0) {
+        g_activeEquip = pe;
+        UpdateSetTooltip(pThis, 0, 0, itemId, true);
+    }
+    EquipGrowth_OnEquipTipDrawn(pThis, reinterpret_cast<::GW_ItemSlotEquip*>(pe));
 }
 
 void __fastcall CUIToolTip__DrawToolTip_Equip_SetItem_hook(
@@ -1608,8 +1656,10 @@ void __fastcall CUIToolTip__ClearToolTip_SetItem_hook(
         CUIToolTip* pThis, void* /*edx*/) {
     if (pThis == g_activeMainTooltip) {
         HideSetTooltip();
+        EquipGrowth_Hide();
         g_activeMainTooltip = nullptr;
         g_activeEquip = nullptr;
+        g_primaryShowItemId = 0;
     }
     CUIToolTip__ClearToolTip(pThis);
 }
@@ -1654,6 +1704,7 @@ int __fastcall Hook_ShowItemToolTip(
             HideSetTooltip();
             g_activeMainTooltip = nullptr;
             g_activeEquip = nullptr;
+            g_primaryShowItemId = 0;
         }
         return Original_ShowItemToolTip(pThis, pos, a3, a4, a5, a6, a7, a8, a9);
     }
@@ -1668,6 +1719,7 @@ int __fastcall Hook_ShowItemToolTip(
     } scope;
 
     const int hoverItemId = ReadShowItemToolTipItemId(a4);
+    g_primaryShowItemId = hoverItemId;
     const int result = Original_ShowItemToolTip(
             pThis, pos, a3, a4, a5, a6, a7, a8, a9);
 
@@ -1679,8 +1731,18 @@ int __fastcall Hook_ShowItemToolTip(
             g_activeMainTooltip = nullptr;
             g_activeEquip = nullptr;
         }
+        if (hoverItemId > 0) {
+            // Same object as set tip: pass pe from a4 (GW_ItemSlotEquip*).
+            EquipGrowth_OnEquipTipDrawn(
+                    pThis, reinterpret_cast<::GW_ItemSlotEquip*>(a4));
+        } else if (pThis == g_activeMainTooltip) {
+            EquipGrowth_Hide();
+            g_primaryShowItemId = 0;
+        }
     } catch (...) {
         HideSetTooltip();
+        EquipGrowth_Hide();
+        g_primaryShowItemId = 0;
     }
 
     return result;
@@ -1728,13 +1790,18 @@ void AttachSetItemUiHooks() {
     SetItemMod::g_uiHooksAttached = true;
     AttachEquipTooltipStyleHooks();
     ATTACH_HOOK(SetItemMod::Original_ShowItemToolTip, SetItemMod::Hook_ShowItemToolTip);
-    // Chain onto FusionAnvil's live DrawToolTip detour ? do not re-patch raw 0x8ED0D2.
-    FusionAnvil_BindDrawToolTipEquipTarget(
-            reinterpret_cast<void**>(&SetItemMod::CUIToolTip__DrawToolTip_Equip));
+    // Re-hook game DrawToolTip_Equip address so Detours chains us outermost over
+    // FusionAnvil (Bind-to-trampoline previously skipped FA or failed to fire).
+    SetItemMod::CUIToolTip__DrawToolTip_Equip =
+            reinterpret_cast<void(__thiscall*)(CUIToolTip*, int, SetItemMod::GW_ItemSlotEquip*)>(
+                    ClientAddresses::SetItem::kDrawToolTipEquip);
     ATTACH_HOOK(SetItemMod::CUIToolTip__DrawToolTip_Equip,
                 SetItemMod::CUIToolTip__DrawToolTip_Equip_SetItem_hook);
     ATTACH_HOOK(SetItemMod::CUIToolTip__ClearToolTip,
                 SetItemMod::CUIToolTip__ClearToolTip_SetItem_hook);
+    SetItemMod::EnsureSetItemDatabaseLoaded();
+    std::cout << "[SetItem] EnsureUiHooks OK sets=" << SetItemMod::g_setDefs.size()
+              << " items=" << SetItemMod::g_itemToSet.size() << std::endl;
 }
 
 int SetItem_GetSetIdForItem(int itemId) {

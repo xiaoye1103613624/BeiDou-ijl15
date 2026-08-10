@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "equiptooltip_style.h"
 #include "Memory.h"
+#include "compat/hook.h"
 #include "compat/ClientAddresses.h"
 #include "compat/wvs/iteminfo.h"
 #include "compat/wvs/secure.h"
@@ -29,6 +30,18 @@ static constexpr uintptr_t kAddr_get_basic_font = 0x0098A707;
 static constexpr uintptr_t kAddr_TSecTypeGetData = 0x0042873D;
 static constexpr uintptr_t kAddr_StringPoolGet = 0x0079E993;
 static constexpr uintptr_t kAddr_StringPoolInstance = 0x0079E805;
+// CItemInfo::GetWeaponCategoryName — maps GetWeaponType→StringPool.
+// 134/135 fall through GetWeaponType=0, so Equip_Basic uses bodypart10→盾牌.
+// 116→BP33: Equip_Basic falls to GetEquipCategoryByBodyPart (0x5C9E61), where
+// case 33 shares the pet-equip StringPool 3811（宠物装备）. Override by itemId.
+static constexpr uintptr_t kAddr_GetWeaponCategoryName = 0x005C99FC;
+// CItemInfo::GetEquipCategoryByBodyPart — BP33→StringPool 3811「宠物的装备」.
+// Equip_Basic uses this when GetWeaponCategoryName returns empty (116).
+static constexpr uintptr_t kAddr_GetEquipCategoryByBodyPart = 0x005C9E61;
+// Game-heap ZXString::Assign (same as mesouncap). DLL ZXString::Assign uses a
+// separate ZAllocEx pool; tooltip then draws/frees via game 0x4062DF → AV.
+// Do NOT call Empty@0x414663 here — caller out ZXString is uninitialized.
+static constexpr uintptr_t kAddr_ZXString_Assign = 0x00414617;
 
 static constexpr int kPadX = 8;
 static constexpr int kPadY = 6;
@@ -448,34 +461,183 @@ static std::string GetItemName(int itemId) {
     }
 }
 
-static std::string CategoryLabel(int itemId) {
+// Official category names (mxd.dvg.cn 装备分类 / CMS). Strict GBK — verify bytes:
+//   袋=B4FC (NOT 代=B4FA), 腾=CCDA, 勋=D1AB, 脏=D4E0, 链=C1B4.
+// Shared Si slot (islot=Si, bp −10): 109 / 134 / 135 — subtype is ID-range text, not islot.
+struct SiCatRange {
+    int lo;
+    int hi;
+    const char* gbk;
+};
+
+static const char kCatShield[] = "\xB6\xDC\xC5\xC6";                     // 盾牌
+static const char kCatKatara[] = "\xCB\xAB\xB5\xB6";                     // 双刀
+static const char kCatSubWeapon[] = "\xB8\xA8\xD6\xFA\xCE\xE4\xC6\xF7"; // 辅助武器
+static const char kCatPocket[] = "\xBF\xDA\xB4\xFC\xB5\xC0\xBE\xDF";     // 口袋道具 (mxd aPocket)
+static const char kCatShoulder[] = "\xBC\xE7\xCA\xCE";                   // 肩饰
+static const char kCatBadge[] = "\xBB\xD5\xD5\xC2";                      // 徽章 Badge 118
+static const char kCatEmblem[] = "\xCE\xC6\xD5\xC2";                     // 纹章 Emblem 119
+static const char kCatTotem[] = "\xCD\xBC\xCC\xDA";                      // 图腾
+static const char kCatAndroid[] = "\xD6\xC7\xC4\xDC\xBB\xFA\xC6\xF7\xC8\xCB"; // 智能机器人
+static const char kCatMechHeart[] = "\xBB\xFA\xD0\xB5\xD0\xC4\xD4\xE0"; // ji xie xin zang
+static const char kCatBelt[] = "\xD1\xFC\xB4\xF8";                       // 腰带
+static const char kCatMedal[] = "\xD1\xAB\xD5\xC2";                      // 勋章
+static const char kCatPendant[] = "\xCF\xEE\xC1\xB4";                    // 项链
+
+static const SiCatRange kSi135Ranges[] = {
+        {1352000, 1352014, "\xC4\xA7\xB7\xA8\xBC\xFD\xCA\xB8"},     // 魔法箭矢
+        {1352100, 1352114, "\xBF\xA8\xC6\xAC"},                     // 卡片
+        {1352200, 1352209, "\xB5\xF5\xD7\xB9"},                     // 吊坠
+        {1352210, 1352219, "\xC4\xEE\xD6\xE9"},                     // 念珠
+        {1352220, 1352229, "\xCB\xF8\xC1\xB4"},                     // 锁链
+        {1352230, 1352259, "\xC4\xA7\xB5\xC0\xCA\xE9"},             // 魔道书
+        {1352260, 1352269, "\xBC\xFD\xD3\xF0"},                     // 箭羽
+        {1352270, 1352279, "\xB9\xAD\xBC\xFD\xBB\xA4\xD6\xB8"},     // 弓箭护指
+        {1352280, 1352289, "\xB6\xCC\xBD\xA3\xBD\xA3\xC7\xCA"},     // 短剑剑鞘
+        {1352290, 1352299, "\xBB\xA4\xB7\xFB"},                     // 护符
+        {1352300, 1352304, "\xB0\xCB\xD8\xD4\xB1\xA6\xBA\xD0"},     // 八卦宝盒
+        {1352400, 1352409, "\xB1\xA6\xD6\xE9"},                     // 宝珠
+        {1352500, 1352509, "\xBE\xAB\xCB\xE8"},                     // 精髓
+        {1352600, 1352609, "\xCA\xD6\xEF\xED"},                     // 手镯
+        {1352700, 1352710, "\xD7\xB0\xB5\xAF"},                     // 装弹
+        {1352800, 1352809, "\xD0\xA1\xB5\xB6"},                     // 小刀
+        {1352810, 1352819, "\xBF\xDA\xC9\xDA"},                     // 口哨
+        {1352820, 1352829, "\xC8\xAD\xCC\xD7"},                     // 拳套
+        {1352830, 1352840, "\xD0\xA1\xCC\xAB\xB5\xB6"},             // 小太刀
+        {1352860, 1352888, "\xC8\xAD\xCC\xEC"},                     // 拳天
+        {1352900, 1352909, "\xCA\xD6\xCD\xF3\xBB\xA4\xBC\xD7"},     // 手腕护甲
+        {1352910, 1352919, "\xD3\xA5\xD1\xDB"},                     // 鹰眼
+        {1352920, 1352929, "\xBB\xF0\xD2\xA9\xCD\xB0"},             // 火药桶
+        {1352930, 1352938, "\xCC\xEC\xC1\xFA\xB4\xB8"},             // 天龙锤
+        {1352940, 1352948, "\xC1\xFA\xC9\xF1\xD2\xC5\xB2\xFA"},     // 龙神遗产
+        {1352950, 1352959, "\xBC\xAB\xCF\xDE\xC7\xF2"},             // 极限球
+        {1352960, 1352969, "\xBF\xF1\xD2\xB0\xD6\xAE\xD1\xC0"},     // 狂野之牙
+        {1352970, 1352978, "\xCA\xA5\xB5\xD8\xD6\xAE\xB9\xE2"},     // 圣地之光
+        {1353000, 1353009, "\xBF\xD8\xD6\xC6\xC6\xF7"},             // 控制器
+        {1353010, 1353110, "\xBA\xFC\xC0\xEA\xD6\xE9"},             // 狐狸珠
+        {1353200, 1353209, "\xC6\xE5\xD7\xD3"},                     // 棋子
+        {1353300, 1353310, "\xB7\xA2\xC9\xE4\xC6\xF7"},             // 发射器
+        {1353400, 1353409, "\xB1\xAC\xC6\xC6\xB5\xAF"},             // 爆破弹
+        {1353500, 1353508, "\xC4\xA7\xB7\xA8\xD6\xAE\xD2\xED"},     // 魔法之翼
+        {1353600, 1353608, "\xBE\xAB\xC6\xF8\xD6\xE9"},             // 精气珠
+        {1353700, 1353709, "\xD2\xC5\xCE\xEF"},                     // 遗物
+        {1353800, 1353900, "\xC9\xC8\xD7\xB9"},                     // 扇坠
+        {1354000, 1354009, "\xCA\xD6\xC1\xB4"},                     // 手链
+};
+
+// Official Si subtype label. 109→盾牌; 134→双刀; 135→ID-range; else nullptr.
+static const char* OfficialSiCategoryGbk(int itemId) {
     const int cat = itemId / 10000;
-    // Minimal GBK slot names for common cats.
+    if (cat == 109) {
+        return kCatShield;
+    }
+    if (cat == 134) {
+        return kCatKatara;
+    }
+    if (cat != 135) {
+        return nullptr;
+    }
+    for (const auto& r : kSi135Ranges) {
+        if (itemId >= r.lo && itemId <= r.hi) {
+            return r.gbk;
+        }
+    }
+    return kCatSubWeapon;
+}
+
+static std::string CategoryLabel(int itemId) {
+    if (const char* si = OfficialSiCategoryGbk(itemId)) {
+        return si;
+    }
+    const int cat = itemId / 10000;
     switch (cat) {
-    case 100: return "\xC3\xB1\xD7\xD3"; // ??
-    case 104: return "\xC9\xCF\xD2\xC2"; // ??
+    case 100: return "\xC3\xB1\xD7\xD3"; // 帽子
+    case 104: return "\xC9\xCF\xD2\xC2"; // 上衣
     case 105: return "\xCC\xD7\xB7\xFE"; // 套服
-    case 106: return "\xC0\xA8\xD7\xD3"; // ???
-    case 107: return "\xD0\xAC\xD7\xD3"; // ??
-    case 108: return "\xCA\xD6\xCC\xD7"; // ??
-    case 109: return "\xB6\xDC\xC5\xC6"; // ??
-    case 110: return "\xC5\xFA\xB7\xE7"; // ??
-    case 111: return "\xBD\xE4\xD6\xB8"; // ??
-    case 112: return "\xCF\xEE\xC1\xB5"; // ??
-    case 113: return "\xD1\xFC\xB4\xF8"; // ??
-    case 114: return "\xD1\xAF\xD5\xC2"; // ??
-    case 115: return "\xBC\xA4\xB2\xBF"; // ??
+    case 106: return "\xC0\xA8\xD7\xD3"; // 裤裙
+    case 107: return "\xD0\xAC\xD7\xD3"; // 鞋子
+    case 108: return "\xCA\xD6\xCC\xD7"; // 手套
+    case 110: return "\xC5\xFB\xB7\xE7"; // 披风
+    case 111: return "\xBD\xE4\xD6\xB8"; // 戒指
+    case 112: return kCatPendant;        // 项链
+    case 113: return kCatBelt;           // 腰带
+    case 114: return kCatMedal;          // 勋章
+    case 115: return kCatShoulder;       // 肩饰
+    case 116: return kCatPocket;         // 口袋道具（勿走 BP33→宠物装备）
+    case 118: return kCatBadge;          // 徽章
+    case 119: return kCatEmblem;         // 纹章
+    case 120: return kCatTotem;          // 图腾
+    case 166: return kCatAndroid;
+    case 167: return "\xBB\xFA\xD0\xB5\xD0\xC4\xD4\xE0";
     default:
         if (cat >= 130 && cat <= 149) {
-            return "\xCE\xE4\xC6\xF7"; // ??
+            return "\xCE\xE4\xC6\xF7"; // 武器
         }
         if (cat == 170) {
-            return "\xCE\xE4\xC6\xF7"; // ??
+            return "\xCE\xE4\xC6\xF7"; // 武器
         }
         char buf[16];
         _snprintf_s(buf, _TRUNCATE, "%d", cat);
         return buf;
     }
+}
+
+using GetWeaponCategoryNameFn = ZXString<char>*(__cdecl*)(ZXString<char>* out, int itemId);
+static auto Original_GetWeaponCategoryName =
+        reinterpret_cast<GetWeaponCategoryNameFn>(kAddr_GetWeaponCategoryName);
+static auto Original_GetEquipCategoryByBodyPart =
+        reinterpret_cast<GetWeaponCategoryNameFn>(kAddr_GetEquipCategoryByBodyPart);
+
+using ZXAssignFn = int(__thiscall*)(void* self, const char* src, size_t size);
+
+// Safe ZXString write for uninitialized tooltip outs (never Empty / DLL Assign).
+static ZXString<char>* AssignCategoryLabel(ZXString<char>* out, const char* label) {
+    *reinterpret_cast<char**>(out) = nullptr;
+    auto Assign = reinterpret_cast<ZXAssignFn>(kAddr_ZXString_Assign);
+    Assign(out, label, std::strlen(label));
+    return out;
+}
+
+// Prefer official labels over bodypart StringPool fallbacks.
+// CRITICAL: SetToolTip_Equip_Basic @0x8ECA0C may pass an uninitialized ZXString;
+// never Empty/DLL Assign — use *out=nullptr + game Assign@0x414617 only.
+static const char* OverrideCategoryGbk(int itemId) {
+    const int cat = itemId / 10000;
+    switch (cat) {
+    case 113: return kCatBelt;
+    case 114: return kCatMedal;
+    case 115: return kCatShoulder;
+    case 116: return kCatPocket;
+    case 118: return kCatBadge;
+    case 119: return kCatEmblem;
+    case 120: return kCatTotem;
+    case 134:
+    case 135: return OfficialSiCategoryGbk(itemId);
+    case 166: return kCatAndroid;
+    case 167: return "\xBB\xFA\xD0\xB5\xD0\xC4\xD4\xE0";
+    default: return nullptr;
+    }
+}
+
+static ZXString<char>* __cdecl Hook_GetWeaponCategoryName(ZXString<char>* out, int itemId) {
+    if (!out) {
+        return Original_GetWeaponCategoryName(out, itemId);
+    }
+    if (const char* label = OverrideCategoryGbk(itemId)) {
+        return AssignCategoryLabel(out, label);
+    }
+    return Original_GetWeaponCategoryName(out, itemId);
+}
+
+// Belt-and-suspenders: inventory/other UIs may call bodypart category directly.
+static ZXString<char>* __cdecl Hook_GetEquipCategoryByBodyPart(ZXString<char>* out, int itemId) {
+    if (!out) {
+        return Original_GetEquipCategoryByBodyPart(out, itemId);
+    }
+    if (const char* label = OverrideCategoryGbk(itemId)) {
+        return AssignCategoryLabel(out, label);
+    }
+    return Original_GetEquipCategoryByBodyPart(out, itemId);
 }
 
 static void AppendColon(
@@ -640,6 +802,10 @@ void AttachEquipTooltipStyleHooks() {
         return;
     }
     g_styleAttached = true;
+
+    // Official Si/Pocket labels for tooltip「装备分类」(does not touch WZ islot).
+    ATTACH_HOOK(Original_GetWeaponCategoryName, Hook_GetWeaponCategoryName);
+    ATTACH_HOOK(Original_GetEquipCategoryByBodyPart, Hook_GetEquipCategoryByBodyPart);
 
     // Bullet-strip patches are only for custom Dotum canvas. Vanilla tip
     // (CUSTOM_CANVAS=0) must keep original AddInfoEx/PrintLine — otherwise
