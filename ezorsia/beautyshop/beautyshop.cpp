@@ -550,6 +550,8 @@ CBeautyShop::CBeautyShop(int nPOS, int nID)
     pSaveHairBtn[1] = LoadSprite(L"UI/New.img/beautyRoom/Slot/button:SaveHair/mouseOver/0");
     pSaveHairBtn[2] = LoadSprite(L"UI/New.img/beautyRoom/Slot/button:SaveHair/normal/0");
     pSaveHairBtn[3] = LoadSprite(L"UI/New.img/beautyRoom/Slot/button:SaveHair/pressed/0");
+    BeautyLog("sprites SaveHair disabled=%d normal=%d pressed=%d",
+              pSaveHairBtn[0] ? 1 : 0, pSaveHairBtn[2] ? 1 : 0, pSaveHairBtn[3] ? 1 : 0);
 
     IWzCanvasPtr pSaveFaceBtn[4];
     pSaveFaceBtn[0] = LoadSprite(L"UI/New.img/beautyRoom/Slot/button:SaveFace/disabled/0");
@@ -635,8 +637,17 @@ CBeautyShop::CBeautyShop(int nPOS, int nID)
     InitSlots(m_faceSlots, pEnableFM);
     InitSlots(m_skinSlots, pEnableSM);
 
+    // Show slots immediately. Server DATA (0x174) overwrites when it arrives.
+    // Without this, m_bDataReady stays false and Save/Apply never paint if the
+    // reply is dropped / handler missed / server not yet restarted.
+    m_nUnlockedSlots = kMaxSlots;
+    m_bDataReady = true;
+    BeautyLog("OpenBeautyShop: local unlock=%d dataReady=1 (await server 0x174)", m_nUnlockedSlots);
+
     COutPacket oPacket(kOpcode_SaveBeauty);
     oPacket.Encode1(kAction_Request);
+    void* sock = *reinterpret_cast<void**>(kAddr_ClientSocket_Instance);
+    BeautyLog("OpenBeautyShop: send REQUEST sock=%p", sock);
     SendBeautyPacket(oPacket);
 }
 
@@ -948,8 +959,17 @@ struct CompatBeautyReader {
 template <typename Reader>
 static void HandleServerResponseImpl(CBeautyShop* shop, Reader& r) {
     shop->m_bDataReady = true;
-    shop->m_nUnlockedSlots = r.Decode1();
-    if (shop->m_nUnlockedSlots > kMaxSlots) shop->m_nUnlockedSlots = kMaxSlots;
+    const int serverUnlock = static_cast<int>(r.Decode1());
+    // Never let server DATA re-lock all slots (buttons vanish). Floor at 6 for private server.
+    int unlocked = serverUnlock;
+    if (unlocked <= 0) {
+        unlocked = kMaxSlots;
+    }
+    if (unlocked > kMaxSlots) {
+        unlocked = kMaxSlots;
+    }
+    shop->m_nUnlockedSlots = unlocked;
+    BeautyLog("DATA unlocked server=%d applied=%d", serverUnlock, shop->m_nUnlockedSlots);
 
     unsigned char hairCount = r.Decode1();
     for (int i = 0; i < 6; ++i) {
@@ -1264,13 +1284,29 @@ void BeautyShop_HandleServerPacket(class CompatInPacket* packet) {
     if (!packet) {
         return;
     }
+    const size_t savedOff = packet->GetOffset();
+    const unsigned long size = packet->Size();
     unsigned short peeked = 0;
-    if (!packet->TryPeekOpcode(peeked) || peeked != kOpcode_SaveBeauty) {
-        return;
+    bool onOpcode = packet->TryPeekOpcode(peeked) && peeked == kOpcode_SaveBeauty;
+    if (!onOpcode) {
+        // Cursor may already be past header, or opcode only at abs 0/4.
+        packet->SetOffset(0);
+        onOpcode = packet->TryPeekOpcode(peeked) && peeked == kOpcode_SaveBeauty;
+        if (!onOpcode && size >= 6) {
+            packet->SetOffset(4);
+            onOpcode = packet->TryPeekOpcode(peeked) && peeked == kOpcode_SaveBeauty;
+        }
+        if (!onOpcode) {
+            packet->SetOffset(savedOff);
+            BeautyLog("recv 0x174 MISS off=%zu size=%lu peek=0x%X",
+                      savedOff, size, static_cast<unsigned>(peeked));
+            return;
+        }
     }
     packet->Decode<uint16_t>();
     const uint8_t respType = packet->Decode<uint8_t>();
-    BeautyLog("recv 0x174 respType=%d", static_cast<int>(respType));
+    BeautyLog("recv 0x174 respType=%d offWas=%zu size=%lu",
+              static_cast<int>(respType), savedOff, size);
     if (respType == kResp_Open) {
         OpenBeautyShop();
     } else if (respType == kResp_Data) {

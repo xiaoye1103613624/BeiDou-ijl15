@@ -2,6 +2,7 @@
 #include "StorageBagApi.h"
 #include "compat/PacketDispatcher.h"
 #include "compat/wvs/Packet.h"
+#include "../damagerank/DamageRankInput.h"
 
 namespace {
 bool g_storageBagHooksAttached = false;
@@ -25,6 +26,10 @@ void EnsureHooks() {
         return;
     }
     g_storageBagHooksAttached = true;
+    // Inventory BAG button clicks go through CWndMan::TranslateMessageImpl
+    // (DamageRankInput hook → StorageBag_HandleMouseMessage). Attach here too
+    // so bag clicks work even if DamageRank::AttachHooks order/fail changes.
+    AttachDamageRankInputHooks();
     AttachStorageBagMod();
 }
 } // namespace
