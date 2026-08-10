@@ -1,0 +1,27 @@
+﻿---
+description: After finishing a feature, delete temp/log/AI process files; do not leave them in the repo
+alwaysApply: true
+---
+
+# No leftover temp files after features
+
+## Mandate
+
+When a feature/fix/investigation finishes, **delete** temporary and process artifacts from the working tree. Do not leave them for "maybe later". Prefer deleting untracked junk over committing it.
+
+## Delete (examples)
+
+- Root/process: `_tmp*`, `_boot_test/`, `_cmp*`, `_check_*`, `_deploy_*`, `_load*`, `_memdump*`, `*_HEAD.cpp`/`*_HEAD.h`
+- Logs: `*.log`, `*.err`, `_build_*.err`, MCP/IDA probe JSON
+- Build stamps: `ezorsia/Release_*`, root `ijl15_VERSION*`, one-off `ijl15.*.dll` / `ijl15_*.txt`
+- Scratch WZ/UI: `equip_tip_sidecar/`, `tools/` underscore scripts and dumped `.img`/`.png`
+
+## Keep
+
+- Real module source under `ezorsia/<feature>/`
+- Intentional docs under `docs/`
+- Long-lived utilities that are not underscore-prefixed AI scratch (and are meant to ship)
+
+## After cleanup
+
+Strengthen `.gitignore` if a new junk pattern appeared. Do not commit secrets, live client dumps, or multi‑MB verify XML/IMG leftovers.
