@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <string>
 
+#ifndef USE_MAPLE_ZXSTRING
 
 namespace ZStrUtil {
 
@@ -270,3 +271,5 @@ protected:
 
 static_assert(sizeof(ZXString<char>) == 0x4);
 static_assert(sizeof(ZXString<wchar_t>) == 0x4);
+
+#endif // USE_MAPLE_ZXSTRING

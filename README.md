@@ -1,10 +1,20 @@
-# BeiDou-ijl15
+# BeiDou-ijl15_S8
 
 将主分支的两次Release视为v1和v2。
 
 由于v2版本在部分机器上会导致游戏进入到登录界面的时候崩溃，而v1没有这个问题，因此本分支继承主分支的v1版本，并不再和主分支同步，单独开发。
 
 本分支主要服务于BeiDou的客户端。
+
+## 操作根（S8）
+
+| 用途 | 路径 |
+|------|------|
+| 插件源码（本仓库） | `E:\pro\BeiDou-ijl15_S8` |
+| 服务端 | `E:\pro\BeiDou-Server_S8` |
+| 客户端 live | `E:\mxd_soft\2.客户端\083\beidou_client_xiaoye\BeiDou-Client_S8` |
+
+构建产物 `out/Release/ijl15.dll` 部署到 **Client_S8**。EXE/插件补丁须先 IDA 对照；WZ/`.img` 走 MCP。历史 SOP 归档（只读）：`E:\pro\BeiDou-ijl15\docs\`。
 
 ## 使用方法
 

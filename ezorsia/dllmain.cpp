@@ -9,7 +9,34 @@
 #include "HpMpAlert.h"
 #include "SelectCharMacFix.h"
 #include "compat/ModRegistry.h"
+#include "compat/LazyCompatInit.h"
+#include "higherstoragelist/HigherStorageListApi.h"
+#include "highershoplist/HigherShopListApi.h"
+#include "maxhpmp/MaxHpMpApi.h"
+#include "level300/Level300Api.h"
+#include "mesouncap/MesoUncapApi.h"
+#include "gamedata/GameDataGuardApi.h"
+#include "personalshop/PersonalShopApi.h"
+#include "quicklogin/QuickLoginApi.h"
+#include "charslots/CharSlotsApi.h"
+#include "shoulders/ShoulderApi.h"
+#include "compat/rs/rs.h"
+#include "compat/hook.h"
+#include "Memory.h"
+#include "bootlog/BootLog.h"
+#include "bootlog/LoadTraceApi.h"
+#include "bootlog/CrashDiag.h"
 #pragma comment(lib, "ws2_32.lib")
+
+// SEH wrapper must live outside DllMain (C2712: DllMain has C++ unwinding).
+static void AttachLevel300ModSafe() {
+	__try {
+		AttachLevel300Mod();
+	} __except (EXCEPTION_EXECUTE_HANDLER) {
+		BootLog("*** AttachLevel300Mod SEH 0x%08X — continuing boot without Level300",
+				GetExceptionCode());
+	}
+}
 
 // config.ini can use IP or hostname (ServerIP_Address=...).
 // The patch expects an IPv4 dotted string; resolve hostnames to IPv4.
@@ -66,6 +93,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 	case DLL_PROCESS_ATTACH:
 	{
 		//CreateConsole();	//console for devs, use this to log stuff if you want
+		BootLog_Init(hModule);
+		BootLog_InstallCrashVeh();
+		// CrashDiag_AttachHooks (GetObjectA / ComRaiseError) MUST NOT run in DllMain —
+		// early GetObjectA hook → logo/set_stage AV + 0x80004003「无效的指针」.
+		// Paths still recorded via rs_resman CrashDiag_NoteWzPath when that path is used.
+		CrashDiag_Init(hModule);
+		BootLogStage("DllMain ATTACH begin");
 		INIReader reader("config.ini");
 		if (reader.ParseError() == 0) {
 			Client::m_nGameWidth = reader.GetInteger("general", "width", 1280);
@@ -87,6 +121,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 			Client::jumpCap = reader.GetInteger("optional", "jumpCap", 123);
 			Client::debug = reader.GetBoolean("debug", "debug", false);
 			Client::noPassword = reader.GetBoolean("debug", "noPassword", false);
+			Client::disablePacketHook = reader.GetBoolean("debug", "disablePacketHook", false);
+			Client::disableBossHP = reader.GetBoolean("debug", "disableBossHP", false);
+			Client::disableWorldMap = reader.GetBoolean("debug", "disableWorldMap", false);
 			Client::imeType = reader.GetInteger("general", "imeType", 1);
 			ownLoginFrame = reader.GetBoolean("optional", "ownLoginFrame", false);
 			ownCashShopFrame = reader.GetBoolean("optional", "ownCashShopFrame", false);
@@ -97,6 +134,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 			Client::climbSpeed = reader.GetFloat("optional", "climbSpeed", 1.0);
 			Client::talkRepeat = reader.GetBoolean("optional", "talkRepeat", false);
 			Client::talkTime = reader.GetInteger("optional", "talkTime", 2000);
+			Client::quickLogin = reader.GetBoolean("optional", "quickLogin", true);
+			Client::allowCashTrade = reader.GetBoolean("optional", "allowCashTrade", true);
+			Client::enableGrowthCompanionTip =
+					reader.GetBoolean("optional", "enableGrowthCompanion",
+							reader.GetBoolean("optional", "enableEquipGrowthTip", false));
+			rs_tier = reader.GetInteger("general", "soScreenResolution", -1);
 		}
 
 		Hook_CreateMutexA(true); //multiclient //ty darter, angel, and alias!
@@ -114,12 +157,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		Hook_StringPool__GetString(true); //hook stringpool modification //ty !! popcorn //ty darter
 		Hook_lpfn_NextLevel(true);
 		HookSaveGlobal(true);
-		ModRegistry::Initialize();
 		HookSelectCharMacFix(true);
-		//Hook_get_unknown(true);
-		//Hook_get_resource_object(true); //helper function hooks  //ty teto for helping me get started
-		//Hook_com_ptr_t_IWzProperty__ctor(true);
-		//Hook_com_ptr_t_IWzProperty__dtor(true);
 
 		Client::UpdateGameStartup();
 
@@ -134,14 +172,42 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		Client::FixChatPosHook();
 		Client::NoPassword();
 		Client::MoreHook();
-		BossHP::Hook();
-		Client::WorldMap();
-		Client::RefreshRate(); 
 		Client::DeleteChar();
+
+		// Early patches that are safe at DllMain (no late UI).
+		// Miles AIL_quick_startup ExitProcess(0) stub + boot stage trace (same as Client_1).
+		AttachLoadTrace();
+		HigherStorageList::ApplyPatches();
+		HigherShopList::ApplyPatches();
+		AttachMaxHpMpMod();
+		// Must match PacketCreator writeShort(level)+writeLong(exp); without this,
+		// CHARLIST mis-aligns → garbage avatar UOLs → 0x80030002 on channel select.
+		// Soft-fail: Level300 must not take down logo/boot (SEH + Fuse recurse guard).
+		AttachLevel300ModSafe();
+		AttachMesoUncapMod();
+		AttachGameDataGuard();
+		AttachPersonalShopMod();
+		if (Client::quickLogin) {
+			AttachQuickLoginMod();
+		}
+		if (Client::allowCashTrade) {
+			AttachAllowCashTradeMod();
+		}
+		AttachCharSlotsMod();
+		AttachShoulderSlotsFix();
+
+		// Late UI + packet modules attach on first CField via LazyCompat.
+		// (replaces early ModRegistry::Initialize + BossHP::Hook in DllMain)
+		LazyCompatInit::InstallBootstrapHook();
+		rs_register();
+
+		BootLog("GetModuleFileName hook created");
 		std::cout << "GetModuleFileName hook created" << std::endl;
 		ijl15::CreateHook(); //NMCO::CreateHook();
 
+		BootLog("NMCO hook initialized");
 		std::cout << "NMCO hook initialized" << std::endl;
+		BootLogStage("DllMain ATTACH end");
 		break;
 	}
 	default: break;
@@ -150,8 +216,3 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 	}
 	return TRUE;
 }
-
-
-
-
-

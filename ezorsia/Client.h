@@ -18,6 +18,10 @@ public:
 	static void FixChatPosHook();
 	static void NoPassword();
 	static void MoreHook();
+	static void ExpandItem();
+	static void ExpandItemUI();
+	static void ExpandItemSlotLimits();
+	static void ExpandItemSort2();
 	static void WorldMap();
 	static void RefreshRate(); 
 	static void DeleteChar();
@@ -38,6 +42,9 @@ public:
 	static bool SwitchChinese;
 	static bool debug;
 	static bool noPassword;
+	static bool disablePacketHook;
+	static bool disableBossHP;
+	static bool disableWorldMap;
 	static bool climbSpeedAuto;
 	static float climbSpeed;
 	static int speedMovementCap;
@@ -47,4 +54,12 @@ public:
 	static int serverIP_Port;
 	static bool talkRepeat;
 	static int talkTime;
+	static bool quickLogin;
+	static bool allowCashTrade;
+	/** 装备成长属性旁挂 tip；默认 true，仅悬停时懒创建，启动路径零 tip。 */
+	static bool enableGrowthCompanionTip;
+	static bool expandItem;
+	static bool expandItemUI;
+	static bool expandItemSlotLimits;
+	static bool expandItemSort2;
 };
