@@ -981,16 +981,21 @@ HookPcCreateObject_IWzPackage(
 {
 	g_PcCreateObject_IWzPackage(param1, param2, param3);
 
-	int screen_refresh_rate = 0; 
-	memcpy((void*)&screen_refresh_rate, (void*)0x00BF14EC, sizeof(int));
-	if (screen_refresh_rate != 0)
-	{
-		unsigned char* p = (unsigned char*)screen_refresh_rate;
-		p[0x84] = 0x3C;
+	// 0x00BF14EC = IWzGr2D* 全局；刷新率字段在对象 +0x84。高刷屏>60 会导致 InitializeGr2D 失败。
+	// 必须校验指针可读，避免空/野指针写挂客户端。
+	__try {
+		void* gr2d = *reinterpret_cast<void**>(0x00BF14EC);
+		if (gr2d) {
+			unsigned char* p = reinterpret_cast<unsigned char*>(gr2d);
+			p[0x84] = 0x3C; // 60Hz
+		}
+	} __except (EXCEPTION_EXECUTE_HANDLER) {
 	}
 }
 void Client::RefreshRate()
 {
+	// CAUTION: 写 IWzGr2D+0x84 / 刷率相关改动在本 GMS083 构建上曾导致启动 E_FAIL。
+	// 默认不要调用；若开启必须本地进游戏验证。勿与 CrashDiag 一并当“显卡优化”乱开。
 	//屏幕刷新率大于60客户端无法启动
 
 	g_PcCreateObject_IWzPackage = (pfunPcCreateObject_IWzPackage)0x009FB0E9;

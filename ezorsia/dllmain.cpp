@@ -8,6 +8,7 @@
 #include "BossHP.h"
 #include "HpMpAlert.h"
 #include "SelectCharMacFix.h"
+#include "bootlog/CrashDiag.h"
 #pragma comment(lib, "ws2_32.lib")
 
 // config.ini can use IP or hostname (ServerIP_Address=...).
@@ -98,6 +99,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 			Client::talkTime = reader.GetInteger("optional", "talkTime", 2000);
 		}
 
+		// 诊断日志：VEH 先挂上；Detour 在其它 Hook 之后。不改刷新率/显卡相关逻辑。
+		CrashDiag_Init(hModule);
+
 		Hook_CreateMutexA(true); //multiclient //ty darter, angel, and alias!
 		HookCreateWindowExA(true); //default ezorsia
 		HookGetModuleFileName(true); //default ezorsia
@@ -135,8 +139,22 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		Client::MoreHook();
 		BossHP::Hook();
 		Client::WorldMap();
-		Client::RefreshRate(); 
+		// 慎重：RefreshRate / 写 IWzGr2D+0x84 / 显卡相关改动曾导致 E_FAIL，默认保持关闭。
+		// 需要时再按配置谨慎开启，改完必须本地进游戏验证。
+		// Client::RefreshRate();
 		Client::DeleteChar();
+		CrashDiag_AttachHooks();
+		{
+			INIReader dbgReader("config.ini");
+			if (dbgReader.ParseError() == 0) {
+				if (dbgReader.GetBoolean("debug", "CrashDiagTestAV", false)) {
+					CrashDiag_DebugTriggerAccessViolation();
+				}
+				if (dbgReader.GetBoolean("debug", "CrashDiagTestEPointer", false)) {
+					CrashDiag_DebugTriggerEPointer();
+				}
+			}
+		}
 		std::cout << "GetModuleFileName hook created" << std::endl;
 		ijl15::CreateHook(); //NMCO::CreateHook();
 

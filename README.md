@@ -6,6 +6,16 @@
 
 本分支主要服务于BeiDou的客户端。
 
+## 操作根（唯一）
+
+| 用途 | 路径                       |
+|------|----------------------------|
+| 插件源码（本仓库） | `F:\MXD_dev\BeiDou-ijl15`  |
+| 服务端 | `F:\MXD_dev\BeiDou-Server` |
+| 客户端  | `F:\MXD_dev\BeiDou-Client` |
+
+构建产物 `out/Release/ijl15.dll` 部署到 **`F:\MXD_dev\BeiDou-Client`**。EXE/插件补丁须先 IDA 对照；WZ/`.img` 走 MCP。历史 SOP 归档（只读，非操作根）：`E:\pro\BeiDou-ijl15\docs\`。
+
 ## 使用方法
 
 已测试的开发工具 VS 2019，SDK 10，工具集 VS2019（v142）
