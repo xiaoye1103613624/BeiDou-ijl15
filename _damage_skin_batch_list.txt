@@ -1,0 +1,13 @@
+﻿# DamageSkin Effect batch plan
+# Source: 自定义功能实现/伤害皮肤/resources/wz/Effect/BasicEff.img /damageSkin/<id> (641 skins, ~76MB)
+# Target: BeiDou-Client/Data/Effect/DamageSkin.img/<id>
+
+## Batch1 DONE: skins 1-20 (deployed)
+## Remaining: 21-641 (list in prior extract; do NOT merge full 76MB BasicEff)
+
+## UI DONE
+UIWindow.img/DamageSkin merged (file size 11806696 -> 11945812)
+
+## Notes
+- CashShop Base/WndBg still missing (optional; window falls back to primitive chrome)
+- MiracleCube popup left DisablePopup=1 (UIWindow2 stub lacks MiracleCube nodes)
