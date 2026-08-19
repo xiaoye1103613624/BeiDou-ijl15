@@ -30,6 +30,13 @@ std::string Client::ServerIP_AddressFromINI = "127.0.0.1"; // 服务器IP地址
 int Client::serverIP_Port = 8484; // 服务器端口
 bool Client::talkRepeat = false; // 重复说话
 int Client::talkTime = 2000; // 说话间隔时间
+bool Client::disablePacketHook = false;
+bool Client::disableBossHP = false;
+bool Client::disableWorldMap = false;
+bool Client::enableGrowthCompanionTip = true; // 成长旁挂 tip；config optional.enableGrowthCompanion
+bool Client::quickLogin = true;
+bool Client::allowCashTrade = true;
+bool Client::enableAirSkill = true;
 
 void Client::UpdateGameStartup() {
 	//Memory::CodeCave(cc0x0044E550, dw0x0044E550, dw0x0044E550Nops); //run from packed client //skip //sub_44E546
@@ -427,8 +434,9 @@ void Client::UpdateResolution() {
 
 	Memory::WriteInt(0x00A24D0B + 1, (m_nGameWidth / 2) - 129);//??
 
-	Memory::WriteInt(0x00BE273C, 128);//??
-	Memory::WriteByte(0x00A5FC2B, 0x05);//??
+	// FORBIDDEN (align E:\pro\BeiDou-ijl15): undocumented data pokes smash Gr2D EH.
+	// Memory::WriteInt(0x00BE273C, 128);
+	// Memory::WriteByte(0x00A5FC2B, 0x05);
 	//Memory::WriteByte(0x008D1790 + 2, 0x01); //related to quickslots area presence		 originally 1U but changed because unsigned int crashes it after char select
 	Memory::WriteByte(0x0089B636 + 2, 0x01); //related to exp gain/item pick up msg, seems to affect msg height ! originally 1U but changed because unsigned int crashes it after char select
 	Memory::WriteByte(0x00592A06 + 1, 0x01);//???likely related to mouse pos
@@ -820,8 +828,10 @@ void Client::LongQuickSlot() {
 	Memory::WriteByte(0x008DE941 + 2, 0x1A); //change cmp 8 --> cmp 26
 
 	//CUIStatusBar::GetShortCutIndexByPos
+	// Loop: esi = &Y0, steps +8, jl vs end. Must bound to expanded 26-slot array
+	// (old WriteByte(+1,0x3E) corrupted `cmp esi,imm` into `cmp [esi],imm` → drop fail).
 	Memory::WriteInt(0x008DE8F4 + 1, (DWORD)&Array_ptShortKeyPos_Fixed_Tooltips + 4);
-	Memory::WriteByte(0x008DE926 + 1, 0x3E);
+	Memory::WriteInt(0x008DE926 + 2, (DWORD)&Array_ptShortKeyPos_Fixed_Tooltips + 4 + 26 * 8);
 
 	//CUIStatusBar::CQuickSlot::DrawSkillCooltime
 	Memory::WriteByte(0x008E099F + 3, 0x1A);

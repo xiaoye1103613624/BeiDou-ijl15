@@ -4,3 +4,6 @@ ezorsia/ezorsia.vcxproj.user
 out
 ezorsia/Debug
 ezorsia/Release
+.idea
+_build_*.log
+_tmp_dump/

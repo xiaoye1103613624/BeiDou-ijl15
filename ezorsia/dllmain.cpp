@@ -9,7 +9,24 @@
 #include "HpMpAlert.h"
 #include "SelectCharMacFix.h"
 #include "bootlog/CrashDiag.h"
+#include "compat/LazyCompatInit.h"
+#include "compat/rs/rs.h"
+#include "shoulders/ShoulderApi.h"
+#include "gamedata/GameDataGuardApi.h"
+#include "maxhpmp/MaxHpMpApi.h"
+#include "level300/Level300Api.h"
+#include "mesouncap/MesoUncapApi.h"
+#include "highershoplist/HigherShopListApi.h"
+#include "personalshop/PersonalShopApi.h"
+#include "quicklogin/QuickLoginApi.h"
+#include "charslots/CharSlotsApi.h"
+#include "airskill/AirSkillApi.h"
+#include "maptransfer/MapTransferExpandApi.h"
 #pragma comment(lib, "ws2_32.lib")
+
+#ifndef BISECT_DISABLE_LATE_UI_HOOKS
+#define BISECT_DISABLE_LATE_UI_HOOKS 0
+#endif
 
 // config.ini can use IP or hostname (ServerIP_Address=...).
 // The patch expects an IPv4 dotted string; resolve hostnames to IPv4.
@@ -97,6 +114,19 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 			Client::climbSpeed = reader.GetFloat("optional", "climbSpeed", 1.0);
 			Client::talkRepeat = reader.GetBoolean("optional", "talkRepeat", false);
 			Client::talkTime = reader.GetInteger("optional", "talkTime", 2000);
+			Client::quickLogin = reader.GetBoolean("optional", "quickLogin", true);
+			Client::allowCashTrade = reader.GetBoolean("optional", "allowCashTrade", true);
+			Client::enableAirSkill = reader.GetBoolean("optional", "enableAirSkill", true);
+			// Prefer enableGrowthCompanion; also accept legacy enableEquipGrowthTip.
+			Client::enableGrowthCompanionTip =
+					reader.GetBoolean("optional", "enableGrowthCompanion",
+							reader.GetBoolean("optional", "enableEquipGrowthTip", true));
+			// width/height = login + character-select. soScreenResolution = field after enter.
+			// Relogin restores login size for the UI only; never treat a missing Global.opt
+			// value as “wipe the saved field tier”. Omit soScreenResolution only to keep
+			// the field at login dims.
+			rs_tier = reader.GetInteger("general", "soScreenResolution", -1);
+			rs_field_follow_login = (rs_tier < 0);
 		}
 
 		// 诊断日志：VEH 先挂上；Detour 在其它 Hook 之后。不改刷新率/显卡相关逻辑。
@@ -126,8 +156,22 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 
 		Client::UpdateGameStartup();
 
+		// Custom.wz SysOpt stretch mount (fail-soft). Must run before resolution apply.
+		rs_resman_init();
+		if (rs_tier < 0) {
+			rs_tier = rs_tier_from_dims(Client::m_nGameWidth, Client::m_nGameHeight);
+			rs_field_follow_login = true;
+		}
+		if (rs_tier > RS_TIER_MAX) rs_tier = 0;
+
 		std::cout << "Applying resolution " << Client::m_nGameWidth << "x" << Client::m_nGameHeight << std::endl;
 		Client::UpdateResolution();
+		// Critical: rs_on_enter_field follow-login uses rs_login_* (defaults 800x600).
+		// Without this, field enter re-applies 800 layout inside an HD window → split HUD.
+		rs_set_login_dims(Client::m_nGameWidth, Client::m_nGameHeight);
+		rs_width = Client::m_nGameWidth;
+		rs_height = Client::m_nGameHeight;
+		rs_adjust_cy = (rs_height > 600) ? (rs_height - 600) / 2 : 0;
 		Client::FixMouseWheel();
 		Client::Chinese();
 		Client::LongQuickSlot();
@@ -137,16 +181,76 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		Client::FixChatPosHook();
 		Client::NoPassword();
 		Client::MoreHook();
-		BossHP::Hook();
-		Client::WorldMap();
+		// BossHP / WorldMap deferred to LazyCompat FieldInit (owns CField::Init).
 		// 慎重：RefreshRate / 写 IWzGr2D+0x84 / 显卡相关改动曾导致 E_FAIL，默认保持关闭。
-		// 需要时再按配置谨慎开启，改完必须本地进游戏验证。
-		// Client::RefreshRate();
 		Client::DeleteChar();
+		try {
+			AttachGameDataGuard();
+		} catch (...) {
+		}
+		AttachShoulderSlotsFix();
+		// Packet length parity with PacketCreator.addCharStats / addCharacterInfo:
+		//   MaxHpMp: writeInt HP/MP (+ Fuse_long CS==0 for Level300 EXP FakeTear)
+		//   Level300: writeShort(level) + writeLong(exp)
+		//   MesoUncap: writeLong(meso)
+		// Missing any → CharacterData desync → error 38 (EOF) on channel enter.
+		try {
+			AttachMaxHpMpMod();
+		} catch (...) {
+		}
+		try {
+			AttachLevel300Mod();
+		} catch (...) {
+		}
+		try {
+			AttachMesoUncapMod();
+		} catch (...) {
+		}
+		// MapTransfer expand: CharacterData Decode reads TROCK_MAP_SIZE / VIP_TROCK_MAP_SIZE ints.
+		// Must match PacketCreator.addTeleportInfo or channel enter desyncs (error 38).
+		try {
+			AttachMapTransferExpandMod();
+		} catch (...) {
+		}
+		try {
+			HigherShopList::ApplyPatches();
+		} catch (...) {
+		}
+		try {
+			AttachPersonalShopMod();
+		} catch (...) {
+		}
+		try {
+			CharSlots::ApplyPatches();
+		} catch (...) {
+		}
+		try {
+			if (Client::quickLogin) {
+				AttachQuickLoginMod();
+			}
+		} catch (...) {
+		}
+		try {
+			if (Client::allowCashTrade) {
+				AttachAllowCashTradeMod();
+			}
+		} catch (...) {
+		}
+		try {
+			if (Client::enableAirSkill) {
+				AttachAirSkillMod();
+			}
+		} catch (...) {
+		}
+		LazyCompatInit::InstallBootstrapHook();
+		rs_register();
 		CrashDiag_AttachHooks();
 		{
 			INIReader dbgReader("config.ini");
 			if (dbgReader.ParseError() == 0) {
+				Client::disablePacketHook = dbgReader.GetBoolean("debug", "disablePacketHook", false);
+				Client::disableBossHP = dbgReader.GetBoolean("debug", "disableBossHP", false);
+				Client::disableWorldMap = dbgReader.GetBoolean("debug", "disableWorldMap", false);
 				if (dbgReader.GetBoolean("debug", "CrashDiagTestAV", false)) {
 					CrashDiag_DebugTriggerAccessViolation();
 				}

@@ -1,4 +1,7 @@
 ﻿#pragma once
+
+#include <string>
+
 class Client
 {
 public:
@@ -35,6 +38,17 @@ public:
 	static bool SwitchChinese;
 	static bool debug;
 	static bool noPassword;
+	static bool disablePacketHook;
+	static bool disableBossHP;
+	static bool disableWorldMap;
+	/** Growth companion tip beside equip tip (config optional.enableGrowthCompanion). */
+	static bool enableGrowthCompanionTip;
+	/** After world select, auto-focus channel window (Enter -> ch1). */
+	static bool quickLogin;
+	/** NOP cash-item trade checks so cash gear can enter trade inventory. */
+	static bool allowCashTrade;
+	/** Allow casting most skills while airborne. */
+	static bool enableAirSkill;
 	static bool climbSpeedAuto;
 	static float climbSpeed;
 	static int speedMovementCap;
