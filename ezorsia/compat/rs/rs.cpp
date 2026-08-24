@@ -1456,9 +1456,11 @@ void CWvsApp::CallUpdate_hook(int tCurTime) {
     extern void WeatherMove_Frame();
     extern void WeatherMove_Restore();
     extern void WeatherSway_Frame();
+    extern void HairSway_Tick();
     extern bool Weather_IsFieldActive();
     extern bool Weather_HasFallingSky();
     Weather_Tick();
+    HairSway_Tick();
     if (Weather_IsFieldActive()) {
         if (Weather_HasFallingSky()) {
             WeatherSplash_Frame();

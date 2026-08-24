@@ -64,6 +64,7 @@
 #endif
 #include "compat/hook.h"
 #include "weapontint.h"
+#include "../hairsway/hairsway.h"
 
 #include "compat/wvs/avatar.h"
 #include "compat/wvs/packet_legacy.h"
@@ -1498,6 +1499,29 @@ bool SehLookIdsOf(CAvatar* pAvatar, int& hairId, int& faceId) {
     return true;
 }
 
+namespace {
+
+struct HairSwayScope {
+    bool active;
+    ~HairSwayScope() {
+        if (active) {
+            HairSway_EndLayer();
+        }
+    }
+};
+
+void CallPrepareActionLayerWithHairSway(void* pThis, CAvatar* pAvatar, int hairId,
+                                        int nActionSpeed, int nWalkSpeed, int bKeyDown) {
+    const bool bSway = hairId && HairSway_Applies(pAvatar, hairId);
+    HairSwayScope hairSwayScope{bSway};
+    if (bSway) {
+        HairSway_BeginLayer(pAvatar, hairId);
+    }
+    PrepareActionLayer_Orig(pThis, nActionSpeed, nWalkSpeed, bKeyDown);
+}
+
+} // namespace
+
 void __fastcall PrepareActionLayer_Hook(void* pThis, void* /*edx*/,
                                         int nActionSpeed, int nWalkSpeed, int bKeyDown) {
     auto* pAvatar = reinterpret_cast<CAvatar*>(pThis);
@@ -1506,12 +1530,12 @@ void __fastcall PrepareActionLayer_Hook(void* pThis, void* /*edx*/,
     SehLookIdsOf(pAvatar, hairId, faceId);
     const TintScope scope = ScopeForAvatar(pAvatar);
     if (!scope.any) {
-        PrepareActionLayer_Orig(pThis, nActionSpeed, nWalkSpeed, bKeyDown);
+        CallPrepareActionLayerWithHairSway(pThis, pAvatar, hairId, nActionSpeed, nWalkSpeed, bKeyDown);
         return;
     }
     const int action = CurrentActionOf(pAvatar);
     if (action < 0) {
-        PrepareActionLayer_Orig(pThis, nActionSpeed, nWalkSpeed, bKeyDown);
+        CallPrepareActionLayerWithHairSway(pThis, pAvatar, hairId, nActionSpeed, nWalkSpeed, bKeyDown);
         return;
     }
 
@@ -1550,7 +1574,7 @@ void __fastcall PrepareActionLayer_Hook(void* pThis, void* /*edx*/,
         // shared WZ nodes before any other avatar can observe them.
         if (faceId > 0 && scope.Lookup(kTintKey_Face, tLook) && !tLook.IsIdentity())
             SwapInFaceTint(faceId, tLook);
-        PrepareActionLayer_Orig(pThis, nActionSpeed, nWalkSpeed, bKeyDown);
+        CallPrepareActionLayerWithHairSway(pThis, pAvatar, hairId, nActionSpeed, nWalkSpeed, bKeyDown);
     }
 }
 
