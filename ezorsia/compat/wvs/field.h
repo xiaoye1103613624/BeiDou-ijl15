@@ -8,8 +8,22 @@
 class CMapLoadable : public CStage {
 public:
     MEMBER_AT(IWzPropertyPtr, 0x2C, m_pPropFieldInfo)
+    // Field BODY (not the same object as m_pPropFieldInfo). info/link maps keep +0x2C
+    // on the linking map while +0x30 becomes the target's body.
+    MEMBER_AT(IWzPropertyPtr, 0x30, m_pPropField)
     MEMBER_AT(RECT, 0xF0, m_rcViewRange)
-    MEMBER_HOOK(void, 0x00641EF1, RestoreViewRange) // resolution.cpp
+    MEMBER_HOOK(void, 0x00641EF1, RestoreViewRange) // resolution.cpp / rs.cpp
+
+    // weather.cpp
+    MEMBER_HOOK(void, 0x00639B3D, LoadMap)
+    MEMBER_HOOK(void, 0x006399EF, Update)
+    MEMBER_HOOK(void, 0x0063A100, RestoreTile)
+    MEMBER_HOOK(void, 0x0063AA7E, RestoreObj)
+    MEMBER_HOOK(void, 0x0063CBBA, RestoreBack)
+    MEMBER_HOOK(void*, 0x0063CD4E, MakeBack, int nIndex, void* pProp)
+
+    // lamps.cpp
+    MEMBER_HOOK(void*, 0x0063AD16, MakeObj, int nLayer, IWzProperty* pObjProp)
 };
 
 
@@ -24,6 +38,13 @@ public:
 
     inline static auto OnKey =
         reinterpret_cast<void(__thiscall*)(CField*, unsigned int, int)>(0x00529968);
+};
+
+
+// weather.cpp: capture NPC layers for night tint
+class CNpcPool {
+public:
+    MEMBER_HOOK(void, 0x006D9993, OnNpcEnterField, void* pPacket)
 };
 
 

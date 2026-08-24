@@ -26,6 +26,9 @@
 #include "../coloringprism/ColoringPrismApi.h"
 #include "../invresize/InvResizeApi.h"
 #include "../deathcount/DeathCountApi.h"
+#include "../statdetail/StatDetailExtApi.h"
+#include "../monsterbook/MonsterBookApi.h"
+#include "../weather/WeatherApi.h"
 
 namespace {
 std::vector<CompatModule> g_modules;
@@ -208,6 +211,13 @@ void ModRegistry::RegisterBuiltins() {
     };
     ModRegistry::RegisterModule(std::move(partyBuffs));
 
+    CompatModule statDetailExt{};
+    statDetailExt.name = "StatDetailExt";
+    statDetailExt.onAttach = []() {
+        StatDetailExt::EnsureHooks();
+    };
+    ModRegistry::RegisterModule(std::move(statDetailExt));
+
     CompatModule equipCompare{};
     equipCompare.name = "EquipCompare";
     equipCompare.onAttach = []() {
@@ -241,6 +251,26 @@ void ModRegistry::RegisterBuiltins() {
         CashShopWnd_Tick();
     };
     ModRegistry::RegisterModule(std::move(cashShopWindow));
+
+    CompatModule monsterBook{};
+    monsterBook.name = "MonsterBook";
+    monsterBook.onAttach = []() {
+        MonsterBook_RegisterPacketHandler();
+        MonsterBook_AttachHooks();
+    };
+    monsterBook.onTick = []() {
+        MonsterBook_OnTick();
+    };
+    ModRegistry::RegisterModule(std::move(monsterBook));
+
+    CompatModule weather{};
+    weather.name = "Weather";
+    weather.onAttach = []() {
+        Weather_RegisterPacketHandlers();
+        AttachWeatherMod();
+        AttachWeatherWindMod();
+    };
+    ModRegistry::RegisterModule(std::move(weather));
 #endif
 }
 

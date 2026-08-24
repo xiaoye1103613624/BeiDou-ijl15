@@ -1201,6 +1201,11 @@ void rs_on_enter_field() {
 static auto s_set_stage = reinterpret_cast<void(__cdecl*)(CStage*, void*)>(0x00777347);
 
 void __cdecl rs_set_stage_hook(CStage* pStage, void* pParam) {
+    // Free ResMan canvas/property cache before stage builds (World Select was E_POINTER
+    // with maxFree≈5MB). IDA set_stage@0x777347 — existing RS hook, no new VA.
+    // Flush before BOTH field and login transitions; fail-soft inside helper.
+    rs_resman_flush_cached(0);
+
     if (pStage && pStage->IsKindOf(reinterpret_cast<const CRTTI*>(0x00BED758))) {
         std::cout << "[RS] set_stage -> CField tier=" << rs_tier
                   << " follow_login=" << (rs_field_follow_login ? 1 : 0) << std::endl;
@@ -1209,6 +1214,8 @@ void __cdecl rs_set_stage_hook(CStage* pStage, void* pParam) {
         } else {
             rs_switchToTier(rs_tier);
         }
+        // Single pre-stage flush already done above; avoid double flush into SET_FIELD
+        // (2026-08-21 AV: live char refs freed mid-enter when flush was too aggressive).
         s_set_stage(pStage, pParam);
         return;
     }
@@ -1440,6 +1447,30 @@ static void rs_flushPendingFieldRefresh() {
 }
 
 void CWvsApp::CallUpdate_hook(int tCurTime) {
+    // Weather: release field layers on logout/char-select (LoadMap only runs on enter).
+    // Ground FX run per RENDERED frame here, not in the 30ms logic tick.
+    extern void Weather_Tick();
+    extern void WeatherPuddle_Frame();
+    extern void WeatherAccum_Frame();
+    extern void WeatherSplash_Frame();
+    extern void WeatherMove_Frame();
+    extern void WeatherMove_Restore();
+    extern void WeatherSway_Frame();
+    extern bool Weather_IsFieldActive();
+    extern bool Weather_HasFallingSky();
+    Weather_Tick();
+    if (Weather_IsFieldActive()) {
+        if (Weather_HasFallingSky()) {
+            WeatherSplash_Frame();
+            WeatherPuddle_Frame();
+            WeatherAccum_Frame();
+            WeatherMove_Frame();
+        } else {
+            WeatherMove_Restore();
+        }
+        WeatherSway_Frame();
+    }
+
     CWvsApp::CallUpdate(this, tCurTime);
     rs_flushPendingFieldRefresh();
 }

@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -101,7 +101,7 @@
       <SDLCheck>false</SDLCheck>
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;WIN32;_DEBUG;EZORSIA_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(ProjectDir)equipgrowth;$(ProjectDir)invresize;$(ProjectDir)potentialscroll;$(ProjectDir)equipcompare;$(ProjectDir)sidetoolbar;$(ProjectDir)cashshop;$(ProjectDir)miraclecube;$(ProjectDir)higherstoragelist;$(ProjectDir)highershoplist;$(ProjectDir)personalshop;$(ProjectDir)bufftimer;$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)storagebag;$(ProjectDir)slotlock;$(ProjectDir)fusionanvil;$(ProjectDir)shoulders;$(ProjectDir)pendant2;$(ProjectDir)equipaddon;$(ProjectDir)extendequip;$(ProjectDir)partybuffs;$(ProjectDir)userinfodetail;$(ProjectDir)setitem;$(ProjectDir)coloringprism;$(ProjectDir)deathcount;$(ProjectDir)level300;$(ProjectDir)maxhpmp;$(ProjectDir)mesouncap;$(ProjectDir)quicklogin;$(ProjectDir)charslots;$(ProjectDir)airskill;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)weather;$(ProjectDir)equipgrowth;$(ProjectDir)invresize;$(ProjectDir)potentialscroll;$(ProjectDir)equipcompare;$(ProjectDir)sidetoolbar;$(ProjectDir)cashshop;$(ProjectDir)miraclecube;$(ProjectDir)higherstoragelist;$(ProjectDir)highershoplist;$(ProjectDir)personalshop;$(ProjectDir)bufftimer;$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)monsterbook;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)storagebag;$(ProjectDir)slotlock;$(ProjectDir)fusionanvil;$(ProjectDir)shoulders;$(ProjectDir)pendant2;$(ProjectDir)equipaddon;$(ProjectDir)extendequip;$(ProjectDir)partybuffs;$(ProjectDir)userinfodetail;$(ProjectDir)setitem;$(ProjectDir)statdetail;$(ProjectDir)coloringprism;$(ProjectDir)deathcount;$(ProjectDir)level300;$(ProjectDir)maxhpmp;$(ProjectDir)mesouncap;$(ProjectDir)quicklogin;$(ProjectDir)charslots;$(ProjectDir)airskill;$(ProjectDir)hyperskill;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <UndefinePreprocessorDefinitions>%(UndefinePreprocessorDefinitions)</UndefinePreprocessorDefinitions>
       <AdditionalOptions>/FS -D _CRT_SECURE_NO_WARNINGS %(AdditionalOptions)</AdditionalOptions>
@@ -139,7 +139,7 @@
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;WIN32;NDEBUG;EZORSIA_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
-      <AdditionalIncludeDirectories>$(ProjectDir)equipgrowth;$(ProjectDir)invresize;$(ProjectDir)potentialscroll;$(ProjectDir)equipcompare;$(ProjectDir)sidetoolbar;$(ProjectDir)cashshop;$(ProjectDir)miraclecube;$(ProjectDir)higherstoragelist;$(ProjectDir)highershoplist;$(ProjectDir)personalshop;$(ProjectDir)bufftimer;$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)storagebag;$(ProjectDir)slotlock;$(ProjectDir)fusionanvil;$(ProjectDir)shoulders;$(ProjectDir)pendant2;$(ProjectDir)equipaddon;$(ProjectDir)extendequip;$(ProjectDir)partybuffs;$(ProjectDir)userinfodetail;$(ProjectDir)setitem;$(ProjectDir)coloringprism;$(ProjectDir)deathcount;$(ProjectDir)level300;$(ProjectDir)maxhpmp;$(ProjectDir)mesouncap;$(ProjectDir)quicklogin;$(ProjectDir)charslots;$(ProjectDir)airskill;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)weather;$(ProjectDir)equipgrowth;$(ProjectDir)invresize;$(ProjectDir)potentialscroll;$(ProjectDir)equipcompare;$(ProjectDir)sidetoolbar;$(ProjectDir)cashshop;$(ProjectDir)miraclecube;$(ProjectDir)higherstoragelist;$(ProjectDir)highershoplist;$(ProjectDir)personalshop;$(ProjectDir)bufftimer;$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)monsterbook;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)storagebag;$(ProjectDir)slotlock;$(ProjectDir)fusionanvil;$(ProjectDir)shoulders;$(ProjectDir)pendant2;$(ProjectDir)equipaddon;$(ProjectDir)extendequip;$(ProjectDir)partybuffs;$(ProjectDir)userinfodetail;$(ProjectDir)setitem;$(ProjectDir)statdetail;$(ProjectDir)coloringprism;$(ProjectDir)deathcount;$(ProjectDir)level300;$(ProjectDir)maxhpmp;$(ProjectDir)mesouncap;$(ProjectDir)quicklogin;$(ProjectDir)charslots;$(ProjectDir)airskill;$(ProjectDir)hyperskill;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
@@ -182,6 +182,7 @@
     <ClInclude Include="quicklogin\QuickLoginApi.h" />
     <ClInclude Include="charslots\CharSlotsApi.h" />
     <ClInclude Include="airskill\AirSkillApi.h" />
+    <ClInclude Include="hyperskill\HyperSkillApi.h" />
     <ClInclude Include="HpMpAlert.h" />
     <ClInclude Include="Client.h" />
     <ClInclude Include="FixBuddy.h" />
@@ -306,6 +307,10 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="statdetail\StatDetailExt.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="setitem\equiptooltip_style.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
@@ -380,6 +385,11 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="monsterbook\MonsterBookBridge.cpp" />
+    <ClCompile Include="monsterbook\monsterBook.cpp" />
+    <ClCompile Include="monsterbook\monsterBookDrops.cpp" />
+    <ClCompile Include="monsterbook\monsterBookFoundIn.cpp" />
+    <ClCompile Include="monsterbook\monsterBookSearch.cpp" />
     <ClCompile Include="worldmap\WorldMapInfoBridge.cpp" />
     <ClCompile Include="worldmap\worldmapinfo.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
@@ -453,6 +463,18 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
     </ClCompile>
+        <ClCompile Include="weather\WeatherBridge.cpp" />
+    <ClCompile Include="weather\weather.cpp" />
+    <ClCompile Include="weather\weatherfx.cpp" />
+    <ClCompile Include="weather\weathercanvas.cpp" />
+    <ClCompile Include="weather\weathersound.cpp" />
+    <ClCompile Include="weather\weathersplash.cpp" />
+    <ClCompile Include="weather\weatherwind.cpp" />
+    <ClCompile Include="weather\weatheraccum.cpp" />
+    <ClCompile Include="weather\weatherpuddle.cpp" />
+    <ClCompile Include="weather\weathermove.cpp" />
+    <ClCompile Include="weather\weathersway.cpp" />
+    <ClCompile Include="weather\lamps.cpp" />
     <ClCompile Include="deathcount\DeathCountBridge.cpp" />
     <ClCompile Include="deathcount\deathcount.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
@@ -468,6 +490,18 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="airskill\airskill.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="hyperskill\hyper_book_loader.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="hyperskill\hyperskill.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="hyperskill\mr_skill_satellites.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
     </ClCompile>
