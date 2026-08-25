@@ -19,7 +19,6 @@
 #include "../partybuffs/PartyBuffsApi.h"
 #include "../equipcompare/EquipCompareApi.h"
 #include "../slotlock/SlotLockApi.h"
-#include "../shopbuyback/ShopBuybackApi.h"
 #include "../sidetoolbar/SideToolbarApi.h"
 #include "../equipaddon/EquipAddonApi.h"
 #include "../cashshop/CashShopApi.h"
@@ -225,14 +224,6 @@ void ModRegistry::RegisterBuiltins() {
         EquipCompare::EnsureHooks();
     };
     ModRegistry::RegisterModule(std::move(equipCompare));
-
-    CompatModule shopBuyback{};
-    shopBuyback.name = "ShopBuyback";
-    shopBuyback.onAttach = []() {
-        ShopBuyback::RegisterPacketHandler();
-        ShopBuyback::ApplyHooks(true);
-    };
-    ModRegistry::RegisterModule(std::move(shopBuyback));
 
     CompatModule slotLock{};
     slotLock.name = "SlotLock";
