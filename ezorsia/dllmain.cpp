@@ -12,6 +12,7 @@
 #include "compat/LazyCompatInit.h"
 #include "compat/rs/rs.h"
 #include "shoulders/ShoulderApi.h"
+#include "equipaddon/EquipAddonApi.h"
 #include "gamedata/GameDataGuardApi.h"
 #include "maxhpmp/MaxHpMpApi.h"
 #include "level300/Level300Api.h"
@@ -21,7 +22,9 @@
 #include "quicklogin/QuickLoginApi.h"
 #include "charslots/CharSlotsApi.h"
 #include "airskill/AirSkillApi.h"
+#include "hyperskill/HyperSkillApi.h"
 #include "maptransfer/MapTransferExpandApi.h"
+#include "statdetail/StatDetailExtApi.h"
 #pragma comment(lib, "ws2_32.lib")
 
 #ifndef BISECT_DISABLE_LATE_UI_HOOKS
@@ -117,6 +120,28 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 			Client::quickLogin = reader.GetBoolean("optional", "quickLogin", true);
 			Client::allowCashTrade = reader.GetBoolean("optional", "allowCashTrade", true);
 			Client::enableAirSkill = reader.GetBoolean("optional", "enableAirSkill", true);
+			Client::enableHyperSkill = reader.GetBoolean("optional", "enableHyperSkill", true);
+			Client::enableEquipCategoryOverride =
+					reader.GetBoolean("optional", "enableEquipCategoryOverride", false);
+			Client::enableFusionAnvilTooltipHooks =
+					reader.GetBoolean("optional", "enableFusionAnvilTooltipHooks", false);
+			Client::autoLoadHyperSkillBooks = reader.GetBoolean("optional", "autoLoadHyperSkillBooks", true);
+			Client::autoLoadHyperRevertSlim = reader.GetBoolean("optional", "autoLoadHyperRevertSlim", true);
+			// MapleRoot Full: SetResManParam(..., retain, -1) + optional SweepCache/CField flush.
+			Client::enableResManTimeout = reader.GetBoolean("optional", "enableResManTimeout", false);
+			Client::resManRetainMs = reader.GetInteger("optional", "resManRetainMs", 60000);
+			if (Client::resManRetainMs < 0) {
+				Client::resManRetainMs = 60000;
+			}
+			Client::enableResManFlush = reader.GetBoolean("optional", "enableResManFlush", true);
+			Client::resManSweepMs = reader.GetInteger("optional", "resManSweepMs", 60000);
+			if (Client::resManSweepMs < 1000) {
+				Client::resManSweepMs = 1000;
+			}
+			Client::resManLowVaFlushMb = reader.GetInteger("optional", "resManLowVaFlushMb", 96);
+			if (Client::resManLowVaFlushMb < 0) {
+				Client::resManLowVaFlushMb = 0;
+			}
 			// Prefer enableGrowthCompanion; also accept legacy enableEquipGrowthTip.
 			Client::enableGrowthCompanionTip =
 					reader.GetBoolean("optional", "enableGrowthCompanion",
@@ -181,6 +206,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		Client::FixChatPosHook();
 		Client::NoPassword();
 		Client::MoreHook();
+		try {
+			// Apply Stat width / BtDetail before first CUIStat create (login-safe).
+			StatDetailExt::EnsureHooks();
+		} catch (...) {
+		}
 		// BossHP / WorldMap deferred to LazyCompat FieldInit (owns CField::Init).
 		// 慎重：RefreshRate / 写 IWzGr2D+0x84 / 显卡相关改动曾导致 E_FAIL，默认保持关闭。
 		Client::DeleteChar();
@@ -189,6 +219,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		} catch (...) {
 		}
 		AttachShoulderSlotsFix();
+		// Login inventory apply (getCharInfo) happens BEFORE first CField.
+		// Install Addon LoginAllow + Apply caves here so −52…−62 survive relog.
+		// Get/Set Detours + UI stay on FieldInit EnsureHooks (avoid #35/#38).
+		try {
+			EquipAddon::InstallLoginPersistEarly();
+		} catch (...) {
+		}
 		// Packet length parity with PacketCreator.addCharStats / addCharacterInfo:
 		//   MaxHpMp: writeInt HP/MP (+ Fuse_long CS==0 for Level300 EXP FakeTear)
 		//   Level300: writeShort(level) + writeLong(exp)
@@ -239,6 +276,15 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		try {
 			if (Client::enableAirSkill) {
 				AttachAirSkillMod();
+			}
+		} catch (...) {
+		}
+		try {
+			if (Client::enableHyperSkill) {
+				AttachHyperSkillMod();
+				if (Client::autoLoadHyperSkillBooks) {
+					AttachHyperBookLoader();
+				}
 			}
 		} catch (...) {
 		}

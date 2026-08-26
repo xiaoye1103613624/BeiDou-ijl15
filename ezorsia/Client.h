@@ -43,12 +43,31 @@ public:
 	static bool disableWorldMap;
 	/** Growth companion tip beside equip tip (config optional.enableGrowthCompanion). */
 	static bool enableGrowthCompanionTip;
+	/** Override Si/Pocket equip category labels in tooltip (unsafe on some paths — default off). */
+	static bool enableEquipCategoryOverride;
+	/** FusionAnvil equip tooltip hooks (PrintValue breakdown / transmog line). Default off — DLL ZXString AV. */
+	static bool enableFusionAnvilTooltipHooks;
 	/** After world select, auto-focus channel window (Enter -> ch1). */
 	static bool quickLogin;
 	/** NOP cash-item trade checks so cash gear can enter trade inventory. */
 	static bool allowCashTrade;
 	/** Allow casting most skills while airborne. */
 	static bool enableAirSkill;
+	/** Archer hyper jobs/skills (313/323 DoActiveSkill routing). */
+	static bool enableHyperSkill;
+	/** Promote Data/Skill/_full hyper books on char enter / job change. */
+	static bool autoLoadHyperSkillBooks;
+	/** Revert previous hyper book to Data/Skill/_slim when switching jobs. */
+	static bool autoLoadHyperRevertSlim;
+	/** MapleRoot-style ResMan AUTO_SERIALIZE retain (ms). Default off — stock uses -1. */
+	static bool enableResManTimeout;
+	static int resManRetainMs;
+	/** When timeout on: patch SweepCache delays + CField FlushCachedObjects(0) (MR flushcache). */
+	static bool enableResManFlush;
+	/** SweepCache outer/object-age ms (stock 60000 / 300000). Default 10000. */
+	static int resManSweepMs;
+	/** FlushCachedObjects(0) when maxFree (MB) drops below this (0=off). Default 128. */
+	static int resManLowVaFlushMb;
 	static bool climbSpeedAuto;
 	static float climbSpeed;
 	static int speedMovementCap;

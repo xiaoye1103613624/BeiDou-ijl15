@@ -34,9 +34,19 @@ bool Client::disablePacketHook = false;
 bool Client::disableBossHP = false;
 bool Client::disableWorldMap = false;
 bool Client::enableGrowthCompanionTip = true; // 成长旁挂 tip；config optional.enableGrowthCompanion
+bool Client::enableEquipCategoryOverride = false;
+bool Client::enableFusionAnvilTooltipHooks = false;
 bool Client::quickLogin = true;
 bool Client::allowCashTrade = true;
 bool Client::enableAirSkill = true;
+bool Client::enableHyperSkill = true;
+bool Client::autoLoadHyperSkillBooks = true;
+bool Client::autoLoadHyperRevertSlim = true;
+bool Client::enableResManTimeout = false;
+int Client::resManRetainMs = 60000;
+bool Client::enableResManFlush = true;
+int Client::resManSweepMs = 60000;
+int Client::resManLowVaFlushMb = 96;
 
 void Client::UpdateGameStartup() {
 	//Memory::CodeCave(cc0x0044E550, dw0x0044E550, dw0x0044E550Nops); //run from packed client //skip //sub_44E546
@@ -641,6 +651,9 @@ void Client::UpdateResolution() {
 	if (CustomLoginFrame) {
 		Memory::WriteInt(0x005F481E + 1, (unsigned int)floor(-m_nGameHeight / 2));//push -300				!!game login frame!! turn this on if you edit UI.wz and use a frame that matches your res
 		Memory::WriteInt(0x005F4824 + 1, (unsigned int)floor(-m_nGameWidth / 2));	//push -400 ; RelMove?				!!game login frame!! turn this on if you edit UI.wz and use a frame that matches your res
+		// HD login frame: stock `or [ebp-6Ch],-1` forces CREATEPARAM font ARGB white → invisible on light edits.
+		// Only clear the imm8 (do NOT rewrite backcolor — that painted a solid white box).
+		Memory::WriteByte(dwLoginInputFontColor + 3, 0);
 	}
 	//nHeightOfsettedloginFrameFix = 0 + myHeight; nWidthOfsettedloginFrameFix = 0 + myWidth;
 	//nTopOfsettedloginFrameFix = 0 + myHeight; nLeftOfsettedloginFrameFix = 0 + myWidth; //parameters for fix cash preview
@@ -741,8 +754,8 @@ void Client::UpdateLogin() {	//un-used //may still contain some useful addresses
 	Memory::CodeCave(PositionLoginDlg, dwLoginCreateDlg, 14);
 	Memory::CodeCave(PositionLoginUsername, dwLoginUsername, 11);
 	Memory::CodeCave(PositionLoginPassword, dwLoginPassword, 8);
-	Memory::WriteInt(dwLoginInputBackgroundColor + 3, 0xFFF8FAFF); // ARGB value
-	Memory::WriteByte(dwLoginInputFontColor + 3, 1); // bool: true=black, false=white
+	Memory::WriteInt(dwLoginInputBackgroundColor + 3, 0xFFF8FAFF); // ARGB backcolor (unused path; avoid in UpdateResolution)
+	Memory::WriteByte(dwLoginInputFontColor + 3, 0); // imm8 of `or [fontARGB],imm8`: 0 keeps default black
 	Memory::WriteInt(dwLoginLoginBtn + 1, -127); // x-pos
 	Memory::WriteInt(dwLoginFindPasswordBtn + 1, -127); // x-pos
 	Memory::WriteInt(dwLoginQuitBtn + 1, -127); // x-pos
@@ -941,18 +954,9 @@ void Client::MoreHook() {
 	}
 	Memory::WriteInt(0x0049064B + 2, talkTime);
 
-	if (setAtkOutCap > 999999)
-	{
-		Memory::WriteInt(0x008C485A + 1, 192); // 面板关闭按钮x
-		Memory::WriteInt(0x008C4AB3 + 1, 210); // 面板宽度
-		Memory::WriteInt(0x008C510A + 1, 218); // 详情面板宽度
-		Memory::WriteInt(0x008C4EA2 + 1, 210); // 详情面板初始x
-		Memory::WriteInt(0x008C5760 + 1, 210); // 详情面板切换x
-		Memory::WriteInt(0x008C7AD9 + 1, 185); // 加属性按钮x
-		Memory::WriteInt(0x008C2754 + 1, 195); // 详情面板关闭按钮x
-		Memory::WriteInt(0x008C6C72 + 1, 210); // 移动时详情面板x
-		Memory::CodeCave(apDetailBtn, 0x008C4E1B, 7); // 详情按钮
-	}
+	// Stat / BtDetail layout is owned by StatDetailExt (DllMain EnsureHooks).
+	// Do NOT patch 0x8C4AB3 / 0x8C4E1B here — BtDetail X>127 needs an imm32 cave
+	// (push imm8 sign-extends; WriteByte of 162 hid the arrow at X=-94).
 	// 喇叭
 	Memory::WriteInt(0x0045A5BE + 1, 9999);
 
