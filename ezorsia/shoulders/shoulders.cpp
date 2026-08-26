@@ -145,6 +145,9 @@ static constexpr DWORD kBp51InvalidJge_A288A8 = 0x00A288A8; // 7D 05 → EB 05 (
 static constexpr DWORD kDrawRedOverlayCmp = 0x007FEF80; // 83 7D E4 00 74 06 83 7D E8 00 74 19
 static constexpr DWORD kDrawRedOverlayDraw = 0x007FEF8C;
 static constexpr DWORD kDrawRedOverlaySkip = 0x007FEFA5;
+// Mount TSec fail @7FEDD9 → red BP18/19/20 (push 12h/13h/14h). BP20 repurposed
+// for shoulder 115 — skip ONLY the push-14h block; 7FEF80 cave does not cover this.
+static constexpr DWORD kMountFailRedBp20 = 0x007FEE1B; // 6A 14 … call sub_7FF006 @7FEE2E
 
 static constexpr DWORD kEquipSlotPosBase = 0x00BE2260;
 static constexpr DWORD kEquipSlotPosCashBase = 0x00BE23F0;
@@ -153,11 +156,11 @@ static constexpr int kShoulderUiX = 137;
 static constexpr int kShoulderUiY = 101;
 // Classic extra seats (IDA sub_7FEC32 skips index 20..47 — pocket needs a hook).
 static constexpr int kPocketIndex = 32; // BP33
-static constexpr int kPocketUiX = 104;
-static constexpr int kPocketUiY = 200;
+static constexpr int kPocketUiX = 5;   // red9 HT only (EquipAddon classic)
+static constexpr int kPocketUiY = 35;
 static constexpr int kAuxBp = 62;
-static constexpr int kAuxUiX = 137;
-static constexpr int kAuxUiY = 200;
+static constexpr int kAuxUiX = 5;     // red10 HT — no collide shoulder red8 (137,101)
+static constexpr int kAuxUiY = 101;
 
 struct EquipSlotPos {
     int x;
@@ -192,16 +195,29 @@ static int __cdecl is_correct_bodypart_hook(int nItemID, int nBodyPart, int nGen
         }
         return 0;
     }
-    // Pocket 116 → BP33 (classic red9, not Addon row3)
+    // Pocket 116 → BP33 (classic red1, not Addon row3)
     if (prefix == 116) {
         return nBodyPart == 33 ? 1 : 0;
     }
-    // True split: 109 shield → BP10 (−10); 134/135 aux → BP62 (classic red10).
+    // True split: 109 shield → BP10 (−10); 134/135 aux → BP62 (classic red6).
     if (prefix == 109) {
         return nBodyPart == 10 ? 1 : 0;
     }
     if (prefix == 134 || prefix == 135) {
         return nBodyPart == 62 ? 1 : 0;
+    }
+    // AUX62_MISROUTE_R30: BP62 is aux-only — fashion (hat/clothes) must NEVER pass
+    // AbleToWear / empty-slot search into −62 (same class as pocket BP33 harden).
+    if (nBodyPart == 62) {
+        return 0;
+    }
+    // Pocket BP33: 116 only for character gear (pet equips fall through to vanilla).
+    if (nBodyPart == 33 && prefix != 116) {
+        const int pfx = prefix;
+        if (pfx >= 180 && pfx <= 183) {
+            return is_correct_bodypart(nItemID, nBodyPart, nGender);
+        }
+        return 0;
     }
     // Badge 118 → BP54 (Addon)
     if (prefix == 118 && kEnableBadgeTotemBp54_55) {
@@ -430,6 +446,8 @@ static constexpr DWORD kDrawSpecialHasItemCont = 0x007FEECC;
 
 alignas(8) static void* g_ring52ZRef[2] = {nullptr, nullptr};
 alignas(8) static void* g_ring53ZRef[2] = {nullptr, nullptr};
+alignas(8) static void* g_ring152ZRef[2] = {nullptr, nullptr};
+alignas(8) static void* g_ring153ZRef[2] = {nullptr, nullptr};
 alignas(8) static void* g_badge54ZRef[2] = {nullptr, nullptr};
 alignas(8) static void* g_totem55ZRef[2] = {nullptr, nullptr};
 alignas(8) static void* g_totem56ZRef[2] = {nullptr, nullptr};
@@ -439,6 +457,8 @@ alignas(8) static void* g_emblem59ZRef[2] = {nullptr, nullptr};
 // Enter-safe: redirect bogus ZRef.p (<64K) here — never write into Char/TSec.
 alignas(8) static void* g_emptyZRef[2] = {nullptr, nullptr};
 
+static void* __cdecl Ring152_ZRefBase() { return &g_ring152ZRef[0]; }
+static void* __cdecl Ring153_ZRefBase() { return &g_ring153ZRef[0]; }
 static void* __cdecl Ring52_ZRefBase() { return &g_ring52ZRef[0]; }
 static void* __cdecl Ring53_ZRefBase() { return &g_ring53ZRef[0]; }
 static void* __cdecl Badge54_ZRefBase() { return &g_badge54ZRef[0]; }
@@ -463,8 +483,14 @@ static void* __cdecl ShadowZRefForBp(int bp) {
     }
 }
 
-// Negative equip slot −52..−62 (cash already aliased) → ZRef*.
+// Negative equip slot → ZRef* (ExtraRing fashion −152/−153 separate from −52/−53).
 static void* __cdecl ShadowZRefForNegSlot(int nSlot) {
+    switch (nSlot) {
+    case -152: return &g_ring152ZRef[0];
+    case -153: return &g_ring153ZRef[0];
+    default:
+        break;
+    }
     if (nSlot >= -62 && nSlot <= -52) {
         return ShadowZRefForBp(-nSlot);
     }
@@ -474,6 +500,8 @@ static void* __cdecl ShadowZRefForNegSlot(int nSlot) {
 static void ClearExtendedSlotShadows() {
     g_ring52ZRef[0] = g_ring52ZRef[1] = nullptr;
     g_ring53ZRef[0] = g_ring53ZRef[1] = nullptr;
+    g_ring152ZRef[0] = g_ring152ZRef[1] = nullptr;
+    g_ring153ZRef[0] = g_ring153ZRef[1] = nullptr;
     // Badge/totem1 live in equipaddon sidecar — clear local leftovers only.
     g_badge54ZRef[0] = g_badge54ZRef[1] = nullptr;
     g_totem55ZRef[0] = g_totem55ZRef[1] = nullptr;
@@ -532,9 +560,7 @@ void __declspec(naked) SetItem_CashRingRemap_cave() {
 
 void __declspec(naked) GetItem_ExtraRingAddr_cave() {
     __asm {
-        // FIX2: NEVER remap −152/−153 here (FIX_ENTER_INVALID / an). Cash remap
-        // only via kRemapCashExtendedRings cave (kept false).
-        // Addon cash mirrors −154..−162 only.
+        // Addon cash mirrors −154..−162 only (−152/−153 stay separate fashion seats).
         cmp eax, -154
         jne get_not154
         mov eax, -54
@@ -571,15 +597,11 @@ void __declspec(naked) GetItem_ExtraRingAddr_cave() {
         jne get_not162
         mov eax, -62
     get_not162:
-        // ExtraRing ON: shadows −62..−52 (Addon + rings + aux). Never native −53
-        // (TSec smash @Char+0x293). −52 native gap is safe if shadow empty
-        // (ApplyEquip chain miss wrote aEquipped[52] instead of g_ring52).
+        // Shadows: Addon+rings −62..−52, fashion ExtraRing −153/−152.
         cmp eax, -52
-        jg native_get_direct
+        jg check_fashion_ring_get
         cmp eax, -62
-        jl native_get_direct
-        // ShadowZRefForNegSlot is __cdecl and clobbers ecx — save CharacterData*
-        // this or native fallback reads [ecx+0xEB] with garbage → AV @0xF2.
+        jl check_fashion_ring_get
         push ecx
         push eax
         call ShadowZRefForNegSlot
@@ -588,10 +610,26 @@ void __declspec(naked) GetItem_ExtraRingAddr_cave() {
         mov ecx, dword ptr [eax + 4]
         test ecx, ecx
         jnz get_shadow_hit
-        // Empty shadow: −52 may fall back to native Char gap; −53..−62 return null
-        // (native −53 is TSecType; −54+ alias cash face/eye).
         cmp dword ptr [esp], -52
         je native_get_pop
+        pop eax
+        pop eax
+        xor ecx, ecx
+        jmp dword ptr [kGetItemAddrBack]
+    check_fashion_ring_get:
+        cmp eax, -152
+        je get_fashion_ring
+        cmp eax, -153
+        jne native_get_direct
+    get_fashion_ring:
+        push ecx
+        push eax
+        call ShadowZRefForNegSlot
+        test eax, eax
+        jz native_get_pop
+        mov ecx, dword ptr [eax + 4]
+        test ecx, ecx
+        jnz get_shadow_hit
         pop eax
         pop eax
         xor ecx, ecx
@@ -613,7 +651,6 @@ void __declspec(naked) GetItem_ExtraRingAddr_cave() {
 
 void __declspec(naked) SetItem_ExtraRingAddr_cave() {
     __asm {
-        // FIX2: no −152/−153 remap (see GetItem cave).
         cmp eax, -154
         jne set_not154
         mov eax, -54
@@ -650,12 +687,25 @@ void __declspec(naked) SetItem_ExtraRingAddr_cave() {
         jne set_not162
         mov eax, -62
     set_not162:
-        // ExtraRing ON: Addon + rings + aux −62..−52 (same as GetItem).
         cmp eax, -52
-        jg native_set_direct
+        jg check_fashion_ring_set
         cmp eax, -62
-        jl native_set_direct
-        // Same ecx clobber as GetItem cave — restore this on native fallback.
+        jl check_fashion_ring_set
+        push ecx
+        push eax
+        call ShadowZRefForNegSlot
+        test eax, eax
+        jz native_set_pop
+        mov ecx, eax
+        pop eax
+        pop eax
+        jmp dword ptr [kSetItemAddrBack]
+    check_fashion_ring_set:
+        cmp eax, -152
+        je set_fashion_ring
+        cmp eax, -153
+        jne native_set_direct
+    set_fashion_ring:
         push ecx
         push eax
         call ShadowZRefForNegSlot
@@ -727,10 +777,14 @@ void __declspec(naked) DrawClearRedBp20_cave() {
 // BP52–55 native Char ZRef (CD64): walker [ebp-20h]-0x1A0 == aEquipped[BP].p.
 void __declspec(naked) DrawHasItem_Bp53_native_cave() {
     __asm {
+        cmp dword ptr [ebp + 8], 33
+        je empty_hi
         cmp dword ptr [ebp + 8], 52
         jb walk
         cmp dword ptr [ebp + 8], 55
         ja empty_hi
+        cmp dword ptr [ebp + 8], 62
+        je empty_hi
         mov ecx, dword ptr [ebp - 20h]
         test ecx, ecx
         jz empty_hi
@@ -766,16 +820,21 @@ void __declspec(naked) DrawHasItem_Bp53_shadow_cave() {
         je do52
         cmp dword ptr [ebp + 8], 53
         je do53
+        // R26: Addon overlay + pocket/aux — native HasItem empty (54–62, 33).
+        cmp dword ptr [ebp + 8], 33
+        je empty_hi
         cmp dword ptr [ebp + 8], 54
-        je do54
-        cmp dword ptr [ebp + 8], 55
-        je do55
-        cmp dword ptr [ebp + 8], 55
-        ja empty_hi
+        jb walk
+        cmp dword ptr [ebp + 8], 62
+        jbe empty_hi
         jmp walk
     do52:
-        // Prefer g_ring52; if ApplyEquip wrote native gap instead, read Char −52.
+        // Prefer normal −52; else fashion −152 on same UI seat (red3).
         call Ring52_ZRefBase
+        mov edi, dword ptr [eax + 4]
+        test edi, edi
+        jnz do52_have
+        call Ring152_ZRefBase
         mov edi, dword ptr [eax + 4]
         test edi, edi
         jnz do52_have
@@ -807,36 +866,18 @@ void __declspec(naked) DrawHasItem_Bp53_shadow_cave() {
     do53:
         call Ring53_ZRefBase
         mov edi, dword ptr [eax + 4]
-        lea ecx, [eax + 4]
-        mov dword ptr [ebp - 14h], ecx
-        and dword ptr [ebp - 18h], 0
+        test edi, edi
+        jnz do53_have
+        call Ring153_ZRefBase
+        mov edi, dword ptr [eax + 4]
+        test edi, edi
+        jnz do53_have
+        xor edi, edi
         xor eax, eax
         cmp edi, eax
         push kDrawHasItemBack
         ret
-    do54:
-        // Inventory is equipaddon sidecar (not local g_badge54 leftover).
-        push 54
-        call ShadowZRefForBp
-        add esp, 4
-        test eax, eax
-        jz empty_hi
-        mov edi, dword ptr [eax + 4]
-        lea ecx, [eax + 4]
-        mov dword ptr [ebp - 14h], ecx
-        and dword ptr [ebp - 18h], 0
-        xor eax, eax
-        cmp edi, eax
-        push kDrawHasItemBack
-        ret
-    do55:
-        // Inventory is equipaddon sidecar (not local g_totem55 leftover).
-        push 55
-        call ShadowZRefForBp
-        add esp, 4
-        test eax, eax
-        jz empty_hi
-        mov edi, dword ptr [eax + 4]
+    do53_have:
         lea ecx, [eax + 4]
         mov dword ptr [ebp - 14h], ecx
         and dword ptr [ebp - 18h], 0
@@ -1064,27 +1105,32 @@ static int __fastcall OnDoubleClicked_EquippedUnequip_hook(void* pThis, void* /*
 }
 
 // Login apply @4E5D55: lea ecx,[eax+esi*8+0xE7] then ZRef-assign — bypasses
-// CharacterData::SetItem. Rings BP52–53 → DLL shadows; badge/totem+Addon 54–62
-// → equipaddon sidecar (chained outer cave). Never native aEquipped[54+] —
-// IDA: 52-slot array; esi=54≡cash face, esi=55≡cash eye.
+// CharacterData::SetItem. BP52–62 → ShadowZRefForBp (rings + sidecar) at DllMain.
+// EquipAddon may chain an outer cave later; must not rely on FieldInit-only apply.
 static constexpr DWORD kApplyEquipZRefLea = 0x004E5D55;
 static constexpr DWORD kApplyEquipZRefCont = 0x004E5D5C; // call ZRef-assign
 
 void __declspec(naked) ApplyEquipZRef_Shadow_cave() {
     __asm {
-        // Rings only. BP54–62 handled by equipaddon outer cave → sidecar.
+        // BP52–53 → ring shadows; BP54–62 → EquipAddon sidecar (ShadowZRefForBp).
+        // Must cover 54–62 here: getCharInfo runs BEFORE FieldInit EquipAddon chain.
+        // Native aEquipped is only 52 slots — esi=54≡cash face, esi=55≡cash eye.
         cmp esi, 52
         jb a_native
-        cmp esi, 53
+        cmp esi, 62
         ja a_native
         push eax
         push esi
         call ShadowZRefForBp
         add esp, 4
+        test eax, eax
+        jz a_native_pop
         mov ecx, eax
         pop eax
         push kApplyEquipZRefCont
         ret
+    a_native_pop:
+        pop eax
     a_native:
         lea ecx, [eax + esi * 8 + 0xE7]
         push kApplyEquipZRefCont
@@ -1195,6 +1241,126 @@ void __declspec(naked) Wear_OccShadow_cave_Cash() {
 // Redirect −52..−55 to DLL shadows (same as GetItem/SetItem/Draw).
 static constexpr DWORD kCombatOccSite = 0x0077F879;
 static constexpr DWORD kCombatOccJoin = 0x0077F894; // cmp dword ptr [edi+4], 0
+
+// getCharInfo / channel-enter stat fuse @61FBA2: after GetItem, `push [esi+35h]`
+// (niSTR ZtlSecure checksum) with no pItem null-check. Extended BP52–53 shadows
+// leave ZRef.p==nullptr → AV on channel pick. In-field path has MainStat_OccShadow
+// @77EDF2; this login decode path did not (prior patch missed: site was 0x61FB98
+// but mov esi,[eax+4] is at 0x61FB97 — ExpectBytes never matched).
+static constexpr DWORD kLoginStatFuseSite = 0x0061FBA2;
+static constexpr DWORD kLoginStatFuseCont = 0x0061FBAC;
+static constexpr DWORD kLoginStatFuseSkip = 0x0061FBC3;
+static constexpr DWORD kZtlSecureFuseByte = 0x0047465D;
+
+static constexpr DWORD kLoginStatLoop1Site = 0x0061FBFD;
+static constexpr DWORD kLoginStatLoop1Cont = 0x0061FC08;
+static constexpr DWORD kLoginStatLoop2Site = 0x0061FCCA;
+static constexpr DWORD kLoginStatLoop2Cont = 0x0061FCD5;
+static constexpr DWORD kLoginStatLoop3Site = 0x0061FCEE;
+static constexpr DWORD kLoginStatLoop3Cont = 0x0061FCF9;
+
+static bool g_loginStatFuseCaved = false;
+static bool g_loginStatLoop1Caved = false;
+static bool g_loginStatLoop2Caved = false;
+static bool g_loginStatLoop3Caved = false;
+
+void __declspec(naked) LoginStat_FuseEntry_cave() {
+    __asm {
+        test esi, esi
+        jnz login_stat_fuse_ok
+        push kLoginStatFuseSkip
+        ret
+    login_stat_fuse_ok:
+        push dword ptr [esi + 0x35]
+        lea eax, dword ptr [esi + 0x33]
+        push eax
+        mov dword ptr [ebp - 0x10], eax
+        push kLoginStatFuseCont
+        ret
+    }
+}
+
+void __declspec(naked) LoginStat_LoopFuse1_cave() {
+    __asm {
+        test esi, esi
+        jnz login_stat_loop1_ok
+        xor eax, eax
+        push kLoginStatLoop1Cont
+        ret
+    login_stat_loop1_ok:
+        push dword ptr [esi + 0x35]
+        push dword ptr [ebp - 0x10]
+        call kZtlSecureFuseByte
+        push kLoginStatLoop1Cont
+        ret
+    }
+}
+
+void __declspec(naked) LoginStat_LoopFuse2_cave() {
+    __asm {
+        test esi, esi
+        jnz login_stat_loop2_ok
+        xor eax, eax
+        push kLoginStatLoop2Cont
+        ret
+    login_stat_loop2_ok:
+        push dword ptr [esi + 0x35]
+        push dword ptr [ebp - 0x10]
+        call kZtlSecureFuseByte
+        push kLoginStatLoop2Cont
+        ret
+    }
+}
+
+void __declspec(naked) LoginStat_LoopFuse3_cave() {
+    __asm {
+        test esi, esi
+        jnz login_stat_loop3_ok
+        xor eax, eax
+        push kLoginStatLoop3Cont
+        ret
+    login_stat_loop3_ok:
+        push dword ptr [esi + 0x35]
+        push dword ptr [ebp - 0x10]
+        call kZtlSecureFuseByte
+        push kLoginStatLoop3Cont
+        ret
+    }
+}
+
+static void InstallLoginStatNullGuards() {
+    static const unsigned char kFuseEntry[] = {0xFF, 0x76, 0x35, 0x8D, 0x46, 0x33,
+                                             0x50, 0x89, 0x45, 0xF0};
+    auto fuseInstalled = *reinterpret_cast<const unsigned char*>(kLoginStatFuseSite);
+    if (fuseInstalled != 0xE9
+        && ExpectBytes(kLoginStatFuseSite, kFuseEntry, sizeof(kFuseEntry))) {
+        Memory::CodeCave(LoginStat_FuseEntry_cave, kLoginStatFuseSite, sizeof(kFuseEntry));
+    }
+    g_loginStatFuseCaved = (*reinterpret_cast<const unsigned char*>(kLoginStatFuseSite) == 0xE9);
+
+    struct LoopPatch {
+        DWORD site;
+        DWORD cont;
+        void* cave;
+        bool* flag;
+        unsigned char expect[11];
+    };
+    const LoopPatch loops[] = {
+        {kLoginStatLoop1Site, kLoginStatLoop1Cont, LoginStat_LoopFuse1_cave, &g_loginStatLoop1Caved,
+         {0xFF, 0x76, 0x35, 0xFF, 0x75, 0xF0, 0xE8, 0x55, 0x4A, 0xA5, 0xFF}},
+        {kLoginStatLoop2Site, kLoginStatLoop2Cont, LoginStat_LoopFuse2_cave, &g_loginStatLoop2Caved,
+         {0xFF, 0x76, 0x35, 0xFF, 0x75, 0xF0, 0xE8, 0x88, 0x49, 0xA5, 0xFF}},
+        {kLoginStatLoop3Site, kLoginStatLoop3Cont, LoginStat_LoopFuse3_cave, &g_loginStatLoop3Caved,
+         {0xFF, 0x76, 0x35, 0xFF, 0x75, 0xF0, 0xE8, 0x64, 0x49, 0xA5, 0xFF}},
+    };
+    for (const LoopPatch& lp : loops) {
+        const unsigned char cur = *reinterpret_cast<const unsigned char*>(lp.site);
+        if (cur != 0xE9 && ExpectBytes(lp.site, lp.expect, sizeof(lp.expect))) {
+            Memory::CodeCave(lp.cave, lp.site, sizeof(lp.expect));
+        }
+        *lp.flag = (*reinterpret_cast<const unsigned char*>(lp.site) == 0xE9);
+    }
+}
 
 // Main primary-stat sum sub_77EC9F @77EDF2: positive BP loop.
 // BP<=51 → normal aEquipped walker; BP>51 → cash walker — misses DLL shadows
@@ -1613,9 +1779,9 @@ static void PatchExtendedSlotHitTestAtDllMain() {
     // Badge/totem OFF main Equip (Addon paints them).
     patchSlot(kGetSlotXyTable, 53, kOffPanelX, kOffPanelY);
     patchSlot(kGetSlotXyTable, 54, kOffPanelX, kOffPanelY);
-    // Classic pocket GetSlotXY (native Draw still skips BP33; overlay paints icon).
-    // Never write GetSlotXY[61] for aux BP62 — table has no room (OOB).
-    patchSlot(kGetSlotXyTable, kPocketIndex, kPocketUiX, kPocketUiY);
+    // Classic pocket: park GetSlotXY off-panel (overlay paints). HT stays on-panel
+    // via g_hitTestExt[kPocketIndex]. Never write GetSlotXY[61] for aux BP62 (OOB).
+    patchSlot(kGetSlotXyTable, kPocketIndex, kOffPanelX, kOffPanelY);
 
     RestoreCashEquipSlotPosFromDefaults();
     // GetBodyPartFromPoint Detours is FieldInit-only (Shoulder_Rehook).
@@ -1865,6 +2031,9 @@ static void PatchExtraRingInventoryBind() {
         }
     }
 
+    // Channel-enter getCharInfo stat fuse: skip empty equip ZRef.p (AV @61FBA2).
+    InstallLoginStatNullGuards();
+
     // Main 四维 → Addon BP54–61 (sanitized). Ring BP52–53 Occ stays OFF.
     if ((kEnableMainStatOccShadow || kEnableAddonOccShadow) && !nativeCd64) {
         static const unsigned char kMainStatOcc[] = {
@@ -1997,7 +2166,7 @@ static void PatchExtraRingInventoryBind() {
 
 extern "C" __declspec(dllexport) const char* Shoulder_GetStamp();
 
-static void WriteShoulderDiagLog(bool redCave) {
+static void WriteShoulderDiagLog(bool redCave, bool mountRedSkip) {
     char path[MAX_PATH]{};
     HMODULE self = nullptr;
     if (!GetModuleHandleExA(
@@ -2025,9 +2194,10 @@ static void WriteShoulderDiagLog(bool redCave) {
             "stamp=%s\n"
             "combat_nop=%d combat_bytes=%02X%02X (expect 0F84 stock jz; server-blind)\n"
             "bp51_red_jge=%02X\n"
-            "red20_cave=%d red20_byte=%02X\n"
+            "red20_cave=%d red20_byte=%02X mount_red_skip=%d mount_byte=%02X\n"
             "GS[19]=(%d,%d) Cash[19]=(%d,%d) HT[19]=(%d,%d) DLLHT[19]=(%d,%d) want=(%d,%d)\n"
             "get_bound=%02X set_bound=%02X get_addr=%02X set_addr=%02X\n"
+            "login_stat fuse=%d loop1=%d loop2=%d loop3=%d\n"
             "note=char1 1152214 @-20; no BE27E0; slim narrow Equip\n",
             Shoulder_GetStamp(),
             (combat0 == 0x90) ? 1 : 0,
@@ -2035,6 +2205,8 @@ static void WriteShoulderDiagLog(bool redCave) {
             *reinterpret_cast<const unsigned char*>(kBp51DrawRedJge),
             redCave ? 1 : 0,
             *reinterpret_cast<const unsigned char*>(kDrawRedOverlayCmp),
+            mountRedSkip ? 1 : 0,
+            *reinterpret_cast<const unsigned char*>(kMountFailRedBp20),
             gs[kShoulderIndex].x, gs[kShoulderIndex].y,
             cash[kShoulderIndex].x, cash[kShoulderIndex].y,
             ht[kShoulderIndex].x, ht[kShoulderIndex].y,
@@ -2044,7 +2216,11 @@ static void WriteShoulderDiagLog(bool redCave) {
             *reinterpret_cast<const unsigned char*>(kGetItemBoundCmpImm),
             *reinterpret_cast<const unsigned char*>(kSetItemBoundCmpImm),
             *reinterpret_cast<const unsigned char*>(kGetItemAddrShl),
-            *reinterpret_cast<const unsigned char*>(kSetItemAddrShl));
+            *reinterpret_cast<const unsigned char*>(kSetItemAddrShl),
+            g_loginStatFuseCaved ? 1 : 0,
+            g_loginStatLoop1Caved ? 1 : 0,
+            g_loginStatLoop2Caved ? 1 : 0,
+            g_loginStatLoop3Caved ? 1 : 0);
     fclose(f);
 }
 
@@ -2056,6 +2232,17 @@ static bool EnsureShoulderRedCave() {
     }
     return *reinterpret_cast<const unsigned char*>(kDrawRedOverlayCmp) == 0xE9
             || *reinterpret_cast<const unsigned char*>(0x007FEF86) == 0xE9;
+}
+
+static bool EnsureShoulderSkipMountFailRedBp20() {
+    static const unsigned char kPushBp20[] = {0x6A, 0x14};
+    if (ExpectBytes(kMountFailRedBp20, kPushBp20, sizeof(kPushBp20))) {
+        // jmp short loc_7FEE33 (+0x16 from next insn)
+        Memory::WriteByte(kMountFailRedBp20, 0xEB);
+        Memory::WriteByte(kMountFailRedBp20 + 1, 0x16);
+        Memory::PatchNop(kMountFailRedBp20 + 2, 22);
+    }
+    return *reinterpret_cast<const unsigned char*>(kMountFailRedBp20) == 0xEB;
 }
 
 void AttachShoulderSlotsFix() {
@@ -2091,11 +2278,13 @@ void AttachShoulderSlotsFix() {
     // Shoulder red-overlay: cover BOTH gates @7FEF80 (12 bytes) so BP20 cannot
     // bypass via jz→draw when [ebp-1C]==0.
     const bool redCave = EnsureShoulderRedCave();
+    // Mount TSec fail paints BP20 red before the draw loop — separate from 7FEF80.
+    const bool mountRedSkip = EnsureShoulderSkipMountFailRedBp20();
 
     PatchExtraRingInventoryBind();
     // OnDoubleClicked unequip: install AFTER damageskin via Shoulder_RehookDblClickUnequipOutermost.
 
-    WriteShoulderDiagLog(redCave);
+    WriteShoulderDiagLog(redCave, mountRedSkip);
 }
 
 
@@ -2121,13 +2310,14 @@ void Shoulder_ReassertUiAndDiag() {
     }
     PatchExtendedSlotHitTestAtDllMain();
     const bool redCave = EnsureShoulderRedCave();
+    const bool mountRedSkip = EnsureShoulderSkipMountFailRedBp20();
     // Keep Equip classic-narrow (no +0x21).
     Pendant2EnsureNarrowEquipLayout();
-    WriteShoulderDiagLog(redCave);
+    WriteShoulderDiagLog(redCave, mountRedSkip);
 }
 
 extern "C" __declspec(dllexport) const char* Shoulder_GetStamp() {
-    return "FIX_RES_CLICK_PICK_20260818";
+    return "FIX_LOGIN_STAT_NULLITEM_R2_20260825";
 }
 
 bool Shoulder_UseNativeCd64Slots() {

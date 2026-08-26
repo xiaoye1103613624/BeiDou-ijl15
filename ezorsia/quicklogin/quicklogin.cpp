@@ -50,11 +50,12 @@ CLogin* CLogin::Constructor_hook() {
     this->m_bSubStepChanged = 0;
     this->m_nSubStep = 0;
 
-    keybd_event(VK_MENU, 0, 0, 0);
+    // Removed the keybd_event(VK_MENU) "ALT foreground bypass": synthesizing Alt
+    // here could leave the key stuck down (auto-Alt / auto-jump). A plain
+    // SetForegroundWindow is harmless — it just no-ops if the foreground is locked.
     if (CWvsApp::GetInstance()) {
         SetForegroundWindow(CWvsApp::GetInstance()->m_hWnd);
     }
-    keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
 
     return ret;
 }

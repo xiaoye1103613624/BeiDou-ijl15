@@ -40,6 +40,8 @@ int g_lastPromotedHyperBook = -1;
 std::wstring g_skillDir;
 bool g_loggedSkillDir = false;
 
+static int g_promotedThisSession = -1; // keep full after cast; skip K-open slim thrash
+
 static void HyperBookLog(const char* msg) {
     std::cout << msg << std::endl;
     FILE* f = nullptr;
@@ -179,11 +181,17 @@ static bool CopyBookFromPool(int bookId, const wchar_t* pool, const char* label)
 }
 
 static bool PromoteFullBook(int bookId) {
-    return CopyBookFromPool(bookId, L"_full", "promote");
+    const bool changed = CopyBookFromPool(bookId, L"_full", "promote");
+    // Stay full for this session — K-open must NOT slim back (24MB copy freeze).
+    g_promotedThisSession = bookId;
+    return changed;
 }
 
 static bool RevertSlimBook(int bookId) {
     if (!g_revertSlim || bookId == 700 || bookId == 710) {
+        return false;
+    }
+    if (bookId == g_promotedThisSession) {
         return false;
     }
     long long liveSize = 0;
@@ -196,6 +204,10 @@ static bool RevertSlimBook(int bookId) {
 
 static bool EnsureSlimOnLive(int bookId) {
     if (bookId <= 0) {
+        return false;
+    }
+    // After cast-promote, keep full book until job change / logout.
+    if (bookId == g_promotedThisSession) {
         return false;
     }
     long long liveSize = 0;
@@ -236,6 +248,8 @@ static bool EnsureSlimBooksForJob(int job, const char* reason) {
 }
 
 static void SyncHyperBooksForJob(int job) {
+    // Job change: allow slim again for the previous promoted book.
+    g_promotedThisSession = -1;
     EnsureSlimBooksForJob(job, "jobChange");
 }
 
@@ -349,6 +363,7 @@ void AttachHyperBookLoader() {
     g_revertSlim = Client::autoLoadHyperRevertSlim;
     g_lastSeenJob = -1;
     g_lastPromotedHyperBook = -1;
+    g_promotedThisSession = -1;
     g_skillDir.clear();
     g_loggedSkillDir = false;
 

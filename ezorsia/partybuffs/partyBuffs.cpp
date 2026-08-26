@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "PartyBuffsApi.h"
+#include "INIReader.h"
 #include "compat/ClientAddresses.h"
 #include "compat/PacketDispatcher.h"
 #include "compat/hook.h"
@@ -128,6 +129,29 @@ int g_basePartyWidth = kBaseMinimumWidth;
 int g_reservedBuffWidth = 0;
 int g_requestedMinimumWidth = kBaseMinimumWidth;
 bool g_layoutDirty = false;
+// Snapshot bursts (buffer NPC) must not Invalidate/recreate every packet.
+bool g_partyUiDirty = false;
+bool g_countsDirty = false;
+DWORD g_lastPartyRecreateTick = 0;
+DWORD g_burstQuietUntil = 0;
+constexpr DWORD kPartyRecreateMinIntervalMs = 400;
+constexpr DWORD kPartyRecreateBurstIntervalMs = 1200;
+constexpr DWORD kBurstQuietMs = 900;
+constexpr int kIconLoadsPerTickNormal = 2;
+constexpr int kIconLoadsPerTickBurst = 1;
+bool g_partyBuffsEnabled = true;
+
+bool IsInBuffBurst() {
+    if (GetTickCount() < g_burstQuietUntil) {
+        return true;
+    }
+    // Large pending WZ icon queue = still in post-buffer recovery.
+    return g_pendingIconLoads.size() > 6;
+}
+
+void NoteBuffBurst() {
+    g_burstQuietUntil = GetTickCount() + kBurstQuietMs;
+}
 
 alignas(8) unsigned char g_toolTipBuffer[0x600];
 bool g_toolTipInitialized = false;
@@ -628,6 +652,13 @@ void DrawPartyBuffs(CWnd* partyWindow) {
 
 void __fastcall PartyHpDraw_Hook(void* pThis, void*, const RECT* pRect) {
     g_partyHpDraw(pThis, pRect);
+    if (!g_partyBuffsEnabled) {
+        return;
+    }
+    // Skip heavy icon draw while buffer burst is still settling (icons load in tick).
+    if (IsInBuffBurst()) {
+        return;
+    }
     __try {
         DrawPartyBuffs(reinterpret_cast<CWnd*>(pThis));
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -816,7 +847,7 @@ void PartyBuffs_UpdateSnapshot(
         const std::vector<int>& sourceIds,
         const std::vector<int>& remainingTimes,
         const std::vector<int>& totalTimes) {
-    if (characterId <= 0) {
+    if (!g_partyBuffsEnabled || characterId <= 0) {
         return;
     }
 
@@ -908,14 +939,11 @@ void PartyBuffs_UpdateSnapshot(
     }
 
     RecalculateRequestedWidth();
-
+    g_partyUiDirty = true;
+    NoteBuffBurst();
     if (ReadLocalCharacterId() == characterId) {
-        SendWidgetBuffCountsPacket();
-    }
-
-    CWnd* partyWindow = *reinterpret_cast<CWnd**>(kPartyHpSingletonAddr);
-    if (partyWindow) {
-        partyWindow->InvalidateRect(nullptr);
+        // Do not send counts on every snapshot — coalesced in OnClientTick.
+        g_countsDirty = true;
     }
 }
 
@@ -925,6 +953,10 @@ void PartyBuffs_UpdateHpPercent(int characterId, int percent) {
     }
 
     g_partyHpPercent[characterId] = (std::clamp)(percent, 0, 100);
+    if (IsInBuffBurst()) {
+        g_partyUiDirty = true;
+        return;
+    }
     CWnd* partyWindow = *reinterpret_cast<CWnd**>(kPartyHpSingletonAddr);
     if (partyWindow) {
         partyWindow->InvalidateRect(nullptr);
@@ -956,6 +988,10 @@ void PartyBuffs_UpdateTracker(
         return;
     }
     g_partyTracker[characterId] = { exp, meso };
+    if (IsInBuffBurst()) {
+        g_partyUiDirty = true;
+        return;
+    }
     CWnd* partyWindow = *reinterpret_cast<CWnd**>(kPartyHpSingletonAddr);
     if (partyWindow) {
         partyWindow->InvalidateRect(nullptr);
@@ -972,6 +1008,10 @@ void RecreatePartyWindowSafe(CWnd* partyWindow) {
 }
 
 void PartyBuffs_OnClientTick() {
+    if (!g_partyBuffsEnabled) {
+        return;
+    }
+
     // Re-queue timed-out "missing" icons so early WZ misses do not stay blank forever.
     const DWORD nowRetry = GetTickCount();
     for (auto itRetry = g_missingIconRetryAt.begin(); itRetry != g_missingIconRetryAt.end(); ) {
@@ -985,9 +1025,11 @@ void PartyBuffs_OnClientTick() {
         }
     }
 
+    const bool burst = IsInBuffBurst();
+    const int maxLoads = burst ? kIconLoadsPerTickBurst : kIconLoadsPerTickNormal;
     int loadedThisTick = 0;
     auto it = g_pendingIconLoads.begin();
-    while (it != g_pendingIconLoads.end() && loadedThisTick < 4) {
+    while (it != g_pendingIconLoads.end() && loadedThisTick < maxLoads) {
         int sourceId = *it;
         it = g_pendingIconLoads.erase(it);
 
@@ -1058,23 +1100,36 @@ void PartyBuffs_OnClientTick() {
 
     if (buffsChanged) {
         RecalculateRequestedWidth();
+        g_partyUiDirty = true;
     }
 
     CWnd* partyWindow = *reinterpret_cast<CWnd**>(kPartyHpSingletonAddr);
 
-    if ((loadedThisTick > 0 || buffsChanged) && partyWindow) {
+    // During buffer burst: keep dirty flags but do not Invalidate/Destroy every tick.
+    if ((loadedThisTick > 0 || buffsChanged || g_partyUiDirty) && partyWindow && !burst) {
+        g_partyUiDirty = false;
         partyWindow->InvalidateRect(nullptr);
     }
 
-    if (g_layoutDirty && partyWindow) {
-        g_layoutDirty = false;
-        RecreatePartyWindowSafe(partyWindow);
+    if (g_layoutDirty && partyWindow && !burst) {
+        const DWORD nowLayout = GetTickCount();
+        const DWORD minInterval = (g_pendingIconLoads.size() > 2)
+                ? kPartyRecreateBurstIntervalMs
+                : kPartyRecreateMinIntervalMs;
+        if (g_lastPartyRecreateTick == 0 ||
+                (nowLayout - g_lastPartyRecreateTick) >= minInterval) {
+            g_layoutDirty = false;
+            g_lastPartyRecreateTick = nowLayout;
+            RecreatePartyWindowSafe(partyWindow);
+        }
+        // else: keep dirty; next tick retries after interval
     }
 
     static DWORD lastCountSend = 0;
     const DWORD now = GetTickCount();
-    if (now - lastCountSend >= 3000) {
+    if (g_countsDirty || (now - lastCountSend >= 3000)) {
         lastCountSend = now;
+        g_countsDirty = false;
         SendWidgetBuffCountsPacket();
     }
 
@@ -1110,6 +1165,27 @@ void __fastcall PartyHpCreate_Hook(void* pThis, void*) {
 }
 
 void AttachPartyBuffsMod() {
+    // Resolve config beside ijl15.dll (cwd may be wrong for shortcuts).
+    char dllPath[MAX_PATH]{};
+    std::string configPath = "config.ini";
+    HMODULE self = nullptr;
+    if (GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(&AttachPartyBuffsMod),
+            &self) &&
+        self &&
+        GetModuleFileNameA(self, dllPath, MAX_PATH) != 0) {
+        std::string path(dllPath);
+        const auto slash = path.find_last_of("\\/");
+        if (slash != std::string::npos) {
+            configPath = path.substr(0, slash + 1) + "config.ini";
+        }
+    }
+    INIReader reader(configPath);
+    if (reader.ParseError() == 0) {
+        g_partyBuffsEnabled = reader.GetBoolean("optional", "enablePartyBuffs", true);
+    }
+
     Patch4(kPartyHpMinimumWidthImmediateAddr, kBaseMinimumWidth);
 
     // CUIPartyHP uses the basic-font height at these sites to calculate both
@@ -1181,10 +1257,8 @@ void PartyBuffs_UpdateCounts(int characterId, int count, const unsigned char* pa
 
     if (changed) {
         RecalculateRequestedWidth();
-        CWnd* partyWindow = *reinterpret_cast<CWnd**>(kPartyHpSingletonAddr);
-        if (partyWindow) {
-            partyWindow->InvalidateRect(nullptr);
-        }
+        g_partyUiDirty = true;
+        NoteBuffBurst();
     }
 }
 

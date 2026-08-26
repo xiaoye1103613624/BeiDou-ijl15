@@ -37,6 +37,7 @@
 #include "compat/ztl/ztl.h"
 #include "compat/ztl/zcom.h"
 #include "sidetoolbar/SideToolbarApi.h"
+#include "SetItemApi.h"
 #include <windows.h>
 #include <climits>
 #include <cstdio>
@@ -54,13 +55,13 @@ namespace {
 // Forbidden redeploy: ENTER-RED 0F244A5D / 73559AC5 / incomplete PEER_COMPLETE EADEF4A8.
 // PEER_COMPLETE remapped aux imm but left ApplyEquip at 56–62 + wear_fn → native
 // aEquipped[54/55] aliases cash face/eye (−102/−103); aEquipped[62] OOB multi-ghost.
-constexpr const char* kStamp = "ADDON_CLASSIC_POCKET_AUX_20260818";
+constexpr const char* kStamp = "ADDON_AUX62_REJECT_R31F_20260825";
 // Feature gates (must be near top — used before EnsureLayer/Teardown).
 // 2026-08-08c: GetSet+ApplyCaves kept; UiHooks ON (anti-pierce / bag dbl / totem full).
 // Layer+OnTick OFF this ship — linking them pulled ~1500672 (BAAD-adjacent). Park OFF.
 constexpr bool kEnableAddonLayer = true;
 constexpr bool kEnableAddonOnTick = true;
-constexpr bool kEnableAddonPark = false;
+constexpr bool kEnableAddonPark = true;
 constexpr bool kEnableAddonUiHooks = true;
 constexpr bool kEnableAddonGetSetHooks = true;
 constexpr bool kEnableAddonApplyCaves = true;
@@ -108,11 +109,12 @@ static bool DetectCd64ExeLite() {
     return bound == 0xC1 && applyMax == 0x3E;
 }
 constexpr int kEquipUIType = 1; // CUIEquip ctor sub_7FDE7C: CUIWnd(nUIType=1, …)
-// SendBusy watchdog: never leave ctx[2089] stuck if enableActions is missed.
+// SendBusy watchdog: Addon-armed wear/unequip ONLY (CtxArmSendBusyWatch).
+// NEVER steal native Sort/Gather busy after 400ms — that caused 整理假死 (R18).
 // Age uses GetTickCount (not game GetUpdateTime) — game clock AV/GS before field.
-// Narrow unstick only — do NOT clear mid-flight inventory ops (was 50/80ms).
 constexpr DWORD kSendBusyUnstickAgeMs = 400u;
 constexpr ULONGLONG kSendBusyWatchdogMs = 1500ull;
+constexpr ULONGLONG kNativeBusySafetyMs = 8000ull; // last-resort if enableActions lost
 constexpr int kKeyConfigUIType = 5; // CUIKeyConfig — never dock
 constexpr uintptr_t kAddr_CUIStatusBar_Chat = 0x008DB070;
 constexpr uintptr_t kAddr_DraggableItem_OnDropped = 0x004EF140;
@@ -146,16 +148,23 @@ constexpr int kCtxDw_LastSendTick = 2090;
 constexpr int kPocketBp = 33;   // 116xxxx Po → Addon row3
 // Aux 134/135 → BP62/−62 (true split from shield −10). Tip restored 2026-08-04.
 constexpr int kSubWeaponBp = 62; // 134/135 aux — sidecar with BP56–61
+constexpr int kCapeBp = 9;       // 110xxxx Sr — cash mirror −109
 constexpr int kAndroidBp = 60;  // 166xxxx Dr — sidecar (NOT pet BP21)
 constexpr int kHeartBp = 61;    // 167xxxx Ht — sidecar (NOT pet BP22)
 // BP54/55 MUST be sidecar on vanilla 52-slot aEquipped: native −55 aliases cash eye (−103).
 constexpr int kSidecarBpMin = 54; // badge + totem1… + sidecar … + aux
 constexpr int kSidecarBpMax = 62; // incl. aux −62; jg-allow/apply caves must match
-// Legacy red9/10 coords kept only for dead-code path removal / probe logs.
-constexpr int kRed9X = 104;
-constexpr int kRed9Y = 200;
-constexpr int kRed10X = 137;
-constexpr int kRed10Y = 200;
+// Classic Equip overlay seats (red9 pocket / red10 aux). Shoulder red8=(137,101).
+// Overlay-only paint: park GetSlotXY off-panel so native never double-draws BP33
+// even if draw-skip is punched. HitTest stays on-panel via shoulders + Addon HitSeat.
+constexpr int kRed9X = 5;    // pocket BP33 ≈ hat-left empty (was 104,200)
+constexpr int kRed9Y = 35;
+constexpr int kRed10X = 5;   // aux BP62 ≈ cape-left column (no collide red8)
+constexpr int kRed10Y = 101;
+constexpr int kPocketUiX = kRed9X;
+constexpr int kPocketUiY = kRed9Y;
+constexpr int kAuxUiX = kRed10X;
+constexpr int kAuxUiY = kRed10Y;
 // GBK: "物品与槽位不符"
 static const char kMismatchSeatMsg[] = {
     '\xCE', '\xEF', '\xC6', '\xB7', '\xD3', '\xEB', '\xB2', '\xDB', '\xCE', '\xBB',
@@ -174,6 +183,12 @@ static const char kOccupySeatMsg[] = {
     '\xD0', '\xB6', '\xCF', '\xC2', '\xD4', '\xD9', '\xB4', '\xA9', '\xB4', '\xF7',
     '\0'
 };
+// GBK: "背包已满，无法卸下装备"
+static const char kBagFullUnequipMsg[] = {
+    '\xB1', '\xB3', '\xB0', '\xFC', '\xD2', '\xD1', '\xC2', '\xFA', '\xA3', '\xAC',
+    '\xCE', '\xDE', '\xB7', '\xA8', '\xD0', '\xB6', '\xCF', '\xC2', '\xD7', '\xB0',
+    '\xB1', '\xB8', '\0'
+};
 
 // Real CUIEquip (NOT KeyConfig BED650). PetEquip = BED648 (177×181 @ Equip+172).
 constexpr uintptr_t kCUIEquipSingleton = 0x00BED64C;
@@ -186,21 +201,26 @@ constexpr uintptr_t kCUIEquip_VTable = 0x00B389E8;
 constexpr uintptr_t kCUIKeyConfig_VTable = 0x00B397B8;
 constexpr uintptr_t kAddr_CharacterData_GetItem = 0x004282F7;
 constexpr uintptr_t kAddr_SendChangeSlotPosition = 0x00A0900A;
+// OnDropped sub_4F4BB7 swap/wear — opcode 86, NOT guarded by A0900A (opcode 71).
+constexpr uintptr_t kAddr_SendChangeSwap = 0x00A09221;
 constexpr uintptr_t kAddr_TSecType_long_GetData = 0x0042873D;
 constexpr uintptr_t kAddr_ShowItemToolTip = 0x008F5B20;
 constexpr uintptr_t kAddr_InputSystem = 0x00BEC33C;
 
 // Main Equip slot tables — park Addon-owned BPs off-panel (red 9/10 = BP54/55).
 constexpr uintptr_t kGetSlotXyTable = 0x00BE2580; // index = BP-1
+constexpr uintptr_t kCashSlotXyTable = 0x00BE23F0; // flag==0 draw XY (index = BP-1)
 constexpr uintptr_t kClassicHitTestTable = 0x00BE2260; // index = BP-1 (PE; ≤49 only)
 // FORBIDDEN: 0x00BE27E0 = CUIKeyConfig::s_aptKeyPos (IDA). Not an Equip table.
 constexpr int kOffPanelX = -2000;
 constexpr int kOffPanelY = -2000;
 
-constexpr int kPanelW = 141; // Addon dock width (classic Equip is covered to the left)
-constexpr int kPanelH = 168; // 2×4 only — pocket/aux moved to classic Equip
+constexpr int kPanelW = 152; // Addon dock width (addon-equipment-backgrnd 152×105)
+constexpr int kPanelH = 105; // 2×4 only — pocket/aux moved to classic Equip
 constexpr int kCoverH = 304; // cover Equip so classic extra icons can paint
 constexpr int kIcon = 32;
+// IWzCanvas full-frame clear — 0x00000000 leaves stale icon pixels (aux −62 ghost).
+constexpr unsigned kCanvasClear = 0x00FFFFFFu;
 // PetEquip CreateWnd z=10; keep Addon well above within Equip overlay tree.
 constexpr int kLayerZ = 3000;
 
@@ -210,22 +230,23 @@ struct Seat {
     int sy;
 };
 
-// Addon dock 2×4 (pocket/aux live on classic Equip, not row3).
+// Addon dock 2×4 on LEFT of classic Equip (pocket/aux still on classic).
+// Seat XY aligned to addon-equipment-backgrnd.png slot frames (152×105, rows y≈32/65).
 constexpr Seat kSeats[] = {
-    {55, 6, 33},
-    {56, 39, 33},
-    {57, 72, 33},
-    {58, 105, 33},
-    {59, 6, 90},
-    {60, 39, 90},
-    {61, 72, 90},
-    {54, 105, 90},
+    {55, 11, 32},
+    {56, 44, 32},
+    {57, 77, 32},
+    {58, 110, 32},
+    {59, 11, 65},
+    {60, 44, 65},
+    {61, 77, 65},
+    {54, 110, 65},
 };
 
-// Classic Equip extra seats (IDA GetBodyPartFromPoint hook + overlay icons).
+// Aux −62 + pocket −33: Addon overlay only (native skips pocket; BP62 OOB).
 constexpr Seat kClassicSeats[] = {
-    {33, 104, 200}, // Pocket 116 → −33
-    {62, 137, 200}, // Aux 134|135 → −62 (never 109 / never −10)
+    {33, kPocketUiX, kPocketUiY}, // Pocket 116 → −33 (red 1)
+    {62, kAuxUiX, kAuxUiY},       // Aux 134|135 → −62 (red 6)
 };
 
 IWzGr2DLayerPtr g_layer;
@@ -274,6 +295,8 @@ using OnDroppedFn = int(__thiscall*)(void* pThis, void* pFrom, void* pTo, int rx
 OnDroppedFn g_OnDroppedOrig =
         reinterpret_cast<OnDroppedFn>(kAddr_DraggableItem_OnDropped);
 bool g_dropHooked = false;
+bool g_sendChangeHooked = false;
+bool g_sendChangeSwapHooked = false;
 
 using DestroyGameUiFn = int(__thiscall*)(void* pCtx);
 DestroyGameUiFn g_DestroyGameUiOrig =
@@ -307,8 +330,13 @@ auto ZRef_Assign = reinterpret_cast<ZRefAssignFn>(kAddr_ZRef_Assign);
 
 using SendChangeSlotPositionFn =
         void(__thiscall*)(void* pCtx, int nTI, int nOldPos, int nNewPos, int nCount);
-auto SendChangeSlotPosition =
+SendChangeSlotPositionFn g_SendChangeOrig =
         reinterpret_cast<SendChangeSlotPositionFn>(kAddr_SendChangeSlotPosition);
+
+using SendChangeSwapFn = void(__thiscall*)(void* pCtx, int nOldPos, int nNewPos, int nCount,
+                                           int nFlag);
+SendChangeSwapFn g_SendChangeSwapOrig =
+        reinterpret_cast<SendChangeSwapFn>(kAddr_SendChangeSwap);
 
 // Native wear@4F1C2D(this, bagOrEquipSlot, bodyPart) → SendChangeSlotPosition(..., -1).
 using WearFromDraggableFn = int(__thiscall*)(void* pDrag, int nSlot, int nBodyPart);
@@ -529,19 +557,181 @@ void ClearSidecarBp(int bp) {
     }
 }
 
+// Soft detach: suppress Addon paint only — do NOT null g_sidecarZRef (invent AV).
+bool g_paintSuppressBp[63]{};
+
+void ClearPaintSuppress(int bp) {
+    if (bp > 0 && bp < 63) {
+        g_paintSuppressBp[bp] = false;
+    }
+}
+
+void SoftDetachEquippedVisual(int bp) {
+    if (bp > 0 && bp < 63) {
+        g_paintSuppressBp[bp] = true;
+    }
+}
+
+bool IsCashAliasBp(int bp); // defined below
+
+// Safe visual clear ONLY after bag confirmed the unequipped item (see ghost heal).
+// Sidecar → local ZRef. Pocket −33 → native SetItem null (refcount-safe once in bag).
+// NEVER call before SendChange ack — premature null destroys ZRef → item loss.
+void WipeNativeCashMirror(int bp) {
+    if (bp <= 0 || !IsCashAliasBp(bp)) {
+        return;
+    }
+    void* pChar = GetLocalCharacterData();
+    if (!pChar || !g_SetItemOrig) {
+        return;
+    }
+    __try {
+        g_SetItemOrig(pChar, 1, -(bp + 100), nullptr, nullptr);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// CD64: native may keep −133/−162 ZRef aliases; cash draw at BE23F0[0]=(38,35) bleeds
+// subweapon into hat row after normal hat unequip. Wipe mirrors when occupied.
+// SAFETY: only null −(bp+100) cash mirrors — never −bp / never positive bag slots.
+// R30: skip wipe when −bp holds a real 134/135 (aux truth seat); only clear orphan −162.
+void SyncAddonOverlayCashWipe() {
+    void* pChar = GetLocalCharacterData();
+    if (!pChar || !g_GetItemOrig) {
+        return;
+    }
+    ZRefItemOut out{};
+    __try {
+        g_GetItemOrig(pChar, &out, 1, -(kPocketBp + 100));
+        if (out.pItem) {
+            WipeNativeCashMirror(kPocketBp);
+        }
+        // Aux: server+client always use −62. Orphan −162 ghosts only — wipe mirror
+        // when −62 already has the item OR −62 empty (stale cash alias).
+        out = {};
+        g_GetItemOrig(pChar, &out, 1, -(kSubWeaponBp + 100));
+        if (out.pItem) {
+            WipeNativeCashMirror(kSubWeaponBp);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+void ForceClearEquippedVisual(int bp) {
+    ClearPaintSuppress(bp);
+    if (IsSidecarBp(bp)) {
+        ClearSidecarBp(bp);
+        WipeNativeCashMirror(bp);
+        // CD64: inventory is native aEquipped — sidecar ZRef clear alone leaves −bp
+        // ghost (aux −62 “戴不上” / hat bleed). Null native seat after bag confirm.
+        if (NativeCd64Inventory() && g_SetItemOrig) {
+            void* pChar = GetLocalCharacterData();
+            if (pChar) {
+                __try {
+                    g_SetItemOrig(pChar, 1, -bp, nullptr, nullptr);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                }
+            }
+        }
+        return;
+    }
+    if (bp == kSubWeaponBp) {
+        WipeNativeCashMirror(bp);
+        if (g_SetItemOrig) {
+            void* pChar = GetLocalCharacterData();
+            if (pChar) {
+                __try {
+                    g_SetItemOrig(pChar, 1, -kSubWeaponBp, nullptr, nullptr);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                }
+            }
+        }
+        return;
+    }
+    if (bp != kPocketBp) {
+        return;
+    }
+    void* pChar = GetLocalCharacterData();
+    if (!pChar || !g_SetItemOrig) {
+        return;
+    }
+    __try {
+        g_SetItemOrig(pChar, 1, -kPocketBp, nullptr, nullptr);
+        g_SetItemOrig(pChar, 1, -(kPocketBp + 100), nullptr, nullptr);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+bool GhostHealableBp(int bp) {
+    // Include aux BP62: SoftDetach after unequip must clear when bag confirms
+    // (same ghost class as pocket/sidecar). Never ForceClear before bag ack.
+    return IsSidecarBp(bp) || bp == kPocketBp || bp == kSubWeaponBp;
+}
+
 void ClearSidecarShadows() {
     for (int bp = kSidecarBpMin; bp <= kSidecarBpMax; ++bp) {
         ClearSidecarBp(bp);
     }
 }
 
+// Positive equip-bag slots only. Never route through sidecar (avoids ghost
+// occupancy on 52–62 when those indices are real InvResize bag cells).
+void* NativeEquipBagGetItem(void* pChar, int nSlot) {
+    if (!pChar || nSlot <= 0) {
+        return nullptr;
+    }
+    ZRefItemOut out{};
+    __try {
+        g_GetItemOrig(pChar, &out, 1, nSlot);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+    return out.pItem;
+}
+
+// CharacterData aaItemSlot[EQUIP]: this+0x44B → ZArray; count at data[-1].
+// GetItem allows positive slots 1 .. (count-1). InvResize may raise past 48.
+int EquipBagSlotCount(void* pChar) {
+    if (!pChar) {
+        return 0;
+    }
+    int n = 0;
+    __try {
+        void* pArr = *reinterpret_cast<void**>(reinterpret_cast<char*>(pChar) + 0x44B);
+        if (pArr) {
+            n = *(reinterpret_cast<int*>(pArr) - 1);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 48;
+    }
+    if (n < 2) {
+        return 48;
+    }
+    if (n > 193) {
+        return 192;
+    }
+    return n - 1;
+}
+
 void* SehGetItem(void* pChar, int nSlot) {
     if (!pChar) {
         return nullptr;
     }
+    // Positive bag: always native empty/occupied (never sidecar ghosts).
+    if (nSlot > 0) {
+        return NativeEquipBagGetItem(pChar, nSlot);
+    }
     // Sidecar first on vanilla; CD64 uses native GetItem only.
+    // R23: cash −133 (pocket) + −154..−162 empty for GetItem (no dual ZRef icon).
+    // Truth = −bp (sidecar / pocket normal).
     if (!NativeCd64Inventory()) {
-        if (const int bp = SidecarBpFromSlot(nSlot)) {
+        if (nSlot == -(kPocketBp + 100)) {
+            return nullptr;
+        }
+        if (nSlot <= -(kSidecarBpMin + 100) && nSlot >= -(kSidecarBpMax + 100)) {
+            return nullptr;
+        }
+        if (const int bp = SidecarBpFromSlotNormal(nSlot)) {
             return g_sidecarZRef[bp][1];
         }
     }
@@ -556,13 +746,30 @@ void* SehGetItem(void* pChar, int nSlot) {
 
 void* __fastcall GetItem_Sidecar_hook(void* pChar, void* /*edx*/, ZRefItemOut* out, int nTI,
                                      int nPOS) {
+    // R29 DUALFIX: hide cash mirrors for Addon-painted seats (CD64 + vanilla).
+    // Prevents −133/−162 native cash draw at cash-hat (38,35) after hat unequip.
+    if (nTI == 1 && nPOS == -(kPocketBp + 100)) {
+        if (out) {
+            out->unused = nullptr;
+            out->pItem = nullptr;
+        }
+        return out;
+    }
+    if (nTI == 1 && nPOS <= -(kSidecarBpMin + 100) && nPOS >= -(kSidecarBpMax + 100)) {
+        if (out) {
+            out->unused = nullptr;
+            out->pItem = nullptr;
+        }
+        return out;
+    }
     if (NativeCd64Inventory()) {
         return g_GetItemOrig(pChar, out, nTI, nPOS);
     }
-    // Cash seats (−156..−161): fall through to native (usually empty). Addon paint /
-    // tips use normal −bp. Prevents CUIEquip dual-tip same-ZRef crash on 点装 hover.
-    // Keep marker string reachable for static enter-risk gate.
     if (kGetItemNormalMarker[0] == 0) {
+        return g_GetItemOrig(pChar, out, nTI, nPOS);
+    }
+    // Positive bag slots: never invent sidecar occupancy (52–62 are bag cells).
+    if (nTI == 1 && nPOS > 0) {
         return g_GetItemOrig(pChar, out, nTI, nPOS);
     }
     const int bp = (nTI == 1) ? SidecarBpFromSlotNormal(nPOS) : 0;
@@ -589,6 +796,28 @@ int __fastcall SetItem_Sidecar_hook(void* pChar, void* /*edx*/, int nTI, int nPO
     if (NativeCd64Inventory()) {
         return g_SetItemOrig(pChar, nTI, nPOS, z0, pItem);
     }
+    // Pocket −33: native aEquipped. Cash invent −133 → alias into −33 (one icon).
+    if (nTI == 1 && (nPOS == -kPocketBp || nPOS == -(kPocketBp + 100))) {
+        if (nPOS == -(kPocketBp + 100)) {
+            // Remap cash mirror invent into normal pocket seat (no dual ZRef).
+            const int r = g_SetItemOrig(pChar, nTI, -kPocketBp, z0, pItem);
+            if (!pItem) {
+                ForceClearEquippedVisual(kPocketBp);
+            } else {
+                ClearPaintSuppress(kPocketBp);
+            }
+            WipeNativeCashMirror(kPocketBp);
+            return r;
+        }
+        const int r = g_SetItemOrig(pChar, nTI, nPOS, z0, pItem);
+        if (!pItem) {
+            ForceClearEquippedVisual(kPocketBp);
+        } else {
+            ClearPaintSuppress(kPocketBp);
+        }
+        WipeNativeCashMirror(kPocketBp);
+        return r;
+    }
     int bp = (nTI == 1) ? SidecarBpFromSlot(nPOS) : 0;
     // STATS golden: no Sidecar SetItem REMAP path / string.
     if (bp) {
@@ -605,9 +834,16 @@ int __fastcall SetItem_Sidecar_hook(void* pChar, void* /*edx*/, int nTI, int nPO
                             reinterpret_cast<volatile LONG*>(reinterpret_cast<char*>(pItem) + 4));
                 }
             }
-            char buf[120];
-            sprintf_s(buf, "Sidecar SetItem slot=%d bp=%d p=%p stamp=%s", nPOS, bp, pItem, kStamp);
-            Dbg(buf);
+            // New item or clear → stop ghost-suppress so paint matches storage.
+            if (!pItem) {
+                ForceClearEquippedVisual(bp);
+            } else {
+                ClearPaintSuppress(bp);
+            }
+            // Wipe native cash mirror (−133/−154..−162) so CUIEquip never dual-draws
+            // with Addon overlay (口袋/副手叠图标).
+            WipeNativeCashMirror(bp);
+            // Hot path — no Dbg/fopen (invent flood / 整理 would stall the client).
             return 1;
         }
     }
@@ -878,7 +1114,7 @@ void InstallSidecarApplyCave(bool quiet = false) {
 }
 
 int SehDecodeItemId(void* pItem) {
-    if (!pItem) {
+    if (!pItem || reinterpret_cast<uintptr_t>(pItem) < 0x10000u) {
         return 0;
     }
     __try {
@@ -940,9 +1176,13 @@ void SehClearTip() {
     }
 }
 
-bool SehShowTip(int sx, int sy, void* item) {
+bool SehShowTip(int sx, int sy, void* item, bool clearFirst) {
     __try {
-        TT_Clear(g_tipBuf);
+        // Every-frame TT_Clear nukes SetItem companion tip (ClearToolTip hook → HideSetTooltip).
+        // Only Clear on first show / seat change; refresh calls ShowItemToolTip alone.
+        if (clearFirst) {
+            TT_Clear(g_tipBuf);
+        }
         ShowItemToolTip(g_tipBuf, sx + 16, sy, item, nullptr, nullptr, 0, 0, 0);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -956,9 +1196,13 @@ bool SehShowTip(int sx, int sy, void* item) {
 // Incomplete totem / rejected wear correlates with global dblclick freeze via
 // stuck busy — NOT via totem-set rules. Unstick aggressively on ALL unequip paths.
 ULONGLONG g_sendBusyArmedAt = 0;
-// After Addon unequip SendChange: if enableActions-only (server source-null), clear
-// local sidecar ghost — never rely on equipped mode-3 (addMovement=2 tip hang).
+// Native Sort/Gather busy seen-at (only for 8s safety clear — never 400ms steal).
+ULONGLONG g_nativeBusySeenAt = 0;
+// After Addon unequip SendChange: ghost-heal only when bag got the item AND seat
+// still paints (enableActions-only / sidecar lag). Never optimistic ForceClear.
 int g_pendingUnequipBp = 0;
+int g_pendingUnequipDest = 0;
+int g_pendingUnequipItemId = 0;
 ULONGLONG g_pendingUnequipAt = 0;
 
 bool CtxUnstickSendBusyEx(void* pCtx, bool forceLog, DWORD minAgeMs) {
@@ -970,20 +1214,33 @@ bool CtxUnstickSendBusyEx(void* pCtx, bool forceLog, DWORD minAgeMs) {
         auto* dw = reinterpret_cast<DWORD*>(pCtx);
         if (!dw[kCtxDw_SendBusy]) {
             g_sendBusyArmedAt = 0;
+            g_nativeBusySeenAt = 0;
             return false;
         }
         // Wall-clock age only — do NOT call GetUpdateTime@987257 (boot /GS risk).
         if (minAgeMs > 0) {
+            // R18: age-gated unstick is Addon-armed ONLY. Native Sort/Gather sets
+            // ctx[2089] without CtxArmSendBusyWatch — stealing it mid-整理 left the
+            // client waiting forever (假死) while invent/enableActions raced.
             if (g_sendBusyArmedAt == 0) {
-                g_sendBusyArmedAt = GetTickCount64();
-                return false;
-            }
-            if (GetTickCount64() - g_sendBusyArmedAt < minAgeMs) {
+                if (g_nativeBusySeenAt == 0) {
+                    g_nativeBusySeenAt = GetTickCount64();
+                }
+                // Safety: only if enableActions truly never arrives (8s).
+                if (GetTickCount64() - g_nativeBusySeenAt < kNativeBusySafetyMs) {
+                    return false;
+                }
+                char buf[160];
+                sprintf_s(buf, "UNSTICK native SendBusy safety %llums stamp=%s",
+                          kNativeBusySafetyMs, kStamp);
+                Dbg(buf);
+            } else if (GetTickCount64() - g_sendBusyArmedAt < minAgeMs) {
                 return false;
             }
         }
         dw[kCtxDw_SendBusy] = 0;
         g_sendBusyArmedAt = 0;
+        g_nativeBusySeenAt = 0;
         if (forceLog) {
             char buf[160];
             sprintf_s(buf, "UNSTICK SendBusy min=%u stamp=%s", minAgeMs, kStamp);
@@ -1012,6 +1269,7 @@ void CtxArmSendBusyWatch(void* pCtx) {
     __try {
         if (reinterpret_cast<DWORD*>(pCtx)[kCtxDw_SendBusy]) {
             g_sendBusyArmedAt = GetTickCount64();
+            g_nativeBusySeenAt = 0; // Addon owns this busy cycle
         } else {
             g_sendBusyArmedAt = 0;
         }
@@ -1067,6 +1325,10 @@ bool CtxSendBusySet(void* pCtx) {
     }
 }
 
+bool CanWearItemOnBp(int itemId, int bp); // defined after ItemMatchesSeat
+int BpFromEquippedSlot(int slot);         // defined before SehSendWear
+void ChatHint(const char* msg);           // defined before SendChange guard
+
 bool SehSendUnequip(void* pCtx, int slot, int dest) {
     if (!pCtx || dest <= 0 || slot >= 0) {
         return false;
@@ -1078,7 +1340,9 @@ bool SehSendUnequip(void* pCtx, int slot, int dest) {
     }
     __try {
         // Native wear/unequip uses nCount = -1 (see wear@4F1C2D → A0900A).
-        SendChangeSlotPosition(pCtx, 1, slot, dest, -1);
+        if (g_SendChangeOrig) {
+            g_SendChangeOrig(pCtx, 1, slot, dest, -1);
+        }
         const bool busy = CtxSendBusySet(pCtx);
         CtxArmSendBusyWatch(pCtx);
         return busy;
@@ -1163,8 +1427,18 @@ void ApplyEquipOpenXyRemap(int bp, int x, int y) {
 }
 
 void WireMainPocketSubSlots() {
-    // Classic red9/10: GetSlotXY + DLL HitTest. BP62 has no GetSlotXY slot (OOB).
-    PatchSlotXy(kGetSlotXyTable, kPocketBp - 1, kRed9X, kRed9Y);
+    SyncAddonOverlayCashWipe();
+    // Overlay-only: park pocket GetSlotXY off-panel (native Draw uses GetSlotXY).
+    // Must patch BOTH BE2580 and BE23F0 — cash draw path still painted pocket at
+    // on-panel coords → dual icon with Addon overlay.
+    // HitTest stays at kRed9/kRed10 for GetBodyPartFromPoint + Addon HitSeat.
+    // BP62: NEVER PatchSlotXy index 61 — tables are 50 slots (BP1–50); OOB write
+    // corrupts BE2580+ and caused native/aux dual-draw. Native draw loop max 55 +
+    // DrawHasItem empty for 62; Addon overlay is sole on-panel aux icon.
+    // Aux HT is hardcoded in shoulders GetBodyPartFromPoint_hook (kAuxUiX/Y) —
+    // do NOT Shoulder_SetExtHitTestSlot(61) (g_hitTestExt size 60; index 61 no-op).
+    PatchSlotXy(kGetSlotXyTable, kPocketBp - 1, kOffPanelX, kOffPanelY);
+    PatchSlotXy(kCashSlotXyTable, kPocketBp - 1, kOffPanelX, kOffPanelY);
     PatchClassicOrExtHitTest(kPocketBp - 1, kRed9X, kRed9Y);
     Shoulder_SetExtHitTestSlot(kPocketBp - 1, kRed9X, kRed9Y);
 }
@@ -1172,6 +1446,23 @@ void WireMainPocketSubSlots() {
 bool IsLiveAddonBp(int bp) {
     // Packet/paint live seats: Addon 2×4 + classic pocket/aux.
     return bp == 54 || bp == 55 || bp == kPocketBp || bp == kSubWeaponBp || IsSidecarBp(bp);
+}
+
+// Shoulder BP20/51/52–55 packet unequip — must mirror shoulders NeedsPacketUnequipBp.
+// EquipAddon OnDoubleClicked is outermost (LazyCompat after ShoulderUnequip) and
+// g_OnDblOrig points at native PE, NOT Shoulder_RehookDblClickUnequipOutermost.
+static bool NeedsPacketUnequipBp(int bp) {
+    return bp == 20 || bp == 51 || (bp >= 52 && bp <= 55);
+}
+
+static bool ShouldTryPacketUnequipBp(int bp) {
+    if (bp <= 0) {
+        return false;
+    }
+    if (IsSidecarBp(bp) || bp == kPocketBp || bp == kSubWeaponBp || IsLiveAddonBp(bp)) {
+        return true;
+    }
+    return NeedsPacketUnequipBp(bp);
 }
 
 bool IsMainPocketSubBp(int bp) {
@@ -1237,6 +1528,45 @@ bool IsPetEquipItemId(int itemId) {
     return p == 180 || p == 181 || p == 182 || p == 183;
 }
 
+// Vanilla is_correct_bodypart pet seats (180–183). Character cash/fashion must never
+// SendChange here — AbleToWear ignores bodypart on the success path.
+bool IsPetSeatBp(int bp) {
+    switch (bp) {
+    case 14:
+    case 21:
+    case 22:
+    case 23:
+    case 24:
+    case 25:
+    case 26:
+    case 27:
+    case 28:
+    case 29:
+    case 30:
+    case 31:
+    case 32:
+    case 33:
+    case 34:
+    case 35:
+    case 36:
+    case 37:
+    case 38:
+    case 39:
+    case 40:
+    case 41:
+    case 42:
+    case 43:
+    case 44:
+    case 45:
+    case 46:
+    case 47:
+    case 48:
+        return true;
+    default:
+        return false;
+    }
+}
+
 int ExpectedBpForItemId(int itemId) {
     if (itemId <= 0 || IsPetEquipItemId(itemId)) {
         return 0;
@@ -1273,11 +1603,48 @@ bool ItemMatchesSeat(int itemId, int seatBp) {
     }
 }
 
+// Central guard: pocket −33 = 116 only; aux −62 = 134|135 only. Blocks native
+// OnDropped / OnDoubleClicked / wear_fn bypass before any SendChange (−33/−62).
+bool BodypartAllowsItem(int itemId, int bp); // defined below
+
+bool CanWearItemOnBp(int itemId, int bp) {
+    if (itemId <= 0 || bp <= 0) {
+        return false;
+    }
+    if (bp == kPocketBp) {
+        return (itemId / 10000) == 116;
+    }
+    if (bp == kSubWeaponBp) {
+        const int p = itemId / 10000;
+        return p == 134 || p == 135;
+    }
+    if (bp == kCapeBp) {
+        return (itemId / 10000) == 110; // cash cape −109 / normal −9
+    }
+    if (IsLiveAddonBp(bp)) {
+        return ItemMatchesSeat(itemId, bp);
+    }
+    return BodypartAllowsItem(itemId, bp);
+}
+
 // Vanilla is_correct_bodypart (hooked): type must match seat. Gender=2 skips sex gate.
 // Critical: AbleToWear only checks level/job — wear_fn does NOT re-check bodypart
 // on the success path, so a bad HitTest (e.g. ring→hat) would SendChange unchecked.
 bool BodypartAllowsItem(int itemId, int bp) {
     if (itemId <= 0 || bp <= 0) {
+        return false;
+    }
+    const int prefix = itemId / 10000;
+    // Hard split: character gear never on pet seats; pet gear never on character seats
+    // for Addon/pocket/aux (vanilla IsCorrectBodypart handles classic otherwise).
+    // Exception: pocket 116 reuses BP33 (−33) — same number as pet#2 pouch seat.
+    if (IsPetSeatBp(bp)) {
+        if (bp == kPocketBp && prefix == 116) {
+            return true;
+        }
+        return IsPetEquipItemId(itemId);
+    }
+    if (IsPetEquipItemId(itemId)) {
         return false;
     }
     // Addon seats: our map is authoritative (vanilla never knew 54–62/33 aux).
@@ -1306,12 +1673,26 @@ bool SehSendWear(void* pCtx, int bagSlot, int equippedSlot) {
     if (!pCtx || bagSlot <= 0 || equippedSlot >= 0) {
         return false;
     }
+    void* pChar = GetLocalCharacterData();
+    const int itemId = SehDecodeItemId(SehGetItem(pChar, bagSlot));
+    const int bp = BpFromEquippedSlot(equippedSlot);
+    if (!CanWearItemOnBp(itemId, bp)) {
+        ChatHint(kMismatchSeatMsg);
+        char buf[180];
+        sprintf_s(buf, "SehSendWear guard id=%d dst=%d bp=%d stamp=%s", itemId, equippedSlot, bp,
+                  kStamp);
+        Dbg(buf);
+        CtxForceClearSendBusy(pCtx);
+        return false;
+    }
     if (!CtxPrepareSend(pCtx)) {
         CtxForceClearSendBusy(pCtx);
         return false;
     }
     __try {
-        SendChangeSlotPosition(pCtx, 1, bagSlot, equippedSlot, -1);
+        if (g_SendChangeOrig) {
+            g_SendChangeOrig(pCtx, 1, bagSlot, equippedSlot, -1);
+        }
         const bool busy = CtxSendBusySet(pCtx);
         if (busy) {
             CtxArmSendBusyWatch(pCtx);
@@ -1331,12 +1712,25 @@ bool SehSendMove(void* pCtx, int srcSlot, int dstSlot) {
     if (!pCtx || srcSlot == 0 || dstSlot == 0 || srcSlot == dstSlot) {
         return false;
     }
+    if (dstSlot < 0) {
+        void* pChar = GetLocalCharacterData();
+        const int itemId = SehDecodeItemId(SehGetItem(pChar, srcSlot));
+        const int dstBp = BpFromEquippedSlot(dstSlot);
+        if (!CanWearItemOnBp(itemId, dstBp)) {
+            ChatHint(kMismatchSeatMsg);
+            CtxForceClearSendBusy(pCtx);
+            Dbg("SehSendMove guard pocket/aux mismatch");
+            return false;
+        }
+    }
     if (!CtxPrepareSend(pCtx)) {
         CtxForceClearSendBusy(pCtx);
         return false;
     }
     __try {
-        SendChangeSlotPosition(pCtx, 1, srcSlot, dstSlot, -1);
+        if (g_SendChangeOrig) {
+            g_SendChangeOrig(pCtx, 1, srcSlot, dstSlot, -1);
+        }
         const bool busy = CtxSendBusySet(pCtx);
         if (busy) {
             CtxArmSendBusyWatch(pCtx);
@@ -1350,8 +1744,29 @@ bool SehSendMove(void* pCtx, int srcSlot, int dstSlot) {
     }
 }
 
+// Vanilla WearFromDraggable @4F1C2D treats these as pet#2 seats (SP 877/879/880).
+// Pocket 116 reuses −33 — never enter native wear for these BPs.
+bool IsVanillaPetAliasedBp(int bp) {
+    return bp == 33 || bp == 34 || bp == 47;
+}
+
+// CUIEquip / CUIPetEquip IUIMsgHandler is CWnd+4 (see OnDropped → sub_4F4BB7).
+bool IsCuiEquipHandler(void* pHandler) {
+    void* peq = SafeReadPtr(kCUIEquipSingleton);
+    return peq && pHandler && pHandler == reinterpret_cast<char*>(peq) + 4;
+}
+
+bool IsCuiPetEquipHandler(void* pHandler) {
+    void* pp = SafeReadPtr(kCUIPetEquipSingleton);
+    return pp && pHandler && pHandler == reinterpret_cast<char*>(pp) + 4;
+}
+
 int SehWearFromDraggable(void* pDrag, int bagSlot, int bp) {
     if (!pDrag || bagSlot <= 0 || bp <= 0) {
+        return 0;
+    }
+    if (IsVanillaPetAliasedBp(bp)) {
+        Dbg("SehWearFromDraggable refuse pet-aliased bp (pocket must SendChange)");
         return 0;
     }
     __try {
@@ -1431,7 +1846,12 @@ bool IsCashEquipItem(int itemId) {
 // Packet equipped slot for Addon seats.
 // CD64 CASHBASE_SEP: cash is a real separate band — wear cash → −(bp+100).
 // Vanilla sidecar still aliases cash/normal into one ZRef; keep −bp there.
+// Aux 134/135: ALWAYS −62 (server resolveFixedDst); never −162 cash band —
+// GetItem hides −162 and dual-band desync made subweapon look unequippable.
 int PacketSlotForBp(int bp, int itemId) {
+    if (bp == kSubWeaponBp) {
+        return -kSubWeaponBp;
+    }
     if (NativeCd64Inventory() && itemId > 0 && IsCashAliasBp(bp) && IsCashEquipItem(itemId)) {
         if (kCashAppendMarker[0] != 0) {
             return -(bp + 100);
@@ -1452,11 +1872,99 @@ void ChatHint(const char* msg) {
     }
 }
 
+// Shared guard for A0900A (opcode 71) and A09221 (opcode 86 / OnDropped sub_4F4BB7).
+bool ShouldBlockSlotMove(int nOldPos, int nNewPos) {
+    if (nOldPos == 0 || nNewPos == 0 || nOldPos == nNewPos) {
+        return false;
+    }
+    void* pChar = GetLocalCharacterData();
+    if (!pChar) {
+        return false;
+    }
+    if (nNewPos < 0 && nOldPos > 0) {
+        const int bp = BpFromEquippedSlot(nNewPos);
+        if (bp <= 0) {
+            return false;
+        }
+        const int itemId = SehDecodeItemId(SehGetItem(pChar, nOldPos));
+        // Fail-closed for pocket/aux: unknown bag ZRef must never SendChange −33/−62
+        // (empty decode previously fail-opened → fashion reached server as −62 WARN).
+        if (bp == kPocketBp || bp == kSubWeaponBp) {
+            if (itemId <= 0) {
+                return true;
+            }
+            return !CanWearItemOnBp(itemId, bp);
+        }
+        if (itemId <= 0) {
+            return false;
+        }
+        return !CanWearItemOnBp(itemId, bp);
+    }
+    if (nNewPos < 0 && nOldPos < 0) {
+        const int itemId = SehDecodeItemId(SehGetItem(pChar, nOldPos));
+        if (itemId <= 0) {
+            return false;
+        }
+        const int dstBp = BpFromEquippedSlot(nNewPos);
+        return dstBp > 0 && !CanWearItemOnBp(itemId, dstBp);
+    }
+    return false;
+}
+
+void __fastcall SendChange_Addon_guard_hook(void* pCtx, void* /*edx*/, int nTI, int nOldPos,
+                                            int nNewPos, int nCount) {
+    // Last-line guard: ANY bag/equip→−bp must pass CanWearItemOnBp (blocks hat→−33/−62).
+    // R31: fashion→−62 must never leave the client (server also rejects, no −62→−1 remap).
+    if (nTI == 1 && nNewPos < 0 && nOldPos != 0 && nOldPos != nNewPos) {
+        if (ShouldBlockSlotMove(nOldPos, nNewPos)) {
+            void* pChar = GetLocalCharacterData();
+            const int itemId =
+                    pChar ? SehDecodeItemId(SehGetItem(pChar, nOldPos)) : 0;
+            const int bp = BpFromEquippedSlot(nNewPos);
+            ChatHint(kMismatchSeatMsg);
+            CtxForceClearSendBusy(pCtx);
+            char buf[220];
+            sprintf_s(buf, "SendChange BLOCK id=%d src=%d -> %d bp=%d stamp=%s", itemId,
+                      nOldPos, nNewPos, bp, kStamp);
+            Dbg(buf);
+            return;
+        }
+    }
+    if (g_SendChangeOrig) {
+        g_SendChangeOrig(pCtx, nTI, nOldPos, nNewPos, nCount);
+    }
+}
+
+void __fastcall SendChangeSwap_Addon_guard_hook(void* pCtx, void* /*edx*/, int nOldPos, int nNewPos,
+                                                int nCount, int nFlag) {
+    // sub_4F4BB7 OnDropped wear/swap — bag nOldPos → equipped nNewPos via opcode 86.
+    if (nNewPos < 0 && nOldPos != 0 && nOldPos != nNewPos && ShouldBlockSlotMove(nOldPos, nNewPos)) {
+        void* pChar = GetLocalCharacterData();
+        const int itemId = pChar ? SehDecodeItemId(SehGetItem(pChar, nOldPos)) : 0;
+        const int bp = BpFromEquippedSlot(nNewPos);
+        ChatHint(kMismatchSeatMsg);
+        CtxForceClearSendBusy(pCtx);
+        char buf[240];
+        sprintf_s(buf,
+                  "SendChangeSwap BLOCK id=%d src=%d -> %d bp=%d cnt=%d stamp=%s",
+                  itemId, nOldPos, nNewPos, bp, nCount, kStamp);
+        Dbg(buf);
+        (void)nFlag;
+        return;
+    }
+    if (g_SendChangeSwapOrig) {
+        g_SendChangeSwapOrig(pCtx, nOldPos, nNewPos, nCount, nFlag);
+    }
+}
+
 // Paint / tip / HitTest: match CUIEquip::Draw @7FEC81 — prefer cash icon when
-// present, else normal. CD64: −bp and −(bp+100) are separate after CASHBASE_SEP
-// + CASH_FLOOR162. Vanilla sidecar: cash −(bp+100) still lands same ZRef.
+// present, else normal. Sidecar seats: −bp is source of truth for Addon paint
+// (cash GetItem may alias same ZRef after R20 BAGSAFE — still prefer −bp here).
 void* GetItemAtBp(int bp) {
     void* normal = GetEquippedItemAt(-bp);
+    if (IsSidecarBp(bp) || bp == kPocketBp) {
+        return normal;
+    }
     void* cash = nullptr;
     if (IsCashAliasBp(bp)) {
         cash = GetEquippedItemAt(-(bp + 100));
@@ -1480,19 +1988,12 @@ int FindEmptyEquipBagSlot() {
     if (!pChar) {
         return 0;
     }
-    // Skip 52–62: same numbers as Addon/extra BPs. Unequip→bag=57 then re-wear
-    // repeatedly produced SetItem(−61) for 119xxxx (client/server bag desync).
-    for (int s = 1; s <= 96; ++s) {
-        if (s >= 52 && s <= 62) {
-            continue;
-        }
-        if (!SehGetItem(pChar, s)) {
-            return s;
-        }
-    }
-    // Fallback if only 52–62 are free
-    for (int s = 52; s <= 62; ++s) {
-        if (!SehGetItem(pChar, s)) {
+    // R23: scan 1..InvResize bagSize. Do NOT skip 52–62 — on expanded bags those
+    // are real positive equip-tab cells. Empty check = native GetItem only
+    // (sidecar must never mark bag slots occupied → false 「背包已满」).
+    const int bagSize = EquipBagSlotCount(pChar);
+    for (int s = 1; s <= bagSize; ++s) {
+        if (!NativeEquipBagGetItem(pChar, s)) {
             return s;
         }
     }
@@ -1550,17 +2051,22 @@ bool HitAddonSeat(int ax, int ay, int& outBp) {
 }
 
 bool HitSeat(int lx, int ly, int& outBp) {
+    // Layer local: [0..kPanelW) = Addon, [kPanelW..) = classic Equip cover.
+    if (lx < kPanelW) {
+        return HitAddonSeat(lx, ly, outBp);
+    }
     for (const auto& s : kClassicSeats) {
-        if (SeatContains(s, lx, ly)) {
+        if (SeatContains(s, lx - kPanelW, ly)) {
             outBp = s.bp;
             return true;
         }
     }
-    return HitAddonSeat(lx - g_eqW, ly, outBp);
+    return false;
 }
 
 int AddonDockScreenX() {
-    return g_addonScreenX + g_eqW;
+    // Layer origin is already at the Addon left edge (RelMove -kPanelW).
+    return g_addonScreenX;
 }
 
 bool InAddonDock(int sx, int sy) {
@@ -1644,6 +2150,9 @@ void ClearTip() {
     }
     const int prevBp = g_hoverBp;
     if (g_tipReady) {
+        // Leaving Addon tip onto classic Equip: keep 套装 tip; native tip rebinds.
+        SetItem_ReleaseCustomMainTipWithoutHidingSet(
+                reinterpret_cast<CUIToolTip*>(g_tipBuf));
         SehClearTip();
     }
     g_tipOn = false;
@@ -1670,7 +2179,7 @@ void ShowTip(int bp, int sx, int sy) {
         return;
     }
     const bool first = !g_tipOn || g_hoverBp != bp;
-    if (!SehShowTip(sx, sy, item)) {
+    if (!SehShowTip(sx, sy, item, first)) {
         ClearTip();
         return;
     }
@@ -1687,14 +2196,15 @@ void Paint() {
     if (!g_canvas) {
         return;
     }
+    SyncAddonOverlayCashWipe();
     try {
         const int lw = (g_layerW > 0) ? g_layerW : (g_eqW + kPanelW);
         const int lh = (g_layerH > 0) ? g_layerH : kCoverH;
         g_canvas->DrawRectangle(0, 0, static_cast<unsigned>(lw),
-                                static_cast<unsigned>(lh), 0x00000000u);
+                                static_cast<unsigned>(lh), kCanvasClear);
 
         IWzCanvasPtr bg;
-        const int ox = g_eqW;
+        const int ox = 0; // Addon panel on LEFT of layer; Equip cover starts at kPanelW
         if (LoadBg(bg) && bg) {
             g_canvas->Copy(ox, 0, bg, vtMissing);
         } else {
@@ -1710,6 +2220,9 @@ void Paint() {
             return;
         }
         for (const auto& s : kSeats) {
+            if (s.bp > 0 && s.bp < 63 && g_paintSuppressBp[s.bp]) {
+                continue; // ghost heal: hide until SetItem clears suppress
+            }
             const int id = GetItemIdAtBp(s.bp);
             if (id <= 0 || !ItemMatchesSeat(id, s.bp)) {
                 continue;
@@ -1719,14 +2232,17 @@ void Paint() {
             } catch (...) {
             }
         }
-        // Classic extra seats: native Draw skips BP33 (IDA 7FEE89) and never walks BP62.
+        // Classic extra seats: paint over Equip cover (offset by Addon width).
         for (const auto& s : kClassicSeats) {
+            if (s.bp > 0 && s.bp < 63 && g_paintSuppressBp[s.bp]) {
+                continue;
+            }
             const int id = GetItemIdAtBp(s.bp);
             if (id <= 0 || !ItemMatchesSeat(id, s.bp)) {
                 continue;
             }
             try {
-                ii->DrawItemIconForSlot(g_canvas, id, s.sx, s.sy + kIcon, 0, 0, 0, 1, 0, 1);
+                ii->DrawItemIconForSlot(g_canvas, id, kPanelW + s.sx, s.sy + kIcon, 0, 0, 0, 1, 0, 1);
             } catch (...) {
             }
         }
@@ -1865,13 +2381,13 @@ void ComputeLocalDock(CWnd* eq, int& outLocalX, int& outLocalY, int* outEqX = nu
         eqH = 304;
     }
 
-    // Cover Equip (transparent left) + Addon dock on the right. Pocket/aux icons
-    // paint on the Equip side; native CWnd still receives clicks (layer is not CWnd).
+    // Addon dock on the LEFT of Equip; transparent cover of Equip to the right.
+    // Pocket/aux icons paint on the Equip side; native CWnd still receives clicks.
     g_eqW = eqW;
     g_eqH = eqH;
-    g_layerW = eqW + kPanelW;
+    g_layerW = kPanelW + eqW;
     g_layerH = (eqH > kCoverH) ? eqH : kCoverH;
-    outLocalX = 0;
+    outLocalX = -kPanelW;
     outLocalY = 0;
     (void)ax;
 }
@@ -2062,10 +2578,10 @@ bool WearBagToBp(int bagPos, int bp, const char* via, void* pDrag) {
         Dbg(buf);
         return false;
     }
-    if (!BodypartAllowsItem(itemId, bp)) {
+    if (!CanWearItemOnBp(itemId, bp)) {
         ChatHint(kMismatchSeatMsg);
         char buf[120];
-        sprintf_s(buf, "WEAR reject bodypart via=%s id=%d bp=%d", via ? via : "?", itemId, bp);
+        sprintf_s(buf, "WEAR reject CanWear via=%s id=%d bp=%d", via ? via : "?", itemId, bp);
         Dbg(buf);
         return false;
     }
@@ -2134,6 +2650,10 @@ bool WearBagToBp(int bagPos, int bp, const char* via, void* pDrag) {
     sprintf_s(buf, "WEAR ok via=%s/send bag=%d -> %d (packet-only, no optimistic) stamp=%s",
               via ? via : "?", bagPos, dstSlot, kStamp);
     Dbg(buf);
+    // R25: wipe native cash mirror immediately — Addon overlay is sole on-panel icon.
+    if (bp == kSubWeaponBp || bp == kPocketBp) {
+        WipeNativeCashMirror(bp);
+    }
     ClearTip();
     Paint();
     return true;
@@ -2173,7 +2693,7 @@ bool IsStrictAddonPrefix(int prefix) {
             || prefix == 167;
 }
 
-// Drag-wear gate: Addon seat rect only (row3 pocket/aux included; never bag shuffle).
+// Drag-wear gate: Addon dock OR classic pocket/aux cover seats.
 bool CursorOnWearSeat(int& outBp, const char*& outReason) {
     outBp = 0;
     outReason = "rejected-not-on-seat";
@@ -2187,16 +2707,45 @@ bool CursorOnWearSeat(int& outBp, const char*& outReason) {
     if (!g_visible) {
         return false;
     }
-    if (!InAddonDock(pt.x, pt.y)) {
+    int lx = 0;
+    int ly = 0;
+    if (!ScreenToLocal(nullptr, pt.x, pt.y, lx, ly)) {
         return false;
     }
-    const int ax = pt.x - AddonDockScreenX();
-    const int ay = pt.y - g_addonScreenY;
-    if (!HitAddonSeat(ax, ay, outBp)) {
+    if (!HitSeat(lx, ly, outBp)) {
         return false;
     }
-    outReason = "addon-seat";
+    outReason = (outBp == kPocketBp || outBp == kSubWeaponBp) ? "classic-seat" : "addon-seat";
     return true;
+}
+
+// Native CUIEquip::GetBodyPartFromPoint@7FEC32 — backup when Addon HitSeat misses.
+int NativeBpUnderCursor() {
+    POINT pt{};
+    if (!ResolveCursor(pt)) {
+        return 0;
+    }
+    void* peq = GetEquipUi();
+    if (!peq) {
+        return 0;
+    }
+    CWnd* eq = AsWnd(peq);
+    if (!eq) {
+        return 0;
+    }
+    SyncAddonScreenFromEquip(eq);
+    int ex = 0;
+    int ey = 0;
+    if (!SehGetWndAbs(eq, ex, ey)) {
+        return 0;
+    }
+    using GetBpFromPtFn = int(__stdcall*)(int, int);
+    auto GetBpFromPt = reinterpret_cast<GetBpFromPtFn>(0x007FEC32);
+    __try {
+        return GetBpFromPt(pt.x - ex, pt.y - ey);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
 }
 
 // True if cursor is over Addon dock or main Equip window (wear targets).
@@ -2292,17 +2841,13 @@ bool TryAddonWearDrop(void* pDrag) {
     if (!ResolveCursor(pt)) {
         return false;
     }
-    if (!InAddonDock(pt.x, pt.y)) {
+    int lx = 0;
+    int ly = 0;
+    if (!ScreenToLocal(nullptr, pt.x, pt.y, lx, ly)) {
         return false;
     }
-    const int ax = pt.x - AddonDockScreenX();
-    const int ay = pt.y - g_addonScreenY;
     int bp = 0;
-    if (!HitAddonSeat(ax, ay, bp)) {
-        char buf[120];
-        sprintf_s(buf, "Addon drop in panel but miss seat ax=%d ay=%d cur=%d,%d", ax, ay, pt.x,
-                  pt.y);
-        Dbg(buf);
+    if (!HitSeat(lx, ly, bp)) {
         return false;
     }
     int nTI = 0;
@@ -2311,11 +2856,11 @@ bool TryAddonWearDrop(void* pDrag) {
         Dbg("Addon wear drop: read drag slots fail");
         return true;
     }
-    // Equipped → Addon seat: −bp↔−bp swap / replace (vanilla SendChange).
+    // Equipped → Addon/classic seat: −bp↔−bp swap / replace (vanilla SendChange).
     if (nTI == 1 && nPos < 0) {
         const int srcBp = BpFromEquippedSlot(nPos);
         if (srcBp <= 0 || !IsLiveAddonBp(srcBp)) {
-            // Classic equipped drag over Addon panel — do not invent dst.
+            // Classic equipped drag over Addon/classic-ext — do not invent dst.
             return false;
         }
         void* pCtx = SafeReadPtr(kCWvsContextSingleton);
@@ -2323,7 +2868,6 @@ bool TryAddonWearDrop(void* pDrag) {
         if (nPos == dstSlot) {
             return true; // same seat no-op
         }
-        // Source item must be legal on dest seat (type check).
         const int srcId = GetItemIdAtBp(srcBp);
         if (!BodypartAllowsItem(srcId, bp)) {
             ChatHint(kMismatchSeatMsg);
@@ -2361,7 +2905,6 @@ bool TryAddonWearDrop(void* pDrag) {
         Dbg("Addon aux reject: 109 shield (use vanilla main Si)");
         return true;
     }
-    // Wrong type on Addon seat (e.g. ring on hat-looking cell) — swallow, never native.
     if (!ItemMatchesSeat(itemId, bp)) {
         ChatHint(kMismatchSeatMsg);
         char buf[120];
@@ -2369,30 +2912,78 @@ bool TryAddonWearDrop(void* pDrag) {
         Dbg(buf);
         return true;
     }
-    // Totem: drop on a specific seat → REPLACE that seat (vanilla). Do NOT redirect
-    // to a free seat — that blocked drag-replace on occupied Addon totem cells.
+    if (!CanWearItemOnBp(itemId, bp)) {
+        ChatHint(kMismatchSeatMsg);
+        Dbg("Addon wear drop CanWear reject");
+        return true;
+    }
     if ((itemId / 10000) == 120) {
         const int atSeat = GetItemIdAtBp(bp);
-        const bool seatHasTotem = atSeat > 0 && (atSeat / 10000) == 120;
-        if (seatHasTotem) {
-            // Replace occupied totem at hit seat.
-            char bufTotem[140];
+        if (atSeat > 0 && (atSeat / 10000) == 120) {
+            char bufTotem[160];
             sprintf_s(bufTotem,
-                      "WEAR intercept reason=addon-seat via=drag_totem_replace id=%d bp=%d "
+                      "WEAR totem replace-occupied via=drag id=%d bp=%d "
                       "bag=%d stamp=%s",
                       itemId, bp, nPos, kStamp);
             Dbg(bufTotem);
             WearBagToBp(nPos, bp, "drag_totem_replace", pDrag);
             return true;
         }
-        // Empty / junk on seat: still wear here. Full-4 is only for dblclick fill.
     }
     char bufWear[140];
-    sprintf_s(bufWear, "WEAR intercept reason=addon-seat via=drag id=%d bp=%d bag=%d stamp=%s",
+    sprintf_s(bufWear, "WEAR intercept reason=seat via=drag id=%d bp=%d bag=%d stamp=%s",
               itemId, bp, nPos, kStamp);
     Dbg(bufWear);
     WearBagToBp(nPos, bp, "drag", pDrag);
     return true;
+}
+
+// Gate bag→pocket/aux/pet seats. Native Equip/PetEquip drop (sub_4F4BB7) does
+// SendChange(−GetBodyPartFromPoint) WITHOUT WearFromDraggable — AbleToWear only
+// checks level/job, so a cash hat on PetEquip BP27 → −127 would spam Admin Warning.
+// Return true = handled (wear or local toast); do not fall through to native.
+bool GateWearOnPocketAuxBp(void* pDrag, int bagPos, int nativeBp, const char* via) {
+    if (nativeBp <= 0) {
+        return false;
+    }
+    void* pChar = GetLocalCharacterData();
+    const int itemId = SehDecodeItemId(SehGetItem(pChar, bagPos));
+    // Real pet equips on pet seats — leave to native WearFromDraggable / PetEquip.
+    if (IsPetEquipItemId(itemId) && IsPetSeatBp(nativeBp)) {
+        return false;
+    }
+    if (nativeBp == kPocketBp || nativeBp == kSubWeaponBp
+        || IsVanillaPetAliasedBp(nativeBp)) {
+        const int dstBp = (nativeBp == kSubWeaponBp) ? kSubWeaponBp : kPocketBp;
+        if (CanWearItemOnBp(itemId, dstBp)) {
+            char buf[160];
+            sprintf_s(buf, "OnDropped gate bp=%d -> %d id=%d via=%s stamp=%s", nativeBp, dstBp,
+                      itemId, via ? via : "?", kStamp);
+            Dbg(buf);
+            WearBagToBp(bagPos, dstBp, via, pDrag);
+            return true;
+        }
+        ChatHint(kMismatchSeatMsg);
+        CtxForceClearSendBusy(SafeReadPtr(kCWvsContextSingleton));
+        char buf[180];
+        sprintf_s(buf,
+                  "OnDropped swallow pocket/aux HT bp=%d id=%d via=%s (no SendChange) stamp=%s",
+                  nativeBp, itemId, via ? via : "?", kStamp);
+        Dbg(buf);
+        return true;
+    }
+    // Character fashion on pet BP14/21–48 (PetEquip BP27 → cash −127, etc.).
+    if (IsPetSeatBp(nativeBp)) {
+        ChatHint(kMismatchSeatMsg);
+        CtxForceClearSendBusy(SafeReadPtr(kCWvsContextSingleton));
+        char buf[180];
+        sprintf_s(buf,
+                  "OnDropped swallow char item on pet bp=%d id=%d via=%s (no SendChange) stamp=%s",
+                  nativeBp, itemId, via ? via : "?", kStamp);
+        Dbg(buf);
+        return true;
+    }
+    return false;
 }
 
 int __fastcall OnDropped_Addon_hook(void* pThis, void* /*edx*/, void* pFrom, void* pTo,
@@ -2408,6 +2999,53 @@ int __fastcall OnDropped_Addon_hook(void* pThis, void* /*edx*/, void* pFrom, voi
         // Addon is not a CWnd drop target; pTo is often the field. Cursor wins.
         if (TryAddonWearDrop(pThis)) {
             return 1;
+        }
+    }
+    // PetEquip OnDropped: native sub_4F4BB7 SendChange(−bp) bypasses wear_fn.
+    // Cash hat on pet BP27 → −127 Admin Warning. PetEquip coords ≠ CUIEquip HT.
+    if (bagSrc && IsCuiPetEquipHandler(pTo)) {
+        void* pCharPet = GetLocalCharacterData();
+        const int petDropId = SehDecodeItemId(SehGetItem(pCharPet, nPos));
+        if (!IsPetEquipItemId(petDropId)) {
+            ChatHint(kMismatchSeatMsg);
+            CtxForceClearSendBusy(SafeReadPtr(kCWvsContextSingleton));
+            char buf[200];
+            sprintf_s(buf,
+                      "OnDropped swallow char item on PetEquip id=%d (no −127) stamp=%s",
+                      petDropId, kStamp);
+            Dbg(buf);
+            return 1;
+        }
+        // Real pet equips (180–183): fall through to native PetEquip path.
+    } else if (bagSrc && IsCuiEquipHandler(pTo)) {
+        // CUIEquip OnDropped uses drop rx,ry + GetBodyPartFromPoint — bypasses wear_fn.
+        // Gate pocket(5,35)/aux(5,101) so hat never reaches −33/−62.
+        using GetBpFromPtFn = int(__stdcall*)(int, int);
+        auto GetBpFromPt = reinterpret_cast<GetBpFromPtFn>(0x007FEC32);
+        const int dropBp = GetBpFromPt(rx, ry);
+        if (GateWearOnPocketAuxBp(pThis, nPos, dropBp, "drag_drop_rxry")) {
+            return 1;
+        }
+    }
+    // HitSeat miss but cursor-derived GetBodyPartFromPoint lands on BP33/BP62:
+    // same gate (backup when pTo is field but HT would still fire via other path).
+    if (bagSrc) {
+        if (CWnd* eq = AsWnd(GetEquipUi())) {
+            SyncAddonScreenFromEquip(eq);
+            POINT pt{};
+            if (ResolveCursor(pt)) {
+                int ex = 0;
+                int ey = 0;
+                if (SehGetWndAbs(eq, ex, ey)) {
+                    using GetBpFromPtFn = int(__stdcall*)(int, int);
+                    auto GetBpFromPt =
+                            reinterpret_cast<GetBpFromPtFn>(0x007FEC32);
+                    const int nativeBp = GetBpFromPt(pt.x - ex, pt.y - ey);
+                    if (GateWearOnPocketAuxBp(pThis, nPos, nativeBp, "drag_native_ht")) {
+                        return 1;
+                    }
+                }
+            }
         }
     }
     if (bagSrc) {
@@ -2451,17 +3089,38 @@ int __fastcall OnDropped_Addon_hook(void* pThis, void* /*edx*/, void* pFrom, voi
     if (equippedSrc) {
         CtxForceClearSendBusy(SafeReadPtr(kCWvsContextSingleton));
     }
+    // Last chance before native sub_4F4BB7 → A09221 (opcode 86 bypasses A0900A guard).
+    if (bagSrc) {
+        const int nativeBp = NativeBpUnderCursor();
+        if (GateWearOnPocketAuxBp(pThis, nPos, nativeBp, "drop_fallthrough_ht")) {
+            return 1;
+        }
+    }
     if (g_OnDroppedOrig) {
         return g_OnDroppedOrig(pThis, pFrom, pTo, rx, ry);
     }
     return 0;
 }
 
+bool TryUnequipBp(int bp, const char* via); // defined below
+
 int __fastcall WearFromDraggable_Addon_hook(void* pDrag, void* /*edx*/, int nSlot, int nBodyPart) {
-    // Equipped→bag (nSlot<0): always native — classic unequip / rearrange.
-    // Force-clear SendBusy so incomplete Addon wear never blocks vanilla unequip.
+    // Equipped→bag (nSlot<0): sidecar/pocket/aux must NOT use native wear (unknown ZRef).
     if (pDrag && nSlot < 0) {
         CtxForceClearSendBusy(SafeReadPtr(kCWvsContextSingleton));
+        const int eqBp = BpFromEquippedSlot(nSlot);
+        // R31: pocket/aux unequip-only — never g_WearOrig (native may OOB-read hat).
+        if (eqBp == kPocketBp || eqBp == kSubWeaponBp) {
+            if (GetItemAtBp(eqBp)) {
+                TryUnequipBp(eqBp, "wear_fn_unequip");
+            }
+            return 1;
+        }
+        if (eqBp > 0 && ShouldTryPacketUnequipBp(eqBp)) {
+            if (TryUnequipBp(eqBp, "wear_fn_unequip")) {
+                return 1;
+            }
+        }
         return g_WearOrig ? g_WearOrig(pDrag, nSlot, nBodyPart) : 0;
     }
     // Global type↔seat gate (classic + Addon). wear_fn success path never calls
@@ -2471,6 +3130,44 @@ int __fastcall WearFromDraggable_Addon_hook(void* pDrag, void* /*edx*/, int nSlo
         void* pCharGate = GetLocalCharacterData();
         const int idGate = SehDecodeItemId(SehGetItem(pCharGate, nSlot));
         const int prefixGate = idGate / 10000;
+        // HARD BLOCK pocket/aux: prefix must match before any wear_fn / SendChange.
+        if (nBodyPart == kPocketBp || nBodyPart == kSubWeaponBp) {
+            if (!CanWearItemOnBp(idGate, nBodyPart)) {
+                ChatHint(kMismatchSeatMsg);
+                char buf[160];
+                sprintf_s(buf,
+                          "WEAR reject pocket/aux bp=%d id=%d via=wear_fn stamp=%s",
+                          nBodyPart, idGate, kStamp);
+                Dbg(buf);
+                return 1;
+            }
+        }
+        // HARD BLOCK: pet seats vs character fashion.
+        // BP33/34/47 are also vanilla pet#2 in WearFromDraggable (SP 877/879/880).
+        // Pocket 116 → ALWAYS PacketSendOnly −33; never g_WearOrig (Admin Warning).
+        if (prefixGate == 116) {
+            char buf[160];
+            sprintf_s(buf,
+                      "WEAR intercept pocket116 -> −33 via=wear_fn "
+                      "nativeBp=%d id=%d bag=%d stamp=%s",
+                      nBodyPart, idGate, nSlot, kStamp);
+            Dbg(buf);
+            return WearBagToBp(nSlot, kPocketBp, "wear_fn_pocket33", pDrag) ? 1 : 0;
+        }
+        if (IsPetSeatBp(nBodyPart) || IsVanillaPetAliasedBp(nBodyPart)) {
+            // Real pet equips (180–183) must use native WearFromDraggable pet path.
+            if (IsPetEquipItemId(idGate)) {
+                return g_WearOrig ? g_WearOrig(pDrag, nSlot, nBodyPart) : 0;
+            }
+            // Character cash/fashion (e.g. hat → BP21/−121) — never native pet path.
+            ChatHint(kMismatchSeatMsg);
+            char buf[160];
+            sprintf_s(buf,
+                      "WEAR swallow pet-seat bp=%d id=%d (char fashion≠pet) stamp=%s",
+                      nBodyPart, idGate, kStamp);
+            Dbg(buf);
+            return 1;
+        }
         // Aux: only BP62 — reject weapon/shield HitTest targets.
         if (prefixGate == 134 || prefixGate == 135) {
             // Sidecar only — never native aEquipped[62] (OOB on vanilla 52-slot).
@@ -2546,10 +3243,20 @@ int __fastcall WearFromDraggable_Addon_hook(void* pDrag, void* /*edx*/, int nSlo
             }
         }
     }
+    // Never fall into native wear for pet-aliased BPs (pocket −33 reuse) —
+    // except real pet equips (180–183) which need SP877 path.
+    if (nSlot > 0 && IsVanillaPetAliasedBp(nBodyPart)) {
+        void* pCharFg = GetLocalCharacterData();
+        const int idFg = SehDecodeItemId(SehGetItem(pCharFg, nSlot));
+        if (IsPetEquipItemId(idFg)) {
+            return g_WearOrig ? g_WearOrig(pDrag, nSlot, nBodyPart) : 0;
+        }
+        ChatHint(kMismatchSeatMsg);
+        Dbg("WEAR final-guard swallow pet-aliased bp (no g_WearOrig)");
+        return 1;
+    }
     return g_WearOrig ? g_WearOrig(pDrag, nSlot, nBodyPart) : 0;
 }
-
-bool TryUnequipBp(int bp, const char* via); // defined below
 
 bool TryAddonBagDblWear(void* pDrag) {
     if (!pDrag) {
@@ -2598,9 +3305,22 @@ bool TryAddonBagDblWear(void* pDrag) {
     }
     const int bp = ExpectedBpForItemId(itemId);
     if (bp == 0) {
+        // Cursor on pocket/aux with non-116/134|135 → local toast, zero packets.
+        int seatBp = 0;
+        const char* reason = nullptr;
+        if (CursorOnWearSeat(seatBp, reason)
+            && (seatBp == kPocketBp || seatBp == kSubWeaponBp)) {
+            ChatHint(kMismatchSeatMsg);
+            char buf[160];
+            sprintf_s(buf, "bag dblclick guard id=%d seat=%d via=%s stamp=%s", itemId, seatBp,
+                      reason ? reason : "?", kStamp);
+            Dbg(buf);
+            return true;
+        }
         return false; // not Addon / pocket / Si(109/134/135) — leave to native
     }
     if (IsMainPocketSubBp(bp)) {
+        // Always swallow native dblclick — fallthrough routes fashion to −33 (BP33 pet alias).
         WearBagToBp(nPos, bp, "bag_dbl_main", pDrag);
         return true;
     }
@@ -2619,15 +3339,78 @@ int __fastcall OnDoubleClicked_Addon_hook(void* pThis, void* /*edx*/) {
     int nTI = 0;
     int nPos = 0;
     if (SehReadDragSlots(pThis, nTI, nPos) && nTI == 1 && nPos < 0) {
-        // Equipped on main Equip: FORCE clear busy then native/shoulders only.
-        // Stuck busy (rejected totem/Addon wear) froze ALL classic dblclick unequip.
-        // Do NOT SendChange-fallback classic seats. Addon seats unequip via HandleInput.
+        // Equipped icon dblclick: sidecar/pocket/aux cannot use native unequip.
         void* pCtx = SafeReadPtr(kCWvsContextSingleton);
         CtxForceClearSendBusy(pCtx);
+        const int bp = BpFromEquippedSlot(nPos);
+        // R31: pocket/aux equipped dblclick = unequip-only. Never fall through to
+        // native empty-search / OOB aEquipped[62] (was able to invent hat→−62).
+        if (bp == kPocketBp || bp == kSubWeaponBp) {
+            if (GetItemAtBp(bp)) {
+                TryUnequipBp(bp, "dbl_equip_icon");
+            } else {
+                char buf[120];
+                sprintf_s(buf, "OnDoubleClicked swallow empty bp=%d (no native) stamp=%s", bp,
+                          kStamp);
+                Dbg(buf);
+            }
+            return 1;
+        }
+        if (bp > 0 && ShouldTryPacketUnequipBp(bp)) {
+            if (TryUnequipBp(bp, "dbl_equip_icon")) {
+                return 1;
+            }
+        }
+        // Other classic seats: native. Shoulder packet path unreachable — outermost hook
+        // chains to PE, not Shoulder_RehookDblClickUnequipOutermost.
         return g_OnDblOrig ? g_OnDblOrig(pThis) : 0;
+    }
+    // Pocket 116 / Aux 134|135: intercept before native empty-search (HT invent −33/−62).
+    if (SehReadDragSlots(pThis, nTI, nPos) && nTI == 1 && nPos > 0) {
+        void* pCharEarly = GetLocalCharacterData();
+        const int earlyId = SehDecodeItemId(SehGetItem(pCharEarly, nPos));
+        const int earlyPx = earlyId / 10000;
+        if (earlyPx == 116) {
+            WearBagToBp(nPos, kPocketBp, "dbl_pocket116_early", pThis);
+            return 1;
+        }
+        if (earlyPx == 134 || earlyPx == 135) {
+            WearBagToBp(nPos, kSubWeaponBp, "dbl_aux62_early", pThis);
+            return 1;
+        }
     }
     if (TryAddonBagDblWear(pThis)) {
         return 1;
+    }
+    // Bag dblclick fallthrough: block native routing hat/fashion to pocket/aux HT.
+    if (SehReadDragSlots(pThis, nTI, nPos) && nTI == 1 && nPos > 0) {
+        void* pChar = GetLocalCharacterData();
+        const int itemId = SehDecodeItemId(SehGetItem(pChar, nPos));
+        int seatBp = 0;
+        const char* reason = nullptr;
+        bool reject = false;
+        if (CursorOnWearSeat(seatBp, reason) && !CanWearItemOnBp(itemId, seatBp)) {
+            reject = true;
+        } else {
+            const int nativeBp = NativeBpUnderCursor();
+            if (nativeBp > 0
+                && (nativeBp == kPocketBp || nativeBp == kSubWeaponBp
+                    || IsVanillaPetAliasedBp(nativeBp))
+                && !CanWearItemOnBp(itemId, nativeBp)) {
+                seatBp = nativeBp;
+                reason = "native-ht";
+                reject = true;
+            }
+        }
+        if (reject) {
+            ChatHint(kMismatchSeatMsg);
+            CtxForceClearSendBusy(SafeReadPtr(kCWvsContextSingleton));
+            char buf[200];
+            sprintf_s(buf, "OnDoubleClicked guard id=%d seat=%d via=%s stamp=%s", itemId, seatBp,
+                      reason ? reason : "?", kStamp);
+            Dbg(buf);
+            return 1;
+        }
     }
     return g_OnDblOrig ? g_OnDblOrig(pThis) : 0;
 }
@@ -2644,6 +3427,7 @@ bool TryUnequipBp(int bp, const char* via) {
     void* pCtx = SafeReadPtr(kCWvsContextSingleton);
     CtxForceClearSendBusy(pCtx);
     if (dest <= 0) {
+        ChatHint(kBagFullUnequipMsg);
         Dbg("UNEQUIP fail: bag full");
         return false;
     }
@@ -2654,14 +3438,15 @@ bool TryUnequipBp(int bp, const char* via) {
         Dbg(buf);
         return false;
     }
-    // Packet-only: do NOT clear-only sidecar and do NOT optimistic bag SetItem.
-    // Mode-2 unequip swaps GetItem(dest)↔GetItem(slot). Ghost (server empty): server
-    // enableActions only — OnTick clears sidecar when busy drops and seat still painted.
+    // Packet sent — suppress Addon paint; defer ZRef null until bag SetItem ack.
+    SoftDetachEquippedVisual(bp);
     g_pendingUnequipBp = bp;
+    g_pendingUnequipDest = dest;
+    g_pendingUnequipItemId = itemId;
     g_pendingUnequipAt = GetTickCount64();
     char buf[200];
     sprintf_s(buf,
-              "UNEQUIP ok via=%s slot=%d bp=%d id=%d -> bag=%d (packet-only, pending-ghost-heal) stamp=%s",
+              "UNEQUIP ok via=%s slot=%d bp=%d id=%d -> bag=%d (SoftDetach+ghost-heal) stamp=%s",
               via ? via : "?", slot, bp, itemId, dest, kStamp);
     Dbg(buf);
     ClearTip();
@@ -2685,8 +3470,8 @@ void HandleInput(CWnd* eq) {
     int lx = 0;
     int ly = 0;
     const bool inPanel = ScreenToLocal(eq, pt.x, pt.y, lx, ly);
-    // Left of the dock is classic Equip; native GetBodyPartFromPoint owns those clicks.
-    const bool inAddon = inPanel && lx >= g_eqW;
+    int seatBp = 0;
+    const bool onSeat = inPanel && HitSeat(lx, ly, seatBp);
 
     // Probe: when near panel/equip, log coords so miss hits are diagnosable.
     static ULONGLONG s_lastProbe = 0;
@@ -2705,7 +3490,8 @@ void HandleInput(CWnd* eq) {
         }
     }
 
-    // Drag-off unequip: press on occupied live seat, release outside panel.
+    // Drag-off unequip: press on occupied live seat (Addon OR classic pocket/aux),
+    // release outside that seat.
     static bool s_dragArmed = false;
     static int s_dragBp = 0;
     static int s_dragX = 0;
@@ -2713,7 +3499,7 @@ void HandleInput(CWnd* eq) {
     const bool down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
     static bool s_wasDown = false;
 
-    if (!inAddon) {
+    if (!onSeat) {
         if (s_dragArmed && !down && s_wasDown) {
             const int dx = pt.x - s_dragX;
             const int dy = pt.y - s_dragY;
@@ -2730,16 +3516,7 @@ void HandleInput(CWnd* eq) {
         return;
     }
 
-    int bp = 0;
-    if (!HitAddonSeat(lx - g_eqW, ly, bp)) {
-        if (!down) {
-            s_dragArmed = false;
-        }
-        s_wasDown = down;
-        ClearTip();
-        return;
-    }
-
+    const int bp = seatBp;
     const int itemId = GetItemIdAtBp(bp);
     if (down && !s_wasDown) {
         char buf[180];
@@ -2755,7 +3532,17 @@ void HandleInput(CWnd* eq) {
         ClearTip();
         return;
     }
-    // Refresh tip every tick while hovering (tooltips clear if not re-shown).
+    // Pocket/aux: native CUIEquip already HitTests + ShowItemToolTip. Addon tip here
+    // stacked a second tip and stole SetItem g_activeMainTooltip (套装 tip missing).
+    // R31: also skip poll dblclick/drag-off — native OnDoubleClicked (hooked) owns
+    // unequip; dual-fire SoftDetach + native fallthrough invented hat→−62.
+    if (IsMainPocketSubBp(bp)) {
+        ClearTip();
+        s_wasDown = down;
+        s_dragArmed = false;
+        return;
+    }
+    // Addon dock only: refresh tip (clearFirst only on seat change — keep set tip).
     ShowTip(bp, pt.x, pt.y);
 
     // Arm drag-off + dblclick unequip (layer is not a CWnd — poll LBUTTON).
@@ -2804,7 +3591,8 @@ void LogInitOnce() {
               "Paint=native −bp / cash −(bp+100) prefer-cash (CUIEquip Draw), "
               "CD64 cash PacketSlot −(bp+100), "
               "33/54-62 PacketSendOnly (no PreferSend mega), "
-              "park54/55 every tick, row3 pocket33+aux62 NO red9/10 wire, "
+              "BP33 pet-aliased hard-block (SP877), classic pocket/aux HitSeat+drop_rxry gate, "
+              "SendChangeSwap@A09221 guard (OnDropped opcode-86), "
               "login keep-slots (no cash/normal swap), SendBusy watchdog gated CharData, %s %s %s) ===",
               kStamp, kLayerZ, DetectCd64ExeLite(), NativeCd64Inventory() ? 1 : 0,
               NativeCd64Inventory() ? kNativeUiMarker : "sidecar-inv-ON",
@@ -2817,13 +3605,11 @@ void InstallLoginPersistOnce() {
     if (kEnableAddonPark) {
         ParkMainAddonSeatsOffPanel();
     }
-    if (NativeCd64Inventory()) {
+    const bool cd64 = NativeCd64Inventory();
+    if (cd64) {
         g_applyCaveDone = g_cashLeaDone = g_loginAllowDone = g_loginClearDone = true;
-        g_getItemHooked = g_setItemHooked = true;
-        Dbg("CD64 native — Addon UI-only (no sidecar Get/Set)");
-        return;
-    }
-    if (kEnableAddonApplyCaves) {
+        Dbg("CD64 native — Addon overlay; skip sidecar Apply/SetItem");
+    } else if (kEnableAddonApplyCaves) {
         InstallSidecarApplyCave();
     } else {
         g_applyCaveDone = g_cashLeaDone = g_loginAllowDone = g_loginClearDone = true;
@@ -2837,18 +3623,20 @@ void InstallLoginPersistOnce() {
     if (!g_getItemHooked) {
         g_getItemHooked = true;
         if (!ATTACH_HOOK(g_GetItemOrig, GetItem_Sidecar_hook)) {
-            Dbg("Sidecar GetItem hook FAILED");
+            Dbg("GetItem hook FAILED");
         } else {
-            Dbg("Sidecar GetItem hook OK (BP54-62)");
+            Dbg(cd64 ? "GetItem hook OK (CD64 cash-mirror hide)" : "Sidecar GetItem hook OK (BP54-62)");
         }
     }
-    if (!g_setItemHooked) {
+    if (!cd64 && !g_setItemHooked) {
         g_setItemHooked = true;
         if (!ATTACH_HOOK(g_SetItemOrig, SetItem_Sidecar_hook)) {
             Dbg("Sidecar SetItem hook FAILED");
         } else {
             Dbg("Sidecar SetItem hook OK (BP54-62)");
         }
+    } else if (cd64) {
+        g_setItemHooked = true;
     }
 }
 
@@ -2891,6 +3679,22 @@ void InstallUiHooksOnce() {
             Dbg("Addon OnDoubleClicked OK (bag Addon wear + equipped unequip callthrough)");
         }
     }
+    if (!g_sendChangeHooked) {
+        if (!ATTACH_HOOK(g_SendChangeOrig, SendChange_Addon_guard_hook)) {
+            Dbg("Addon SendChange guard hook FAILED — pocket/aux/cape native bypass risk");
+        } else {
+            g_sendChangeHooked = true;
+            Dbg("Addon SendChange guard OK (116→−33/−133 110→−9/−109 134|135→−62)");
+        }
+    }
+    if (!g_sendChangeSwapHooked) {
+        if (!ATTACH_HOOK(g_SendChangeSwapOrig, SendChangeSwap_Addon_guard_hook)) {
+            Dbg("Addon SendChangeSwap A09221 hook FAILED — OnDropped hat→−33 bypass risk");
+        } else {
+            g_sendChangeSwapHooked = true;
+            Dbg("Addon SendChangeSwap guard OK (sub_4F4BB7 opcode-86)");
+        }
+    }
 }
 
 void InstallHooksOnce() {
@@ -2912,15 +3716,31 @@ void AttachEquipAddonMod() {
 namespace EquipAddon {
 
 void InstallLoginPersistEarly() {
-    // FORBIDDEN in DllMain / boot (avoid #35/#38). Keep as no-op stub so any
-    // accidental call cannot install caves/GetSet under loader lock.
-    // Quiet caves + Get/Set attach only via EnsureHooks → InstallLoginPersistOnce.
-    (void)0;
+    // Caves ONLY (no Get/Set Detours / Park / UI) — safe at DllMain after shoulders.
+    // getCharInfo decode runs before first FieldInit; without LoginAllow+Apply here,
+    // BP56–62 are jg-skipped and ExtraRing/Addon look empty after relog (#35/#38
+    // were from Get/Set+Park under loader lock — not these CodeCaves).
+    if (NativeCd64Inventory()) {
+        return;
+    }
+    if (kEnableAddonApplyCaves) {
+        InstallSidecarApplyCave(/*quiet=*/true);
+    }
 }
 
 void EnsureHooks() {
     LogInitOnce();
     InstallHooksOnce();
+    if (kEnableAddonUiHooks && !g_sendChangeHooked) {
+        char buf[128];
+        sprintf_s(buf, "EnsureHooks: SendChange guard MISSING @A0900A stamp=%s", kStamp);
+        Dbg(buf);
+    }
+    if (kEnableAddonUiHooks && !g_sendChangeSwapHooked) {
+        char buf[128];
+        sprintf_s(buf, "EnsureHooks: SendChangeSwap guard MISSING @A09221 stamp=%s", kStamp);
+        Dbg(buf);
+    }
 }
 
 void WirePocketAndSiSlots() {
@@ -3035,34 +3855,68 @@ void OnTick() {
         CtxUnstickSendBusyEx(pCtx, false, kSendBusyUnstickAgeMs);
     }
 
-    // Ghost heal: unequip sent but server source-null (enableActions only, no mode-2).
-    // After busy clears (≥80ms), if seat still painted → local ClearSidecarBp.
-    // Real mode-2 already nulls GetItem — no-op. Never send equipped mode-3.
-    // ALSO: if busy never latched (enableActions race), clear after 80ms anyway.
-    if (g_pendingUnequipBp >= kSidecarBpMin && g_pendingUnequipBp <= kSidecarBpMax
-        && g_pendingUnequipAt != 0 && now - g_pendingUnequipAt > 80) {
+    // Ghost heal: unequip sent; clear seat ONLY when bag has the item AND seat still
+    // paints (enableActions-only / sidecar lag). Never ForceClear on reject/timeout.
+    // R18: if 整理 moved the item off pending dest, scan bag for expectId before keep/abort.
+    if (GhostHealableBp(g_pendingUnequipBp) && g_pendingUnequipAt != 0
+        && now - g_pendingUnequipAt > 80) {
         const bool busy = CtxSendBusySet(pCtx);
+        const int bp = g_pendingUnequipBp;
+        int dest = g_pendingUnequipDest;
+        const int expectId = g_pendingUnequipItemId;
+        void* pChar = GetLocalCharacterData();
+        int bagId = (pChar && dest > 0) ? DecodeItemId(SehGetItem(pChar, dest)) : 0;
+        bool inBag = (expectId > 0 && bagId == expectId);
+        if (!inBag && expectId > 0 && pChar) {
+            const int bagSize = EquipBagSlotCount(pChar);
+            for (int s = 1; s <= bagSize; ++s) {
+                if (DecodeItemId(NativeEquipBagGetItem(pChar, s)) == expectId) {
+                    dest = s;
+                    bagId = expectId;
+                    inBag = true;
+                    g_pendingUnequipDest = s;
+                    break;
+                }
+            }
+        }
+        const bool stillEq = GetItemAtBp(bp) != nullptr;
         if (!busy) {
-            const int bp = g_pendingUnequipBp;
-            if (GetItemAtBp(bp) != nullptr) {
-                ClearSidecarBp(bp);
-                char buf[120];
-                sprintf_s(buf, "GHOST heal ClearSidecar bp=%d stamp=%s", bp, kStamp);
+            if (inBag && stillEq) {
+                ForceClearEquippedVisual(bp);
+                char buf[140];
+                sprintf_s(buf, "GHOST heal clear bp=%d bag=%d id=%d stamp=%s", bp, dest,
+                          expectId, kStamp);
                 Dbg(buf);
                 Paint();
+            } else if (inBag && !stillEq) {
+                ClearPaintSuppress(bp);
+                Dbg("GHOST heal clean (mode-2 already cleared seat)");
+                Paint();
+            } else if (!inBag && stillEq) {
+                // Busy cleared but bag miss — likely reject; restore paint (item still equipped).
+                ClearPaintSuppress(bp);
+                char buf[140];
+                sprintf_s(buf, "GHOST heal keep bp=%d (bag miss id=%d@%d) stamp=%s", bp, bagId,
+                          dest, kStamp);
+                Dbg(buf);
             }
             g_pendingUnequipBp = 0;
+            g_pendingUnequipDest = 0;
+            g_pendingUnequipItemId = 0;
             g_pendingUnequipAt = 0;
         } else if (now - g_pendingUnequipAt > 2000) {
-            // Stuck busy: still clear ghost paint so organize is not fed a desynced UI.
-            const int bp = g_pendingUnequipBp;
-            if (GetItemAtBp(bp) != nullptr) {
-                ClearSidecarBp(bp);
-                Dbg("GHOST heal ClearSidecar (busy-stuck timeout)");
+            if (inBag && stillEq) {
+                ForceClearEquippedVisual(bp);
+                Dbg("GHOST heal ForceClear (busy-stuck but bag ok)");
                 Paint();
+            } else {
+                ClearPaintSuppress(bp);
+                Dbg("GHOST heal abort busy-stuck (no bag confirm — keep seat)");
             }
             CtxForceClearSendBusy(pCtx);
             g_pendingUnequipBp = 0;
+            g_pendingUnequipDest = 0;
+            g_pendingUnequipItemId = 0;
             g_pendingUnequipAt = 0;
         }
     }
@@ -3080,8 +3934,8 @@ void OnTick() {
         if (id33 > 0 || id133 > 0 || id62 > 0 || id162 > 0) {
             char buf[220];
             sprintf_s(buf,
-                      "ROW3 probe id-33=%d id-133=%d id-62=%d id-162=%d addon=(6|39,147) stamp=%s",
-                      id33, id133, id62, id162, kStamp);
+                      "ROW3 probe id-33=%d id-133=%d id-62=%d id-162=%d pocket=(%d,%d) aux=(%d,%d) stamp=%s",
+                      id33, id133, id62, id162, kPocketUiX, kPocketUiY, kAuxUiX, kAuxUiY, kStamp);
             Dbg(buf);
         }
     }

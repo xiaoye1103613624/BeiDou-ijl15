@@ -21,6 +21,9 @@ void CrashDiag_SetMsgContext(DWORD threadId, UINT msg, WPARAM wParam, LPARAM lPa
 void CrashDiag_ClearMsgContext();
 void CrashDiag_NoteWzPath(const wchar_t* path);
 
+/** Largest free VA region in bytes (VirtualQuery walk). Safe anytime. */
+unsigned long long CrashDiag_GetMaxFreeVa();
+
 // 仅开发自测（config.ini 打开）；会进入原异常流程 / 抛出 E_POINTER。
 void CrashDiag_DebugTriggerAccessViolation();
 void CrashDiag_DebugTriggerEPointer();

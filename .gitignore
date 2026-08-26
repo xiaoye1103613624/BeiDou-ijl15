@@ -7,3 +7,9 @@ ezorsia/Release
 .idea
 _build_*.log
 _tmp_dump/
+
+# GameGuard stub 编译产物
+_gg_stub/*.dll
+_gg_stub/*.exp
+_gg_stub/*.lib
+_gg_stub/*.obj

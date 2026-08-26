@@ -69,6 +69,12 @@ inline void PatchCall(T pAddress, U pDestination, size_t uSize = 5) {
 }
 
 template <typename T>
+inline void PatchNop(T pStart, T pEnd) {
+    Memory::PatchNop(static_cast<DWORD>(static_cast<uintptr_t>(pStart)),
+                     static_cast<int>(static_cast<uintptr_t>(pEnd) - static_cast<uintptr_t>(pStart)));
+}
+
+template <typename T>
 inline void Patch1(T pAddress, unsigned char uValue) {
     Memory::WriteByte(static_cast<uintptr_t>(pAddress), uValue);
 }

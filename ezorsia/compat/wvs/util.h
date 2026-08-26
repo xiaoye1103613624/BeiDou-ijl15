@@ -44,3 +44,18 @@ inline int get_screen_height() {
 inline int get_adjust_cy() {
     return rs_get_adjust_cy();
 }
+
+// Monster Book WZ helpers (Kentakae compat)
+inline Ztl_variant_t get_object_or_empty(const wchar_t* path) {
+    if (!path) {
+        return Ztl_variant_t{};
+    }
+    return get_rm()->GetObjectA(path);
+}
+
+inline Ztl_variant_t get_item_or_empty(IWzPropertyPtr parent, const wchar_t* key) {
+    if (!parent || !key) {
+        return Ztl_variant_t{};
+    }
+    return parent->item[key];
+}

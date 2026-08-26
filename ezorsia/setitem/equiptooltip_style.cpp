@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "equiptooltip_style.h"
+#include "Client.h"
 #include "Memory.h"
 #include "compat/hook.h"
 #include "compat/ClientAddresses.h"
@@ -117,6 +118,7 @@ static bool g_fontsReady = false;
 static CUIToolTip* g_notedTip = nullptr;
 static int g_notedX = 0;
 static int g_notedY = 0;
+static int g_ctxCategoryItemId = 0;
 
 static char g_statLabel[15][64] = {};
 static bool g_statLabelsReady = false;
@@ -399,10 +401,10 @@ static int SafeItemId(GW_ItemSlotEquipLocal* pe) {
     if (!pe) {
         return 0;
     }
-    try {
+    __try {
         return reinterpret_cast<int(__thiscall*)(const void*)>(kAddr_TSecTypeGetData)(
                 reinterpret_cast<const char*>(pe) + 0xC);
-    } catch (...) {
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
     }
 }
@@ -483,6 +485,7 @@ static const char kCatMechHeart[] = "\xBB\xFA\xD0\xB5\xD0\xC4\xD4\xE0"; // ji xi
 static const char kCatBelt[] = "\xD1\xFC\xB4\xF8";                       // 腰带
 static const char kCatMedal[] = "\xD1\xAB\xD5\xC2";                      // 勋章
 static const char kCatPendant[] = "\xCF\xEE\xC1\xB4";                    // 项链
+static const char kCatPetEquip[] = "\xB3\xE8\xCE\xEF\xB5\xC4\xD7\xB0\xB1\xB8"; // 宠物的装备
 
 static const SiCatRange kSi135Ranges[] = {
         {1352000, 1352014, "\xC4\xA7\xB7\xA8\xBC\xFD\xCA\xB8"},     // 魔法箭矢
@@ -569,6 +572,11 @@ static std::string CategoryLabel(int itemId) {
     case 120: return kCatTotem;          // 图腾
     case 166: return kCatAndroid;
     case 167: return "\xBB\xFA\xD0\xB5\xD0\xC4\xD4\xE0";
+    case 180:
+    case 181:
+    case 182:
+    case 183:
+        return kCatPetEquip;
     default:
         if (cat >= 130 && cat <= 149) {
             return "\xCE\xE4\xC6\xF7"; // 武器
@@ -615,6 +623,11 @@ static const char* OverrideCategoryGbk(int itemId) {
     case 135: return OfficialSiCategoryGbk(itemId);
     case 166: return kCatAndroid;
     case 167: return "\xBB\xFA\xD0\xB5\xD0\xC4\xD4\xE0";
+    case 180:
+    case 181:
+    case 182:
+    case 183:
+        return kCatPetEquip;
     default: return nullptr;
     }
 }
@@ -630,14 +643,25 @@ static ZXString<char>* __cdecl Hook_GetWeaponCategoryName(ZXString<char>* out, i
 }
 
 // Belt-and-suspenders: inventory/other UIs may call bodypart category directly.
-static ZXString<char>* __cdecl Hook_GetEquipCategoryByBodyPart(ZXString<char>* out, int itemId) {
+static ZXString<char>* __cdecl Hook_GetEquipCategoryByBodyPart(ZXString<char>* out, int bodyPart) {
     if (!out) {
-        return Original_GetEquipCategoryByBodyPart(out, itemId);
+        return Original_GetEquipCategoryByBodyPart(out, bodyPart);
     }
-    if (const char* label = OverrideCategoryGbk(itemId)) {
-        return AssignCategoryLabel(out, label);
+    // Vanilla passes bodypart, not itemId — use tooltip context when available.
+    if (g_ctxCategoryItemId > 0) {
+        if (const char* label = OverrideCategoryGbk(g_ctxCategoryItemId)) {
+            return AssignCategoryLabel(out, label);
+        }
+        const std::string cat = CategoryLabel(g_ctxCategoryItemId);
+        if (!cat.empty()) {
+            return AssignCategoryLabel(out, cat.c_str());
+        }
     }
-    return Original_GetEquipCategoryByBodyPart(out, itemId);
+    // Pocket BP33 shares pet StringPool — never show 宠物的装备 for 116 prefix.
+    if (bodyPart == 33 && g_ctxCategoryItemId > 0 && (g_ctxCategoryItemId / 10000) == 116) {
+        return AssignCategoryLabel(out, kCatPocket);
+    }
+    return Original_GetEquipCategoryByBodyPart(out, bodyPart);
 }
 
 static void AppendColon(
@@ -783,6 +807,10 @@ void EquipTooltipStyle_NoteHoverPos(CUIToolTip* tip, int x, int y) {
     g_notedY = y;
 }
 
+void EquipTooltipStyle_SetContextItemId(int itemId) {
+    g_ctxCategoryItemId = itemId;
+}
+
 bool EquipTooltipStyle_TryDrawCustom(
         CUIToolTip* tip,
         GW_ItemSlotEquip* pe,
@@ -802,6 +830,12 @@ void AttachEquipTooltipStyleHooks() {
         return;
     }
     g_styleAttached = true;
+
+    // Category ZXString overrides corrupt vanilla equip tooltip (CANVAS AV @0xFFFFFEE6).
+    // Keep off unless you accept tooltip risk; Si/Pocket labels fall back to stock StringPool.
+    if (!Client::enableEquipCategoryOverride) {
+        return;
+    }
 
     // Official Si/Pocket labels for tooltip「装备分类」(does not touch WZ islot).
     ATTACH_HOOK(Original_GetWeaponCategoryName, Hook_GetWeaponCategoryName);

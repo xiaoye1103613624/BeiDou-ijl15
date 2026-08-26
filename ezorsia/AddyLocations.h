@@ -438,6 +438,9 @@ const DWORD dwLoginUsernameRtn = 0x006209B1;
 const DWORD dwLoginPassword = 0x00620A0D;
 const DWORD dwLoginPasswordRtn = 0x00620A15;
 
+// CREATEPARAM at [ebp-0x88]: +0x24 backcolor (mov imm32 @ +3), +0x1C font ARGB.
+// 0x00620930 is `or dword ptr [ebp-0x6C], imm8` that forces font white (0xFFFFFFFF).
+// Imm8@+3: stock=0xFF (white); patch 0x00 to keep CREATEPARAM default black (0xFF000000).
 const DWORD dwLoginInputBackgroundColor = 0x0062094F;
 const DWORD dwLoginInputFontColor = 0x00620930;
 const DWORD dwLoginLoginBtn = 0x00620644;

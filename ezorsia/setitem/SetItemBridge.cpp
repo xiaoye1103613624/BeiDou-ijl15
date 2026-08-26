@@ -25,6 +25,9 @@ int g_critRate = 0;
 int g_critDam = 0;
 int g_padR = 0;
 int g_madR = 0;
+int g_itemDropProp = 0;
+int g_mesoDropProp = 0;
+int g_damageReduce = 0;
 } // namespace SetItemData
 
 namespace {
@@ -88,6 +91,12 @@ bool HandleSetItemInbound(void* /*clientSocket*/, CompatInPacket* packet, unsign
                 for (uint16_t i = 0; i < n && packet->CanRead(2); ++i) {
                     packet->Decode<uint16_t>();
                 }
+            }
+            // 尾部：物品掉落% / 金币掉落% / 伤害减免%
+            if (packet->CanRead(6)) {
+                SetItemData::g_itemDropProp = static_cast<int>(packet->Decode<uint16_t>());
+                SetItemData::g_mesoDropProp = static_cast<int>(packet->Decode<uint16_t>());
+                SetItemData::g_damageReduce = static_cast<int>(packet->Decode<uint16_t>());
             }
         }
         return true;

@@ -200,12 +200,11 @@ void AppendMemoryLines(char* buf, size_t bufCch, size_t* used) {
     const DWORD user = GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS);
     *used += sprintf_s(buf + *used, bufCch - *used, "GDI=%u USER=%u\r\n", gdi, user);
 
-    // User VA summary (x86 2/3GB user space walk).
-    uintptr_t addr = 0;
     unsigned long long freeTotal = 0;
     unsigned long long maxFree = 0;
     unsigned long long reserveTotal = 0;
     unsigned long long commitTotal = 0;
+    uintptr_t addr = 0;
     MEMORY_BASIC_INFORMATION mbi{};
     while (addr < 0x80000000u && VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi))) {
         const unsigned long long region = static_cast<unsigned long long>(mbi.RegionSize);
@@ -508,10 +507,71 @@ VARIANT* __fastcall Hook_GetObjectA(
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
+
+    // Low-VA FlushCachedObjects(0) BEFORE GetObject — enter-game Character/NPC canvas
+    // alloc fails with E_POINTER when maxFree≈24MB; post-GetObject flush is too late.
+    // COM vtable index 9 = raw_FlushCachedObjects (IWzResMan.h). Fail-soft.
+    //
+    // 2026-08-21 11:55: every-GetObject flush when maxFree<64MB + retain/sweep=2s caused
+    // SET_FIELD AV (EIP 0xA292F9, read *(null+0x3D) in Hyper Body check) — live UI/char
+    // refs freed mid-enter. Rate-limit only; never flush on every GetObject.
+    if (Client::enableResManTimeout && Client::enableResManFlush &&
+        Client::resManLowVaFlushMb > 0 && pThis) {
+        static volatile LONG s_lastFlushTick = 0;
+        static volatile LONG s_lastWasCritical = 0;
+        const LONG now = static_cast<LONG>(GetTickCount());
+        const LONG prev = InterlockedCompareExchange(&s_lastFlushTick, 0, 0);
+        const bool wasCrit = InterlockedCompareExchange(&s_lastWasCritical, 0, 0) != 0;
+        const LONG minGap = wasCrit ? 50 : 400;
+        if ((now - prev) >= minGap || prev == 0) {
+            const unsigned long long maxFree = CrashDiag_GetMaxFreeVa();
+            const unsigned long long thresh =
+                static_cast<unsigned long long>(Client::resManLowVaFlushMb) * 1024ull * 1024ull;
+            const unsigned long long critical = 32ull * 1024ull * 1024ull;
+            if (maxFree > 0 && maxFree < thresh) {
+                InterlockedExchange(&s_lastFlushTick, now);
+                InterlockedExchange(&s_lastWasCritical, (maxFree < critical) ? 1 : 0);
+                __try {
+                    void** vt = *reinterpret_cast<void***>(pThis);
+                    auto flush = reinterpret_cast<HRESULT(__stdcall*)(void*, int)>(vt[9]);
+                    if (flush) {
+                        flush(pThis, 0);
+                    }
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                }
+            }
+        }
+    }
+
     return g_GetObjectA(pThis, edx, pResult, pBstr, pParam, pAux);
 }
 
 } // namespace
+
+unsigned long long CrashDiag_GetMaxFreeVa() {
+    unsigned long long maxFree = 0;
+    uintptr_t addr = 0;
+    MEMORY_BASIC_INFORMATION mbi{};
+    __try {
+        while (addr < 0x80000000u && VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi))) {
+            if (mbi.State == MEM_FREE) {
+                const unsigned long long region = static_cast<unsigned long long>(mbi.RegionSize);
+                if (region > maxFree) {
+                    maxFree = region;
+                }
+            }
+            const uintptr_t next =
+                reinterpret_cast<uintptr_t>(mbi.BaseAddress) + static_cast<uintptr_t>(mbi.RegionSize);
+            if (next <= addr) {
+                break;
+            }
+            addr = next;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return maxFree;
+}
 
 void CrashDiag_NoteWzPath(const wchar_t* path) {
     NoteWzPathInternal(path);

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 // Addon equip panel 鈥?poll BED64C/ctx+0x35C0 + Equip-overlay dock.
 // Stamp: ADDON_APPEND_ONLY_EXTEND_20260804
@@ -15,7 +15,8 @@ void AttachEquipAddonMod();
 extern "C" void* __cdecl EquipAddon_SidecarZRefForBp(int bp);
 
 namespace EquipAddon {
-// NO-OP stub 鈥?must NEVER be called from DllMain (avoid #35/#38).
+// NO-OP stub was wrong: caves MUST run before getCharInfo (DllMain after shoulders).
+// Get/Set Detours + UI remain FieldInit-only (EnsureHooks).
 void InstallLoginPersistEarly();
 void EnsureHooks(); // Get/Set + Apply + UiHooks (Layer/OnTick/Park OFF)
 void OnTick();

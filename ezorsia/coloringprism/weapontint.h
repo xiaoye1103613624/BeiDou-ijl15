@@ -6,17 +6,50 @@ class CompatInPacket;
 // ============================================================
 // weapontint.h: the HSB re-tint applied to a worn Cash weapon.
 //
-// A tint is an absolute hue rotation plus a saturation and a value delta, which
-// is exactly what the modern Coloring Prism dialog exposes as Tone / Chroma /
-// Brightness. The identity tint (all three zero) means "vanilla", so no separate
-// "is dyed" flag is needed anywhere: on the wire, in the DB, or in this struct.
+// A tint is a hue instruction plus a saturation and a value delta, roughly what the modern
+// Coloring Prism dialog exposes as Tone / Chroma / Brightness. The identity tint (all three
+// zero) means "vanilla", so no separate "is dyed" flag is needed anywhere: on the wire, in
+// the DB, or in this struct.
+//
+// THE SIGN OF `hue` SELECTS THE SEMANTIC:
+//     hue  > 0   ROTATE the sprite's own hue by that many degrees (1..359)
+//     hue  < 0   SET an absolute target hue, encoded as -(degrees + 1), so -1 is 0 degrees
+//                and -360 is 359
+//     hue == 0   leave the hue alone
+//
+// Both forms are needed and neither is right for everything. A rotation preserves a
+// sprite's internal hue relationships, so a two-tone item keeps both tones; an absolute
+// target collapses every pixel onto one hue. Measured over 235 items, 40% are not
+// essentially single-hue and 30% clearly carry several, so a system that can only do one of
+// the two is wrong for a third of the wardrobe either way.
+//
+// ENCODING ABSOLUTE AS NEGATIVE MAKES THE SIGN A VERSION TAG. Every record written before
+// this existed is positive, so it keeps rotating exactly as it did and needs no migration --
+// which is what lets absolute hue be introduced later without resetting anyone's dyes. The
+// encoding is what makes 0 mean "no change" rather than "absolute red", and it costs no
+// database column and no packet byte: SMALLINT is signed.
 // ============================================================
 struct WeaponTint {
-    short       hue    = 0;   //    0..359  degrees, absolute rotation
-    signed char chroma = 0;   // -100..100  saturation delta, percent
-    signed char bright = 0;   // -100..100  value delta, percent
+    short       hue    = 0;   // 0 none; 1..359 rotate; -(deg+1) absolute. See above.
+    signed char chroma = 0;   // -100..100  saturation, percent
+    signed char bright = 0;   // -100..100  value, percent
 
     bool IsIdentity() const { return hue == 0 && chroma == 0 && bright == 0; }
+    bool IsAbsoluteHue() const { return hue < 0; }
+    // The degrees this means, whichever form it is in. 0..359 either way.
+    int HueDegrees() const {
+        return hue < 0 ? -static_cast<int>(hue) - 1 : static_cast<int>(hue);
+    }
+    static short EncodeAbsoluteHue(int degrees) {
+        if (degrees < 0) degrees = 0;
+        if (degrees > 359) degrees = 359;
+        return static_cast<short>(-(degrees + 1));
+    }
+    // Both forms, and nothing else. Anything outside these two bands is a decode error or a
+    // hostile packet, not a colour.
+    static bool IsHueValid(int hue) {
+        return (hue >= 0 && hue <= 359) || (hue >= -360 && hue <= -1);
+    }
     bool operator==(const WeaponTint& o) const {
         return hue == o.hue && chroma == o.chroma && bright == o.bright;
     }
@@ -54,8 +87,13 @@ constexpr signed char kTintDeltaMax =  100;
 // ============================================================
 constexpr int kTintKey_Hair = 1;
 constexpr int kTintKey_Face = 2;
+// Skin is the body and arm canvases in Character/000020NN.img, NOT an equip and not a
+// recolour of the client's own skin palette: the same HSB rotation every other tab uses.
+constexpr int kTintKey_Skin = 3;
 
-inline bool IsLookTintKey(int key) { return key == kTintKey_Hair || key == kTintKey_Face; }
+inline bool IsLookTintKey(int key) {
+    return key == kTintKey_Hair || key == kTintKey_Face || key == kTintKey_Skin;
+}
 
 // An item's EFFECT layers are dyed separately from its body, so they need a second key
 // per item. Biasing the id keeps one table and one wire format: equip ids top out at
@@ -63,9 +101,28 @@ inline bool IsLookTintKey(int key) { return key == kTintKey_Hair || key == kTint
 // or with another item's effect key. Only ~3.4% of installed equips have effect layers
 // at all (mostly cash weapons), so most items never produce one of these.
 constexpr int kTintKey_EffectBias = 10000000;
-inline bool IsEffectTintKey(int key) { return key >= kTintKey_EffectBias; }
+// BOUNDED, deliberately. This used to be an open-ended `key >= kTintKey_EffectBias`, which
+// silently claimed every value above ten million and made any future key band impossible to
+// add without misclassifying it as an equip effect. Equip ids top out at 1999999, so effect
+// keys top out here.
+constexpr int kTintKey_EffectMax  = kTintKey_EffectBias + 1999999;
+inline bool IsEffectTintKey(int key) {
+    return key >= kTintKey_EffectBias && key <= kTintKey_EffectMax;
+}
 inline int  EffectTintKeyFor(int itemId) { return itemId + kTintKey_EffectBias; }
 inline int  ItemOfEffectTintKey(int key) { return key - kTintKey_EffectBias; }
+
+// SKILLS NEED THEIR OWN BAND because skill ids collide head-on with equip ids: 1001003,
+// 2101005 and 4111004 all sit inside the equip range 1000000..1999999, so a raw skill id as
+// a tint key would dye a hat. Skill ids run to about 5xxxxxx, so 30000000 clears both the
+// equip band and the effect band above with room to spare.
+constexpr int kTintKey_SkillBias = 30000000;
+constexpr int kTintKey_SkillMax  = kTintKey_SkillBias + 9999999;
+inline bool IsSkillTintKey(int key) {
+    return key >= kTintKey_SkillBias && key <= kTintKey_SkillMax;
+}
+inline int  SkillTintKeyFor(int skillId) { return skillId + kTintKey_SkillBias; }
+inline int  SkillOfTintKey(int key) { return key - kTintKey_SkillBias; }
 
 // Custom opcode pair from a private 0x372x block, following an even/odd
 // request/reply convention.
@@ -93,6 +150,25 @@ void AttachWeaponTintMod();
 bool WeaponTint_BeginItemEffSwap(void* pAvatar, int itemId);
 void WeaponTint_EndItemEffSwap();
 
+// The same pair for a CASH EFFECT item's art under Item/Cash/0501.img (or 0528.img).
+// The window uses these around the preview avatar's own effect layer; the client's two
+// cash-effect Detours use the internal form directly.
+bool WeaponTint_BeginCashEffectSwap(void* pAvatar, int itemId);
+void WeaponTint_EndCashEffectSwap();
+
+// The same pair for a SKILL's effect art under Skill/<job>.img/skill/<id>. The window uses
+// these around its own preview build; the client-side ShowSkillEffect Detour uses the
+// internal form directly.
+bool WeaponTint_BeginSkillSwap(void* pAvatar, int skillId);
+void WeaponTint_EndSkillSwap();
+// Is this a cash EFFECT item, the 5010000..5019999 group that sits in the Cash tab and
+// plays an effect around the character? Those are dyed through the Effects tab like an
+// item's glow, but they are not equips, so the window's drop gate has to admit them
+// separately.
+inline bool IsCashEffectItemId(int itemId) {
+    return itemId >= 5010000 && itemId <= 5019999;
+}
+
 // Main thread, once per frame (driven from the per-frame update hook). Applies a
 // tint the server pushed while the packet was being handled on the receive thread.
 void WeaponTint_Tick();
@@ -105,7 +181,11 @@ struct WeaponTintTarget {
     int invType = 0;     // InventoryType value; EQUIPPED for a worn item
     int invPos  = 0;     // position within that inventory, negative when worn
     int itemId  = 0;
-    bool IsSet() const { return itemId > 0; }
+    // A SKILL has no inventory address, so it fills this instead and leaves the three above
+    // at zero. The two are mutually exclusive: whichever is set is what the window is aimed
+    // at, and IsSet() answers for both so every "is there a target" test keeps working.
+    int skillId = 0;
+    bool IsSet() const { return itemId > 0 || skillId > 0; }
 };
 
 // Item id in the worn Cash-weapon slot, or 0 if the player has no Cash weapon on.
@@ -119,6 +199,24 @@ WeaponTint WeaponTint_GetSavedFor(int itemId);
 // While the prism window is open its slider values REPLACE the saved tint for the
 // ONE item being dyed, so that item recolors live while the rest of the outfit
 // keeps its own colours. Passing active=false drops back to the saved tint.
+// The base (non-cash) weapon id an avatar is wearing, or 0. Used to pick an attack pose that
+// the weapon in hand can actually play.
+// Zero a canvas to fully transparent. False if the surface could not be written, which for a
+// caller with a region it does not otherwise repaint means: leave that region alone.
+// A projectile has been queued carrying skill BALL art, arriving at {@code tArriveFrameTime} on
+// the client frame clock. Its sprite resolves on a later logic tick rather than in the call that
+// queues it, so the skill's tint has to stay in the WZ tree until then -- otherwise only the
+// first shot of a volley comes out dyed. No-op unless a cast's swap is currently held.
+void WeaponTint_NoteBulletFlight(void* psBallUol, int nBulletItemId, int tArriveFrameTime);
+
+bool WeaponTint_ClearCanvas(void* pCanvas, int w, int h);
+
+// Does this equip carry glow art of its own, separate from its sprite? False means there is no
+// second layer to dye, and the window greys its glow chip. Cached per item id.
+bool WeaponTint_ItemHasEffectArt(int itemId);
+
+int WeaponTint_BaseWeaponIdOf(void* pAvatar);
+
 void WeaponTint_SetPreview(int itemId, const WeaponTint& t, bool active);
 bool WeaponTint_IsPreviewActive();
 
@@ -171,6 +269,11 @@ void WeaponTint_SendRestore(const WeaponTintTarget& target, int prismPos, int la
 // the server reads the character's own hair/face instead. Separate ACTIONS on the
 // same opcode, since reusing apply/restore would drive them through a resolve()
 // that demands a Cash equip at a given inventory position.
+// Skills tab. A skill is named by its ID: it has no inventory address for the server to
+// re-derive it from, so the server verifies instead that the character knows the skill.
+void WeaponTint_SendApplySkill(int skillId, const WeaponTint& t, int prismPos);
+void WeaponTint_SendRestoreSkill(int skillId, int prismPos);
+
 void WeaponTint_SendApplyLook(int kind, const WeaponTint& t, int prismPos);
 void WeaponTint_SendRestoreLook(int kind, int prismPos);
 
@@ -178,6 +281,7 @@ void WeaponTint_SendRestoreLook(int kind, int prismPos);
 // local CAvatar's own look, so no server round trip is needed to preview them.
 int WeaponTint_GetLocalHairId();
 int WeaponTint_GetLocalFaceId();
+int WeaponTint_GetLocalSkinId();
 
 // Result of the last APPLY / RESTORE the server answered, for the window to report.
 enum WeaponTintResult {

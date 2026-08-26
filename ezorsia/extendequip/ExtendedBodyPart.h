@@ -65,15 +65,15 @@ inline constexpr ExtendedBodyPart kBodyParts[] = {
      DrawPolicy::RemapXY, WireWhen::Always, true, 104, 35, true, "ExtraRing red3"},
     {53, 111, "Ri", UiSeat::MainEquip, StorageTier::ShadowGetSet, true,
      DrawPolicy::RemapXY, WireWhen::Always, true, 137, 35, true, "ExtraRing red4"},
-    // Pocket −33 classic Equip; Aux −62 classic red10 (sidecar storage).
+    // Pocket −33 classic Equip red1; Aux −62 classic red6 (sidecar storage).
     {33, 116, "Po", UiSeat::MainEquip, StorageTier::NativeApplyMax55, false,
-     DrawPolicy::RemapXY, WireWhen::EquipOpen, false, 104, 200, true, "classic pocket red9"},
+     DrawPolicy::RemapXY, WireWhen::EquipOpen, false, 5, 35, true, "classic pocket red1"},
     {10, 109, "Si", UiSeat::MainEquip, StorageTier::NativeApplyMax55, false,
      DrawPolicy::Vanilla, WireWhen::Always, false, 0, 0, true, "109 vanilla shield"},
     {62, 134, "Aw", UiSeat::MainEquip, StorageTier::SidecarZRef, true,
-     DrawPolicy::RemapXY, WireWhen::Always, true, 137, 200, true, "classic aux −62"},
+     DrawPolicy::RemapXY, WireWhen::Always, true, 5, 101, true, "classic aux −62 red6"},
     {62, 135, "Aw", UiSeat::MainEquip, StorageTier::SidecarZRef, true,
-     DrawPolicy::RemapXY, WireWhen::Always, true, 137, 200, true, "classic aux −62"},
+     DrawPolicy::RemapXY, WireWhen::Always, true, 5, 101, true, "classic aux −62 red6"},
     // Badge / Totem / Emblem / Android / Heart — Addon
     {54, 118, "Ba", UiSeat::AddonDock, StorageTier::ShadowGetSet, true,
      DrawPolicy::AddonOverlay, WireWhen::Always, true, -2000, -2000, true, "badge"},

@@ -139,6 +139,11 @@ void InstallBootstrapHookOnce() {
     static auto originalFieldInit = reinterpret_cast<FieldInit_t>(kCFieldInit);
 
     FieldInit_t hook = [](void* pThis, void* edx) -> void {
+        // Char-select → field: one flush before map+NPC canvas alloc (not mid/post).
+        // IDA: CField::Init@0x528DBC (existing LazyCompat hook — no new VA).
+        // 2026-08-21: mid/post FlushCachedObjects(0) during Init freed live UI/char
+        // refs → SET_FIELD AV at 0xA292F9. Keep single pre-flush only.
+        rs_resman_flush_cached(0);
         rs_on_enter_field();
         EnsureInitializedOnce();
         if (!Client::disableBossHP) {

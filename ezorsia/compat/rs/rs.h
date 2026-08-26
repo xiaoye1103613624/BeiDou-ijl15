@@ -36,3 +36,5 @@ void rs_on_enter_field();
 void rs_register();
 // Custom.wz resource manager (call once at DllMain, BEFORE InitializeResMan)
 void rs_resman_init();
+/** Fail-soft FlushCachedObjects on g_rm. Safe no-op if ResMan not ready. */
+void rs_resman_flush_cached(int nUsedBefore);

@@ -94,6 +94,148 @@ void* FakeTearTarget() {
     return CastHook(&HPMP_FakeTear);
 }
 
+// ---------------------------------------------------------------------------
+// Server-authoritative MaxHP/MaxMP sync (set bonus / addon stats)
+// ---------------------------------------------------------------------------
+// Sync ctx+0x211C/0x2128 ONLY when server pushes MaxHP/MaxMP (STAT_CHANGED /
+// login). Do NOT hook TryRecovery — per-frame sync made it think HP was low and
+// played potion SFX (sub_92EC50) on every skill tick.
+
+// IDA sub_A02E34 (TryRecovery): reads equip-cache Max at ctx+0x211C/0x2128.
+// Sync ONLY on server STAT_CHANGED MaxHP/MaxMP (FakeTearAuthMax*) — never hook
+// TryRecovery itself (every-frame ForceSync caused false regen + potion SFX).
+
+constexpr uintptr_t kCWvsContextSingleton = 0x00BE7918;
+constexpr int kCtxEquipMaxHpTear = 0x211C;
+constexpr int kCtxEquipMaxHpCs = 0x2124;
+constexpr int kCtxEquipMaxMpTear = 0x2128;
+constexpr int kCtxEquipMaxMpCs = 0x2130;
+
+static int g_authoritativeMaxHp = 0;
+static int g_authoritativeMaxMp = 0;
+
+static void* ReadContextPtr(uintptr_t singletonAddr) {
+    __try {
+        return *reinterpret_cast<void**>(singletonAddr);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+static void WriteContextEquipMaxHp(void* ctx, int maxHp) {
+    if (!ctx || maxHp <= 0) {
+        return;
+    }
+    __try {
+        char* base = static_cast<char*>(ctx);
+        *reinterpret_cast<int*>(base + kCtxEquipMaxHpTear) = maxHp;
+        *reinterpret_cast<unsigned int*>(base + kCtxEquipMaxHpCs) = 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+static void WriteContextEquipMaxMp(void* ctx, int maxMp) {
+    if (!ctx || maxMp <= 0) {
+        return;
+    }
+    __try {
+        char* base = static_cast<char*>(ctx);
+        *reinterpret_cast<int*>(base + kCtxEquipMaxMpTear) = maxMp;
+        *reinterpret_cast<unsigned int*>(base + kCtxEquipMaxMpCs) = 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+static void SyncContextEquipMaxHp(int maxHp) {
+    if (maxHp <= 0) {
+        return;
+    }
+    g_authoritativeMaxHp = maxHp;
+    WriteContextEquipMaxHp(ReadContextPtr(kCWvsContextSingleton), maxHp);
+}
+
+static void SyncContextEquipMaxMp(int maxMp) {
+    if (maxMp <= 0) {
+        return;
+    }
+    g_authoritativeMaxMp = maxMp;
+    WriteContextEquipMaxMp(ReadContextPtr(kCWvsContextSingleton), maxMp);
+}
+
+static int MergeWithAuthoritativeMaxHp(int value) {
+    return (g_authoritativeMaxHp > value) ? g_authoritativeMaxHp : value;
+}
+
+static int MergeWithAuthoritativeMaxMp(int value) {
+    return (g_authoritativeMaxMp > value) ? g_authoritativeMaxMp : value;
+}
+
+static int ReadFakeTearInt(void* ptr) {
+    if (!ptr) {
+        return 0;
+    }
+    __try {
+        return *reinterpret_cast<int*>(ptr);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+// Never let stat/equip recalc downgrade Max below server Max or prior stored Max.
+static int MergeRecalcMaxHp(int value, void* ptr) {
+    int merged = MergeWithAuthoritativeMaxHp(value);
+    const int existing = ReadFakeTearInt(ptr);
+    if (existing > merged) {
+        merged = existing;
+    }
+    return merged;
+}
+
+static int MergeRecalcMaxMp(int value, void* ptr) {
+    int merged = MergeWithAuthoritativeMaxMp(value);
+    const int existing = ReadFakeTearInt(ptr);
+    if (existing > merged) {
+        merged = existing;
+    }
+    return merged;
+}
+
+unsigned int __fastcall HPMP_FakeTearAuthMaxHp(int value, void* ptr) {
+    const unsigned int cs = HPMP_FakeTear(value, ptr);
+    SyncContextEquipMaxHp(value);
+    return cs;
+}
+
+unsigned int __fastcall HPMP_FakeTearAuthMaxMp(int value, void* ptr) {
+    const unsigned int cs = HPMP_FakeTear(value, ptr);
+    SyncContextEquipMaxMp(value);
+    return cs;
+}
+
+unsigned int __fastcall HPMP_FakeTearRecalcMaxHp(int value, void* ptr) {
+    return HPMP_FakeTear(MergeRecalcMaxHp(value, ptr), ptr);
+}
+
+unsigned int __fastcall HPMP_FakeTearRecalcMaxMp(int value, void* ptr) {
+    return HPMP_FakeTear(MergeRecalcMaxMp(value, ptr), ptr);
+}
+
+void* FakeTearAuthMaxHpTarget() {
+    return CastHook(&HPMP_FakeTearAuthMaxHp);
+}
+
+void* FakeTearAuthMaxMpTarget() {
+    return CastHook(&HPMP_FakeTearAuthMaxMp);
+}
+
+void* FakeTearRecalcMaxHpTarget() {
+    return CastHook(&HPMP_FakeTearRecalcMaxHp);
+}
+
+void* FakeTearRecalcMaxMpTarget() {
+    return CastHook(&HPMP_FakeTearRecalcMaxMp);
+}
+
 // Global Fuse hooks (Detours) - checksum==0 sentinel means "raw HP/MP slot,
 // read *(int*)pTear directly"; any other checksum falls through to the real
 // (encrypted) Fuse so every other ZtlSecure<short>/<long> stat is untouched.
@@ -358,6 +500,10 @@ void AttachMaxHpMpMod() {
 
     void* const decode4 = reinterpret_cast<void*>(kAddr_CInPacket_Decode4);
     void* const fakeTear = FakeTearTarget();
+    void* const fakeTearAuthMaxHp = FakeTearAuthMaxHpTarget();
+    void* const fakeTearAuthMaxMp = FakeTearAuthMaxMpTarget();
+    void* const fakeTearRecalcMaxHp = FakeTearRecalcMaxHpTarget();
+    void* const fakeTearRecalcMaxMp = FakeTearRecalcMaxMpTarget();
 
     const CallPatch kCallPatches[] = {
         // Category 1: Decode2 -> Decode4
@@ -377,22 +523,22 @@ void AttachMaxHpMpMod() {
 
         // Category 2: FakeTear (raw 4-byte storage)
         { 0x004E2BA4, kAddr_ZtlSecureTear_short, fakeTear, "FakeTear_Login_HP" },
-        { 0x004E2BB8, kAddr_ZtlSecureTear_short, fakeTear, "FakeTear_Login_MaxHP" },
+        { 0x004E2BB8, kAddr_ZtlSecureTear_short, fakeTearAuthMaxHp, "FakeTear_Login_MaxHP" },
         { 0x004E2BCC, kAddr_ZtlSecureTear_short, fakeTear, "FakeTear_Login_MP" },
-        { 0x004E2BE0, kAddr_ZtlSecureTear_short, fakeTear, "FakeTear_Login_MaxMP" },
+        { 0x004E2BE0, kAddr_ZtlSecureTear_short, fakeTearAuthMaxMp, "FakeTear_Login_MaxMP" },
         { 0x00776224, kAddr_ZtlSecureTear_short, fakeTear, "FakeTear_OnSetField_HP" },
         { 0x004E30E4, kAddr_ZtlSecureTear_short, fakeTear, "FakeTear_StatChanged_HP" },
-        { 0x004E30FE, kAddr_ZtlSecureTear_short, fakeTear, "FakeTear_StatChanged_MaxHP" },
+        { 0x004E30FE, kAddr_ZtlSecureTear_short, fakeTearAuthMaxHp, "FakeTear_StatChanged_MaxHP" },
         { 0x004E3118, kAddr_ZtlSecureTear_short, fakeTear, "FakeTear_StatChanged_MP" },
-        { 0x004E3132, kAddr_ZtlSecureTear_short, fakeTear, "FakeTear_StatChanged_MaxMP" },
+        { 0x004E3132, kAddr_ZtlSecureTear_short, fakeTearAuthMaxMp, "FakeTear_StatChanged_MaxMP" },
         { 0x007646F2, kAddr_ZtlSecureTear_short, fakeTear, "FakeTear_SkillConsume_HP" },
         { 0x0076470F, kAddr_ZtlSecureTear_short, fakeTear, "FakeTear_SkillConsume_MP" },
         { 0x00967B94, kAddr_ZtlSecureTear_short, fakeTear, "FakeTear_DoActiveSkill_HP" },
         { 0x00967BA2, kAddr_ZtlSecureTear_short, fakeTear, "FakeTear_DoActiveSkill_MP" },
-        { 0x0078D914, kAddr_ZtlSecureTear_short, fakeTear, "FakeTear_StatRecalc_MaxHP" },
-        { 0x0078D961, kAddr_ZtlSecureTear_short, fakeTear, "FakeTear_StatRecalc_MaxMP" },
-        // Equipment Stat Calculation / sub_77EC9F Tear_long writes (CUIStatusBar
-        // reads MaxHP/MaxMP via ZtlSecureFuse_long from these slots).
+        { 0x0078D914, kAddr_ZtlSecureTear_short, fakeTearRecalcMaxHp, "FakeTear_StatRecalc_MaxHP" },
+        { 0x0078D961, kAddr_ZtlSecureTear_short, fakeTearRecalcMaxMp, "FakeTear_StatRecalc_MaxMP" },
+        // Equipment Stat Calculation / sub_77EC9F — plain FakeTear (no auth merge;
+        // merging here + TryRecovery sync caused false potion regen / max<current).
         { 0x0077ED9D, kAddr_ZtlSecureTear_long, fakeTear, "FakeTear_EquipCalc_MaxHP_Init" },
         { 0x0077EF78, kAddr_ZtlSecureTear_long, fakeTear, "FakeTear_EquipCalc_MaxHP_Loop1" },
         { 0x0077F0EF, kAddr_ZtlSecureTear_long, fakeTear, "FakeTear_EquipCalc_MaxHP_Loop2" },

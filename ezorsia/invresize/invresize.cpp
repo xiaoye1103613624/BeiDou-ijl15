@@ -110,8 +110,13 @@
 // All of it is byte-guarded up front; on any mismatch nothing is written and
 // the inventory keeps its stock fixed 4x6 window.
 //
-// If another mod in your tree Detours CUIItem::Draw (0x0081DC20) or
-// OnMouseButton (0x0081D42E), that is fine -- this file touches neither.
+// Also patched (byte-guarded):
+//   scroll range clamp : 0x0081D29C  (SetTab SetRange result -> max(1, n))
+//
+// CAPACITY VS DISPLAY
+//   120 is only the max VISIBLE cells (imm8 budget). Purchased slots beyond
+//   that remain reachable via the scrollbar. GetSlotRect clamps to owned
+//   capacity so past-capacity cells are not clickable/droppable.
 // ============================================================
 
 #include "stdafx.h"
@@ -173,6 +178,7 @@ namespace InvResize {
 constexpr uintptr_t kAddr_GetSlotRect       = 0x0081E2C8;
 constexpr uintptr_t kAddr_GetSlotPosPoint   = 0x0081DB7E;
 constexpr uintptr_t kAddr_OnCreate          = 0x0081C6C9;
+constexpr uintptr_t kAddr_CUIItem_Draw    = 0x0081DC20;
 constexpr uintptr_t kAddr_ToggleFull        = 0x0081E541;
 constexpr uintptr_t kAddr_NarrowGetterCall  = 0x0081C4BE;
 constexpr uintptr_t kAddr_Instance          = 0x00BED654;   // TSingleton<CUIItem>
@@ -198,8 +204,12 @@ constexpr int kOff_Height    = 0x28;    // CWnd::m_height
 constexpr int kOff_BgCanvas  = 0x68;    // ZRef<IWzCanvas>, what CWnd::Draw blits
 constexpr int kOff_CloseX    = 0x590;   // close-button x, W - 20
 constexpr int kOff_FirstSlot = 0x5E0;   // 1-based index of the top-left visible slot
-constexpr int kOff_TabIndex  = 0x5E4;   // 0..4
+// SetTab (0x0081D243) stores CCtrlTab index + 1: 1=Equip .. 5=Cash.
+// aaItemSlot is likewise 1-based at GW_CharacterData+0x447 + 4*tab.
+constexpr int kOff_TabIndex  = 0x5E4;   // 1..5 (NOT 0..4)
 constexpr int kOff_TabArray  = 0x447;   // GW_CharacterData + 0x447 + 4*tab -> ZArray
+constexpr int kTabIndexMin   = 1;
+constexpr int kTabIndexMax   = 5;
 
 // ---- grid geometry (the client's own numbers; see header) -------------------
 constexpr int kIcon      = 32;
@@ -216,13 +226,17 @@ constexpr int kMinRows = 3,  kMaxRows = 20;
 // Ceiling on visible cells. Two patched sites are signed imm8 fields -- the
 // Draw loop's `add eax,0x18` at 0x0081DDF9 and the scroll-range bias
 // `add eax,-0x16` at 0x0081D293, which takes -(cells-2). 120 keeps both inside
-// [-128,127]. v83 servers cap a tab at 96 slots anyway, so cells beyond that
-// only ever render empty.
+// [-128,127]. Server ExpandItem raised tab capacity to 192; the window only
+// shows up to 120 at once and scrolls for the rest.
 constexpr int kMaxCells = 120;
+// Usable slot ceiling (ZArray count is typically slotLimit+1 with slot 0 unused).
+// Stock compared against 96; ExpandItem raised the server/client max to 192.
+constexpr int kMaxOwnedSlots = 192;
 static_assert(kMaxCells <= 127, "cells no longer fits the Draw loop's imm8");
 static_assert(kMaxCells - 2 <= 128, "cells-2 no longer fits the scroll bias imm8");
 static_assert(kMaxCols * kMaxRows >= kMaxCells, "grid max cannot reach cell ceiling");
 static_assert(kMinCols * kMinRows <= kMaxCells, "grid min exceeds cell ceiling");
+static_assert(kMaxOwnedSlots <= 255, "owned-slot ceiling no longer fits imm8 compares");
 
 constexpr int kGripThickness = 7;   // grabbable band inside the right / bottom edge
 
@@ -304,9 +318,14 @@ void SehWndAbs(void* pBase, int& l, int& t) {
 // Slot count of the currently selected tab, reproducing the client's own idiom
 // from GetSlotRect 0x0081E2D4-0x0081E30D: GetCharacterData hands back an 8-byte
 // ZRef out-param whose PAYLOAD IS AT +4, the array pointer lives at
-// characterData + 0x447 + 4*tab, and the element count is the int immediately
-// BEFORE the array data. CWvsContext holds the master reference, so the local
-// one is released straight away and the raw pointer stays good.
+// characterData + 0x447 + 4*tab (tab is 1..5), and the element count is the
+// int immediately BEFORE the array data. CWvsContext holds the master
+// reference, so the local one is released straight away and the raw pointer
+// stays good.
+//
+// BUG HISTORY: an earlier guard used `nTab > 4`, which rejected Cash (tab 5).
+// GetSlotRect then clamped the visible range to 0 and the special tab looked
+// empty even though modifyInventory had already delivered the items.
 int SehTabSlotCount(void* pThis) {
     __try {
         void* ctx = *reinterpret_cast<void**>(kAddr_CWvsContext);
@@ -320,7 +339,7 @@ int SehTabSlotCount(void* pThis) {
         }
         if (!cd) return 0;
         const int nTab = *reinterpret_cast<int*>(reinterpret_cast<char*>(pThis) + kOff_TabIndex);
-        if (nTab < 0 || nTab > 4) return 0;
+        if (nTab < kTabIndexMin || nTab > kTabIndexMax) return 0;
         void* pArr = *reinterpret_cast<void**>(reinterpret_cast<char*>(cd) + kOff_TabArray + 4 * nTab);
         if (!pArr) return 0;
         const int n = *(reinterpret_cast<int*>(pArr) - 1);
@@ -369,14 +388,25 @@ bool SlotRectCore(int nPos, int nFirst, int nLimit, RECT* pOut) {
     return true;
 }
 
-// The visible half-open slot range, [first, min(first + cells, tabSlotCount)).
-// The second clamp is stock (0x0081E322-0x0081E32E) and is what stops
-// past-capacity cells being drawn into or clicked, so it is reproduced.
+// Resolve firstSlot, then the half-open visible window
+// [first, min(first + cells, tabSlotCount)). Clamping to the tab's ZArray
+// count is stock (0x0081E322-0x0081E32E) and stops past-capacity cells being
+// drawn into or clicked.
+//
+// Also heal a firstSlot that sits past the tab's capacity (stale per-tab scroll
+// after a column-count change): otherwise the draw loop runs but every
+// GetSlotRect returns empty and the page looks blank.
 void VisibleRange(void* pThis, int& nFirst, int& nLimit) {
     nFirst = SehReadInt(pThis, kOff_FirstSlot);
     const int nCount = SehTabSlotCount(pThis);
+    if (nFirst < 1) nFirst = 1;
+    if (nCount > 0 && nFirst >= nCount) {
+        nFirst = 1;
+        SehWriteInt(pThis, kOff_FirstSlot, 1);
+    }
     nLimit = nFirst + g_nCols * g_nRows;
-    if (nLimit > nCount) nLimit = nCount;
+    if (nCount > 0 && nLimit > nCount) nLimit = nCount;
+    if (nLimit < nFirst) nLimit = nFirst;
 }
 
 int __fastcall GetSlotRect_hook(void* pThis, void* /*edx*/, int nPos, RECT* pOut) {
@@ -387,7 +417,7 @@ int __fastcall GetSlotRect_hook(void* pThis, void* /*edx*/, int nPos, RECT* pOut
 }
 
 // Returns a 1-based slot, 0 = miss. Same walk the stock one does
-// (0x0081DBE6-0x0081DC11).
+// (0x0081DBE6-0x0081DC11). Owned-only: unpurchased cells are not targets.
 int __fastcall GetSlotPosFromPoint_hook(void* pThis, void* /*edx*/, int x, int y) {
     if (!pThis) return 0;
     int nFirst = 0, nLimit = 0;
@@ -400,6 +430,35 @@ int __fastcall GetSlotPosFromPoint_hook(void* pThis, void* /*edx*/, int x, int y
         if (PtInRect(&rc, pt)) return i;
     }
     return 0;
+}
+
+// ---- SetTab scroll-range clamp ------------------------------------------------
+// Stock: range = (nCount - (cells-2)) / cols + 1. When the window is larger
+// than the tab's capacity that goes <= 0 and CCtrlScrollBar looks "disabled"
+// even though the real bug is underflow. Clamp to at least 1 (single page).
+// When nCount > cells the patched bias/div already yield a positive range, so
+// purchased slots past the 120-cell window stay reachable by scrolling.
+//
+// Do NOT retarget SetTab's m_bFull gates onto the expand-max Enable() block:
+// that button lives at this+0x5DC and is only created in Full mode. Forcing it
+// in narrow mode null-derefs at 0x0081D354 (crash on open inventory).
+constexpr uintptr_t kAddr_SetScrollRange = 0x004D7DAC;
+constexpr uintptr_t kAddr_ScrollRangeInc = 0x0081D29C;   // inc eax / push eax / call
+
+static DWORD g_addrSetScrollRange = static_cast<DWORD>(kAddr_SetScrollRange);
+
+void __declspec(naked) Cave_ScrollRangeClamp() {
+    __asm {
+        inc     eax
+        cmp     eax, 1
+        jge     short range_ok
+        mov     eax, 1
+    range_ok:
+        push    eax
+        call    dword ptr [g_addrSetScrollRange]
+        push    0x0081D2A3
+        ret
+    }
 }
 
 
@@ -569,7 +628,7 @@ void InstallBackground(void* pThis, int cols, int rows) {
     // is wasted work when the size has not actually changed since the last
     // build. Recipe bumps when Band A compositing changes so an in-session
     // reconcile cannot keep a ghosted FullBackgrnd tile cached.
-    constexpr int kBgRecipe = 2;   // 2 = narrow title + blank tab plate
+    constexpr int kBgRecipe = 3;   // 3 = narrow title + blank tab plate (bump invalidates cache)
     static IWzCanvasPtr s_pCached;
     static int s_nCachedCols = -1, s_nCachedRows = -1, s_nCachedRecipe = -1;
 
@@ -680,12 +739,12 @@ void ApplySize(int cols, int rows) {
 
     ApplyLayoutConstants(cols, rows);
 
-    // Per-tab scroll rows are stored as ROW indices for the OLD column count, so
-    // they are meaningless now. Reset rather than rescale: the visible window
-    // has changed anyway, and a stale row can put m_nFirstSlot past the end.
+    // Per-tab scroll rows are indexed by m_nTabIndex (1..5); slot 0 is unused.
+    // Reset 0..5 so Cash (index 5) is not left on a stale row from the old
+    // column count -- that alone blanks the special tab after a resize.
     __try {
         int* pScroll = reinterpret_cast<int*>(kAddr_ScrollPosArray);
-        for (int i = 0; i < 5; ++i) pScroll[i] = 0;
+        for (int i = 0; i <= kTabIndexMax; ++i) pScroll[i] = 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     SehWriteInt(pThis, kOff_FirstSlot, 1);
 
@@ -737,6 +796,8 @@ void LoadSizeOnce() {
 typedef void(__thiscall* t_OnCreate)(void*, void*);
 auto CUIItem_OnCreate = reinterpret_cast<t_OnCreate>(kAddr_OnCreate);
 
+bool IsWindowLive(void* pThis);
+
 // Deliberately does NOT call LoadSizeOnce(). The constructor reads the size
 // immediates at its CreateWnd CALL SITE (0x0081C512 / 0x0081C517), which is
 // before CreateWnd -> PreCreateWnd -> OnCreate runs. Changing the grid here
@@ -753,6 +814,31 @@ void __fastcall OnCreate_hook(void* pThis, void* /*edx*/, void* pData) {
     if (W == WndW(g_nCols) && H == WndH(g_nRows)) {
         InstallBackground(pThis, g_nCols, g_nRows);
     }
+}
+
+typedef void(__thiscall* t_CUIItem_Draw)(void*, const tagRECT*);
+static t_CUIItem_Draw CUIItem_Draw_orig =
+    reinterpret_cast<t_CUIItem_Draw>(kAddr_CUIItem_Draw);
+
+void __fastcall CUIItem_Draw_hook(void* pThis, void* /*edx*/, const tagRECT* pRect) {
+    // Sort/gather invent refresh can leave stock backgrnd glyphs under CCtrlTab
+    // (narrow ghost + wide dynamic tab). Reassert composited Band A every draw.
+    if (g_bInstalled && IsWindowLive(pThis)) {
+        InstallBackground(pThis, g_nCols, g_nRows);
+    }
+    CUIItem_Draw_orig(pThis, pRect);
+}
+
+void ReinstallLiveBackground() {
+    if (!g_bInstalled) {
+        return;
+    }
+    void* pThis = SehInstance();
+    if (!IsWindowLive(pThis)) {
+        return;
+    }
+    InstallBackground(pThis, g_nCols, g_nRows);
+    Invalidate(pThis);
 }
 
 // Stock ToggleFull swapped m_bFull, which this file forces to 0 permanently.
@@ -1016,6 +1102,7 @@ bool TargetsMatch() {
     static const unsigned char kRangeBias[]    = { 0x83, 0xC0, 0xEA, 0x6A, 0x04 };            // add eax,-0x16 / push 4
     static const unsigned char kStrideA[]      = { 0x8D, 0x04, 0xBD, 0x01, 0x00, 0x00, 0x00 };  // lea eax,[edi*4+1]
     static const unsigned char kStrideB[]      = { 0x8D, 0x04, 0x85, 0x01, 0x00, 0x00, 0x00 };  // lea eax,[eax*4+1]
+    static const unsigned char kScrollInc[]    = { 0x40, 0x50, 0xE8 };                          // inc eax / push eax / call..
 
     static const GUARD aGuards[] = {
         { kAddr_GetSlotRect,      kGetSlotRect, sizeof(kGetSlotRect), "GetSlotRect" },
@@ -1036,6 +1123,7 @@ bool TargetsMatch() {
         { 0x0081D293,             kRangeBias,   sizeof(kRangeBias),   "scroll range bias" },
         { kSite_StrideA,          kStrideA,     sizeof(kStrideA),     "scroll stride (SetTab)" },
         { kSite_StrideB,          kStrideB,     sizeof(kStrideB),     "scroll stride (OnScroll)" },
+        { kAddr_ScrollRangeInc,   kScrollInc,   sizeof(kScrollInc),   "scroll range inc/push" },
     };
     for (const auto& g : aGuards) {
         if (memcmp(reinterpret_cast<void*>(g.uAddress), g.pBytes, g.uSize) != 0) {
@@ -1050,6 +1138,9 @@ bool TargetsMatch() {
 
 } // namespace InvResize
 
+void InvResize_ReinstallLiveBackground() {
+    InvResize::ReinstallLiveBackground();
+}
 
 void AttachInvResizeMod() {
     using namespace InvResize;
@@ -1071,9 +1162,16 @@ void AttachInvResizeMod() {
     PatchJmp(kAddr_ToggleFull,      CastHook(&ToggleFull_hook));
 
     ATTACH_HOOK(CUIItem_OnCreate, OnCreate_hook);
+    ATTACH_HOOK(CUIItem_Draw_orig, CUIItem_Draw_hook);
+
+    // Scroll range underflow -> at least one page (scrollbar usable when owned
+    // slots exceed the visible grid; idle when the window already shows them all).
+    Memory::CodeCave(reinterpret_cast<void*>(Cave_ScrollRangeClamp),
+                     static_cast<DWORD>(kAddr_ScrollRangeInc), 7);
 
     g_bInstalled = true;
-    LogMessage("Inventory resize: ready (grid %d-%d cols x %d-%d rows, max %d cells; "
+    LogMessage("Inventory resize: ready (grid %d-%d cols x %d-%d rows, max %d visible / %d owned; "
                "narrow mode forced at 0x%08X)",
-               kMinCols, kMaxCols, kMinRows, kMaxRows, kMaxCells, kAddr_NarrowGetterCall);
+               kMinCols, kMaxCols, kMinRows, kMaxRows, kMaxCells, kMaxOwnedSlots,
+               kAddr_NarrowGetterCall);
 }

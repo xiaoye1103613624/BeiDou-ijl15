@@ -25,6 +25,7 @@ bool ColorPrism_IsPrismItem(int nItemID);
 int ColorPrism_PeekCashItemId(int invPos);
 void ColorPrism_OnUse(int nPOS, int nItemID);
 bool ColorPrism_HandleItemDrop(void* pTo, int invType, int invPos);
+bool ColorPrism_HandleSkillDrop(void* pTo, int skillId);
 
 namespace ColoringPrism {
 void RegisterPacketHandler();

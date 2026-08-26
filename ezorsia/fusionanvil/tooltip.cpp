@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "Client.h"
 #include "compat/ClientAddresses.h"
 #include "compat/hook.h"
 #include "compat/wvs/secure.h"
@@ -70,6 +71,12 @@ ZXString<char>* __fastcall Hook_GetItemString(
     if (!result->IsEmpty() || !sPropName) {
         return result;
     }
+    // Cash SN 5xxxxxx overlaps pets (5000xxx → String/Pet.img). Never probe
+    // Custom/String/Cash.img for pets — GetObjectA throws STG_E_FILENOTFOUND
+    // (0x80030002) and the client shows "error code : -2147287038" then exits.
+    if (nItemID / 1000 == 5000) {
+        return result;
+    }
     if (nItemID < 5000000 || nItemID >= 6000000) {
         return result;
     }
@@ -81,25 +88,29 @@ ZXString<char>* __fastcall Hook_GetItemString(
     wchar_t wPath[192];
     _snwprintf_s(wPath, _countof(wPath), _TRUNCATE, L"Custom/String/Cash.img/%d/%s", nItemID, wProp);
 
-    Ztl_variant_t vObj = get_rm()->GetObjectA(wPath);
-    if (vObj.vt != VT_BSTR || !V_BSTR(&vObj)) {
-        return result;
-    }
+    try {
+        Ztl_variant_t vObj = get_rm()->GetObjectA(wPath);
+        if (vObj.vt != VT_BSTR || !V_BSTR(&vObj)) {
+            return result;
+        }
 
-    BSTR bs = V_BSTR(&vObj);
-    int nWide = static_cast<int>(SysStringLen(bs));
-    if (nWide <= 0) {
-        return result;
-    }
-    int nNarrow = WideCharToMultiByte(CP_ACP, 0, bs, nWide, nullptr, 0, nullptr, nullptr);
-    if (nNarrow <= 0) {
-        return result;
-    }
-    std::vector<char> buf(nNarrow + 1, 0);
-    WideCharToMultiByte(CP_ACP, 0, bs, nWide, buf.data(), nNarrow, nullptr, nullptr);
+        BSTR bs = V_BSTR(&vObj);
+        int nWide = static_cast<int>(SysStringLen(bs));
+        if (nWide <= 0) {
+            return result;
+        }
+        int nNarrow = WideCharToMultiByte(CP_ACP, 0, bs, nWide, nullptr, 0, nullptr, nullptr);
+        if (nNarrow <= 0) {
+            return result;
+        }
+        std::vector<char> buf(nNarrow + 1, 0);
+        WideCharToMultiByte(CP_ACP, 0, bs, nWide, buf.data(), nNarrow, nullptr, nullptr);
 
-    reinterpret_cast<void(__thiscall*)(void*, const char*, int)>(kAddr_ZXString_Cat)(
-        result, buf.data(), nNarrow);
+        reinterpret_cast<void(__thiscall*)(void*, const char*, int)>(kAddr_ZXString_Cat)(
+            result, buf.data(), nNarrow);
+    } catch (...) {
+        // Missing Custom cash string — leave result empty (vanilla behavior).
+    }
     return result;
 }
 
@@ -1680,11 +1691,13 @@ void __fastcall CUIToolTip__SetToolTip_Equip_Basic_hook(
     // PrintValue hook reads g_breakdownPe to append Hyper/Potential colored split.
     ClearTipColorStrips();
     g_breakdownPe = pe;
+    EquipTooltipStyle_SetContextItemId(SafeGetItemId(pe));
     g_inEquipBasicTip = true;
     // Keep vanilla zh-CN stat/type labels from String.wz/ToolTipHelp.img.
     CUIToolTip__SetToolTip_Equip_Basic(pThis, pe);
     g_inEquipBasicTip = false;
     g_breakdownPe = nullptr;
+    EquipTooltipStyle_SetContextItemId(0);
 
     // Fusion Anvil: append skin item name only; do not replace base tooltip text.
     const int nAnvilItemID = SafeGetAnvilItemId(pe);
@@ -3178,6 +3191,9 @@ void FusionAnvil_BindDrawToolTipEquipTarget(void** outPtr) {
 }
 
 void AttachFusionAnvilTooltipHooks() {
+    if (!Client::enableFusionAnvilTooltipHooks) {
+        return;
+    }
     if (g_tooltipHooksAttached) {
         return;
     }

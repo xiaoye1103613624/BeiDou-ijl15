@@ -6,6 +6,7 @@
 #include "../wvs/util.h"
 #include "../ztl/ztl.h"
 #include "../../bootlog/CrashDiag.h"
+#include "../../Client.h"
 #include <windows.h>
 #include <psapi.h>
 #include <vector>
@@ -378,6 +379,80 @@ static bool rs_try_mount_custom_seh() {
 void CWvsApp::InitializeResMan_hook() {
     // Always run stock resman first - never skip boot path.
     CWvsApp::InitializeResMan(this);
+    // Optional MapleRoot-style retain + SweepCache/CField flush.
+    // Do NOT replace InitializeResMan with Ragezone self-built Data FS — Custom.wz
+    // mounts below on the same VA. Fail-soft: never abort boot.
+    //
+    // IDA BeiDou.exe (imagebase 0x400000):
+    //   stock SetResManParam @0x9F71D0: (17, -1, -1) via g_rm@0xBF14E8 vtable+20
+    //   SweepCache sub_411BBB: outer cmp @0x411BE2 imm 60000; object-age cmps 300000
+    //   CField::Init @0x529320: push 0x2BF20 → FlushCachedObjects(180000) via vtable+0x24
+    if (Client::enableResManTimeout) {
+        try {
+            IWzResManPtr& rm = get_rm();
+            if (rm) {
+                const int retain =
+                    (Client::resManRetainMs > 0) ? Client::resManRetainMs : 10000;
+                const HRESULT hr = rm->SetResManParam(
+                    static_cast<RESMAN_PARAM>(RC_AUTO_REPARSE | RC_AUTO_SERIALIZE),
+                    retain,
+                    -1);
+                if (FAILED(hr)) {
+                    std::cout << "[RS] SetResManParam soft-fail hr=0x" << std::hex
+                              << static_cast<unsigned long>(hr) << std::dec << std::endl;
+                } else {
+                    std::cout << "[RS] ResMan retainMs=" << retain
+                              << " (MapleRoot-style AUTO_SERIALIZE)" << std::endl;
+                }
+            }
+        } catch (...) {
+            std::cout << "[RS] SetResManParam exception - boot continues" << std::endl;
+        }
+
+        if (Client::enableResManFlush) {
+            const unsigned int sweep =
+                (Client::resManSweepMs > 0)
+                    ? static_cast<unsigned int>(Client::resManSweepMs)
+                    : 10000u;
+            // Outer SweepCache period (cmp edx, imm32) — opcode 81 FA <imm32>
+            Memory::WriteInt(0x00411BE2 + 2, sweep);
+            // Object-age thresholds inside SweepCache (stock 300000).
+            // Skip MR's 0x41625F — IDA shows it is NOT a delay immediate on BeiDou.exe.
+            struct SweepSite {
+                DWORD addr;
+                int immOff; // bytes from insn start to imm32
+            };
+            static const SweepSite kAgeSites[] = {
+                {0x00411CBD, 1}, // cmp eax, imm32 (3D)
+                {0x00411D70, 2}, // cmp ecx, imm32 (81 F9)
+                {0x00411E13, 2},
+                {0x00411EC5, 2},
+                {0x00411F68, 2},
+                {0x0041201A, 2},
+                {0x004120BD, 2},
+                {0x00412125, 1}, // mov edi, imm32 (BF)
+                {0x00412282, 2},
+                {0x00412303, 2},
+                {0x00412388, 2},
+            };
+            for (const auto& s : kAgeSites) {
+                Memory::WriteInt(s.addr + s.immOff, sweep);
+            }
+            // CField::Init: FlushCachedObjects(0) instead of 180000.
+            Memory::WriteInt(0x00529320 + 1, 0);
+            std::cout << "[RS] ResMan flush patches on sweepMs=" << sweep
+                      << " CFieldFlushAge=0" << std::endl;
+
+            // Opportunistic flush once caches exist (login UI still ahead).
+            try {
+                IWzResManPtr& rm2 = get_rm();
+                if (rm2) {
+                    rm2->FlushCachedObjects(0);
+                }
+            } catch (...) {
+            }
+        }
+    }
     if (!rs_try_mount_custom_seh()) {
         if (g_rs_mount_seh) {
             std::cout << "[RS] Custom.wz soft-fail (seh 0x" << std::hex << g_rs_mount_seh
@@ -403,5 +478,19 @@ void rs_resman_init() {
         std::cout << "[RS] Custom.wz resman hooks registered (fail-soft)" << std::endl;
     } catch (...) {
         std::cout << "[RS] Custom.wz resman_init failed - skipped" << std::endl;
+    }
+}
+
+void rs_resman_flush_cached(int nUsedBefore) {
+    if (!Client::enableResManTimeout || !Client::enableResManFlush) {
+        return;
+    }
+    try {
+        IWzResManPtr& rm = get_rm();
+        if (!rm) {
+            return;
+        }
+        rm->FlushCachedObjects(nUsedBefore);
+    } catch (...) {
     }
 }

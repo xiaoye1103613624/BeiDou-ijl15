@@ -1777,9 +1777,25 @@ void __fastcall CUIItem_Draw_bag_hook(void* pThis, void* /*edx*/, const RECT* pR
 typedef void(__thiscall* t_CUIItem_OnMouseButton)(void*, unsigned int, unsigned int, int, int);
 static auto CUIItem_OnMouseButton_bag = reinterpret_cast<t_CUIItem_OnMouseButton>(kAddr_CUIItem_OnMouseButton);
 void __fastcall CUIItem_OnMouseButton_bag_hook(void* pThis, void* /*edx*/, unsigned int msg, unsigned int wParam, int rx, int ry) {
-    // The BAG button lives in the title-bar strip, whose clicks never reach CUIItem::OnMouseButton
-    // (the engine captures them for window-dragging). The button is driven entirely by
-    // BagWindow_HandleMouseMessage at the WndProc level, so this hook just chains through.
+    // Right-click deposit (formerly slotlock): when bag UI is open, deposit the clicked slot.
+    // pThis is IUIMsgHandler (+4); CUIItem object base is pThis - 4.
+    if (msg == WM_RBUTTONDOWN) {
+        void* pItemUi = reinterpret_cast<char*>(pThis) - 4;
+        int invType = 0;
+        int slot = 0;
+        __try {
+            invType = *reinterpret_cast<int*>(reinterpret_cast<char*>(pItemUi) + 0x05E4); // m_nItemTI
+            slot = reinterpret_cast<int(__thiscall*)(void*, int, int)>(0x0081DB7E)(
+                pItemUi, static_cast<int>(rx), static_cast<int>(ry));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            invType = 0;
+            slot = 0;
+        }
+        if (slot >= 1 && BagWindow_DepositFromInventory(invType, slot)) {
+            return;
+        }
+    }
+    // BAG title-bar button is driven by BagWindow_HandleMouseMessage (WndProc), not here.
     CUIItem_OnMouseButton_bag(pThis, msg, wParam, rx, ry);
 }
 

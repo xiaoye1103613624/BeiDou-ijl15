@@ -16,12 +16,44 @@ struct CDraggableItemView {
 
 constexpr uintptr_t kAddr_DraggableOnDropped = 0x004EF140;   // PE+cross-mod verified
 constexpr uintptr_t kAddr_OnDoubleClick = 0x004EFD25;        // cash-tab double-click
+constexpr uintptr_t kAddr_GetConsumeCashItemType = 0x004863D5; // group 578 gate
+constexpr uintptr_t kAddr_SendConsumeCashUse = 0x00A0A63F;
+constexpr uintptr_t kAddr_SendEtcCashUse = 0x00A1DC5B;
 
+using t_GetConsumeCashItemType = int(__cdecl*)(int);
+using t_SendConsumeCashUse = void(__thiscall*)(void*, int, int, int, void*);
+using t_SendEtcCashUse = void(__thiscall*)(void*, int, int);
 using t_OnDropped = int(__thiscall*)(CDraggableItemView*, IUIMsgHandler*, IUIMsgHandler*, int, int);
 using t_OnDoubleClick = int(__thiscall*)(CDraggableItemView*);
 
+auto Orig_GetConsumeCashItemType = reinterpret_cast<t_GetConsumeCashItemType>(kAddr_GetConsumeCashItemType);
+auto Orig_SendConsumeCashUse = reinterpret_cast<t_SendConsumeCashUse>(kAddr_SendConsumeCashUse);
+auto Orig_SendEtcCashUse = reinterpret_cast<t_SendEtcCashUse>(kAddr_SendEtcCashUse);
 auto Orig_OnDropped = reinterpret_cast<t_OnDropped>(kAddr_DraggableOnDropped);
 auto Orig_OnDoubleClick = reinterpret_cast<t_OnDoubleClick>(kAddr_OnDoubleClick);
+
+int __cdecl Hook_GetConsumeCashItemType(int nItemID) {
+    if (ColorPrism_IsPrismItem(nItemID)) {
+        return 1;
+    }
+    return Orig_GetConsumeCashItemType(nItemID);
+}
+
+void __fastcall Hook_SendConsumeCashUse(void* pThis, void*, int nPOS, int nItemID, int a, void* b) {
+    if (ColorPrism_IsPrismItem(nItemID)) {
+        ColorPrism_OnUse(nPOS, nItemID);
+        return;
+    }
+    Orig_SendConsumeCashUse(pThis, nPOS, nItemID, a, b);
+}
+
+void __fastcall Hook_SendEtcCashUse(void* pThis, void*, int nPOS, int nItemID) {
+    if (ColorPrism_IsPrismItem(nItemID)) {
+        ColorPrism_OnUse(nPOS, nItemID);
+        return;
+    }
+    Orig_SendEtcCashUse(pThis, nPOS, nItemID);
+}
 
 int __fastcall Hook_OnDropped(CDraggableItemView* pThis, void*, IUIMsgHandler* pFrom,
                               IUIMsgHandler* pTo, int rx, int ry) {
@@ -57,6 +89,9 @@ int __fastcall Hook_OnDoubleClick(CDraggableItemView* pThis, void*) {
 } // namespace
 
 void AttachColoringPrismHostHooks() {
+    ATTACH_HOOK(Orig_GetConsumeCashItemType, Hook_GetConsumeCashItemType);
+    ATTACH_HOOK(Orig_SendConsumeCashUse, Hook_SendConsumeCashUse);
+    ATTACH_HOOK(Orig_SendEtcCashUse, Hook_SendEtcCashUse);
     ATTACH_HOOK(Orig_OnDropped, Hook_OnDropped);
     ATTACH_HOOK(Orig_OnDoubleClick, Hook_OnDoubleClick);
 }

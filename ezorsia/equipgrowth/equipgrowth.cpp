@@ -40,9 +40,10 @@ static int DecodeItemIdAt(const void* base, int offset) {
     if (!base) {
         return 0;
     }
-    try {
+    // /EHsc try/catch misses AV when pe is garbage; SEH required (see 0x428743 crashes).
+    __try {
         return TSecTypeGetData(reinterpret_cast<const char*>(base) + offset);
-    } catch (...) {
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
     }
 }

@@ -2,6 +2,7 @@
 #include "compat/hook.h"
 #include "debug.h"
 #include "DamageSkinData.h"
+#include "../damagelong/damagelong.h"
 #include "compat/wvs/util.h"
 #include "compat/wvs/Packet.h"
 #include "compat/ClientAddresses.h"
@@ -849,6 +850,15 @@ typedef void(__cdecl* t_ZXStringFormat)(ZXString<char>*, const char*, int);
 static auto RealZXStringFormat =
     reinterpret_cast<t_ZXStringFormat>(0x00445B4B);
 
+typedef void(__cdecl* t_ZXStringAssign)(ZXString<char>*, const char*);
+
+static void AssignOverflowDigits(ZXString<char>* pRet, long long display) {
+    char buf[32];
+    _snprintf_s(buf, _TRUNCATE, "%lld", display);
+    auto assign = reinterpret_cast<t_ZXStringAssign>(0x00414617);
+    assign(pRet, buf);
+}
+
 static void __cdecl ZXStringFormat_hook(
     ZXString<char>* pRet, const char* fmt, int damage)
 {
@@ -861,14 +871,26 @@ static void __cdecl ZXStringFormat_hook(
         return;
     }
 
-    // Post-process only if this call is a unit-damage candidate.
     __try {
-        if (!ShouldRenderUnit(damage)) return;
-        char unitStr[32];
-        FormatUnitDamage((long long)damage, unitStr, sizeof(unitStr));
-        bool ok = OverwriteZXString(pRet, unitStr);
-        DmgLog("Unit damage: %d -> \"%s\" (%s)",
-               damage, unitStr, ok ? "ok" : "cap-too-small");
+        long long display = damage;
+        long long stashed = 0;
+        const bool overflow = DamageLong_TakeOverflow(damage, &stashed);
+        if (overflow) {
+            display = stashed;
+        }
+
+        if (ShouldRenderUnit(damage) || (overflow && display >= 1000)) {
+            char unitStr[32];
+            FormatUnitDamage(display, unitStr, sizeof(unitStr));
+            const bool ok = OverwriteZXString(pRet, unitStr);
+            DmgLog("Unit damage: %d -> \"%s\" (%s)",
+                   damage, unitStr, ok ? "ok" : "cap-too-small");
+            return;
+        }
+
+        if (overflow) {
+            AssignOverflowDigits(pRet, display);
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         DmgLog("ZXStringFormat_hook: post-process SEH for damage=%d", damage);
     }

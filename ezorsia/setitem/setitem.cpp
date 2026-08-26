@@ -64,6 +64,9 @@ static constexpr uintptr_t kOffset_CharacterData_InContext = 0x20B8;
 static constexpr uintptr_t kAddr_CharacterData_GetItem = 0x004282F7;
 static constexpr uintptr_t kAddr_TSecTypeGetData = 0x0042873D;
 static constexpr uintptr_t kAddr_GetItemName = 0x005CF63E;
+static constexpr uintptr_t kAddr_get_bodypart_from_item = 0x004606A0;
+static constexpr int kShoulderItemCategory = 115;
+static constexpr int kShoulderBodyPart = 20; // inventory −20
 
 // Draw on canvas with custom IWzFont colors (SetToolTip_String2 does not parse rich-text).
 enum class SetTipStyle {
@@ -336,14 +339,16 @@ static bool IsEquipItemId(int itemId) {
     return itemId >= 1000000 && itemId < 2000000;
 }
 
-// TSecTypeGetData throws ZException on checksum failure ? must use C++ try/catch.
+// TSecTypeGetData throws ZException on checksum failure AND can AV when the
+// slot pointer is null/garbage (this==offset → read at 0x14). /EHsc try/catch
+// does not catch AV — use SEH like equipaddon SehDecodeItemId.
 static int DecodeItemIdAt(const void* base, int offset) {
     if (!base) {
         return 0;
     }
-    try {
+    __try {
         return TSecTypeGetData(reinterpret_cast<const char*>(base) + offset);
-    } catch (...) {
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
     }
 }
@@ -374,6 +379,140 @@ static int FetchEquippedItemAt(void* pCharData, int pos) {
     }
 }
 
+static void* GetLocalCharacterData() {
+    void* pCtx = *reinterpret_cast<void**>(kAddr_CWvsContext_Instance);
+    if (!pCtx) {
+        return nullptr;
+    }
+    return *reinterpret_cast<void**>(
+            reinterpret_cast<char*>(pCtx) + kOffset_CharacterData_InContext);
+}
+
+static GW_ItemSlotEquip* FetchEquippedPe(int pos) {
+    void* pCharData = GetLocalCharacterData();
+    if (!pCharData) {
+        return nullptr;
+    }
+    ZRefOut out = {};
+    try {
+        CharacterData_GetItem(pCharData, &out, 1, pos);
+        return reinterpret_cast<GW_ItemSlotEquip*>(out.m_pItem);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+static bool IsCashEquipItem(int itemId) {
+    if (itemId <= 0) {
+        return false;
+    }
+    try {
+        IWzPropertyPtr pItem = CItemInfo::GetInstance()->GetItemInfo(itemId);
+        if (!pItem) {
+            return false;
+        }
+        Ztl_variant_t vInfo;
+        if (FAILED(pItem->get_item(const_cast<wchar_t*>(L"info"), &vInfo))) {
+            return false;
+        }
+        IWzPropertyPtr pInfo(vInfo.GetUnknown(false, false));
+        if (!pInfo) {
+            return false;
+        }
+        Ztl_variant_t vCash;
+        if (FAILED(pInfo->get_item(const_cast<wchar_t*>(L"cash"), &vCash))) {
+            return false;
+        }
+        return get_int32(vCash, 0) != 0;
+    } catch (...) {
+        return false;
+    }
+}
+
+typedef int(__cdecl* get_bodypart_from_item_t)(int, int, int*, int);
+static auto get_bodypart_from_item =
+        reinterpret_cast<get_bodypart_from_item_t>(kAddr_get_bodypart_from_item);
+
+static bool TryGetBodyPartsForItem(int itemId, int* bodyParts, int* count) {
+    *count = 0;
+    if (!bodyParts || !count) {
+        return false;
+    }
+    if (itemId / 10000 == kShoulderItemCategory) {
+        bodyParts[0] = kShoulderBodyPart;
+        *count = 1;
+        return true;
+    }
+    __try {
+        *count = get_bodypart_from_item(itemId, 0, bodyParts, 1);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *count = 0;
+    }
+    if (*count > 0) {
+        return true;
+    }
+    __try {
+        *count = get_bodypart_from_item(itemId, 1, bodyParts, 1);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *count = 0;
+    }
+    return *count > 0;
+}
+
+// CUIEquip prefers cash −(bp+100) for the main tip icon. Set/growth companions must
+// still bind to the normal equip at −bp when both are worn.
+static GW_ItemSlotEquip* ResolveNormalUnderCashOverlay(
+        int cashItemId, GW_ItemSlotEquip* cashPe) {
+    if (!cashPe || !IsEquipItemId(cashItemId) || !IsCashEquipItem(cashItemId)) {
+        return nullptr;
+    }
+    int bodyParts[8] = {};
+    int count = 0;
+    if (!TryGetBodyPartsForItem(cashItemId, bodyParts, &count)) {
+        return nullptr;
+    }
+    for (int i = 0; i < count; ++i) {
+        const int bp = bodyParts[i];
+        if (bp <= 0) {
+            continue;
+        }
+        // Only when the tip item is the equipped cash overlay (not bag hover).
+        GW_ItemSlotEquip* cashEq = FetchEquippedPe(-(bp + 100));
+        if (!cashEq || cashEq != cashPe) {
+            continue;
+        }
+        GW_ItemSlotEquip* normal = FetchEquippedPe(-bp);
+        if (!normal || normal == cashPe) {
+            continue;
+        }
+        const int normalId = SafeGetItemId(normal);
+        if (!IsEquipItemId(normalId) || normalId == cashItemId) {
+            continue;
+        }
+        return normal;
+    }
+    return nullptr;
+}
+
+static void ResolveCompanionEquip(
+        int hoverItemId,
+        GW_ItemSlotEquip* hoverPe,
+        int& outItemId,
+        GW_ItemSlotEquip*& outPe) {
+    outItemId = hoverItemId;
+    outPe = hoverPe;
+    if (hoverItemId <= 0 || !hoverPe) {
+        return;
+    }
+    if (GW_ItemSlotEquip* normal = ResolveNormalUnderCashOverlay(hoverItemId, hoverPe)) {
+        const int normalId = SafeGetItemId(normal);
+        if (IsEquipItemId(normalId)) {
+            outItemId = normalId;
+            outPe = normal;
+        }
+    }
+}
+
 static std::set<int> GetLocalEquippedItemIds() {
     std::set<int> ids;
     void* pCtx = *reinterpret_cast<void**>(kAddr_CWvsContext_Instance);
@@ -385,7 +524,16 @@ static std::set<int> GetLocalEquippedItemIds() {
     if (!pCharData) {
         return ids;
     }
-    for (int pos = -60; pos <= -1; ++pos) {
+    // R18: include −62 (aux) / −61 (heart); prior −60..−1 missed set pieces on body.
+    // Cash mirrors −101..−119 still scanned (vanilla cash equips). Sidecar cash
+    // −154..−162 are empty via GetItem hook (same ZRef as −bp — avoid double-count).
+    for (int pos = -62; pos <= -1; ++pos) {
+        const int itemId = FetchEquippedItemAt(pCharData, pos);
+        if (itemId > 0) {
+            ids.insert(itemId);
+        }
+    }
+    for (int pos = -119; pos <= -101; ++pos) {
         const int itemId = FetchEquippedItemAt(pCharData, pos);
         if (itemId > 0) {
             ids.insert(itemId);
@@ -460,6 +608,11 @@ static const char* GetEquipSlotLabel(int itemId) {
         return "\xD6\xC7\xC4\xDC\xBB\xFA\xC6\xF7\xC8\xCB"; // 智能机器人
     case 167:
         return "\xBB\xFA\xD0\xB5\xD0\xC4\xD4\xE0"; // 机械心脏
+    case 180:
+    case 181:
+    case 182:
+    case 183:
+        return "\xB3\xE8\xCE\xEF\xD7\xB0\xB1\xB8"; // 宠物装备
     default:
         if (itemId >= 1300000 && itemId < 1500000) {
             return "\xCE\xE4\xC6\xF7";
@@ -1663,8 +1816,11 @@ static void AfterEquipTipDrawn(CUIToolTip* pThis, GW_ItemSlotEquip* pe) {
     if (g_inShowItemToolTip || !pThis || !pe) {
         return;
     }
-    const int itemId = SafeGetItemId(pe);
-    if (!IsEquipItemId(itemId)) {
+    // Main tip may be cash overlay; companions bind to normal equip at -bp.
+    int itemId = 0;
+    GW_ItemSlotEquip* companionPe = pe;
+    ResolveCompanionEquip(SafeGetItemId(pe), pe, itemId, companionPe);
+    if (!IsEquipItemId(itemId) || !companionPe) {
         return;
     }
     // Other set-piece DrawToolTip_Equip must not steal set/growth companions.
@@ -1672,10 +1828,11 @@ static void AfterEquipTipDrawn(CUIToolTip* pThis, GW_ItemSlotEquip* pe) {
         return;
     }
     if (ResolveSetIdForItem(itemId) > 0) {
-        g_activeEquip = pe;
+        g_activeEquip = companionPe;
         UpdateSetTooltip(pThis, 0, 0, itemId, true);
     }
-    EquipGrowth_OnEquipTipDrawn(pThis, reinterpret_cast<::GW_ItemSlotEquip*>(pe));
+    EquipGrowth_OnEquipTipDrawn(
+            pThis, reinterpret_cast<::GW_ItemSlotEquip*>(companionPe));
 }
 
 void __fastcall CUIToolTip__DrawToolTip_Equip_SetItem_hook(
@@ -1761,24 +1918,31 @@ int __fastcall Hook_ShowItemToolTip(
     } scope;
 
     const int hoverItemId = ReadShowItemToolTipItemId(a4);
-    g_primaryShowItemId = hoverItemId;
+    auto* hoverPe = reinterpret_cast<GW_ItemSlotEquip*>(a4);
+    int companionItemId = hoverItemId;
+    GW_ItemSlotEquip* companionPe = hoverPe;
+    ResolveCompanionEquip(hoverItemId, hoverPe, companionItemId, companionPe);
+    // Primary id is the companion target (normal under cash overlay when present).
+    g_primaryShowItemId = companionItemId > 0 ? companionItemId : hoverItemId;
     const int result = Original_ShowItemToolTip(
             pThis, pos, a3, a4, a5, a6, a7, a8, a9);
 
     try {
-        if (hoverItemId > 0 && ResolveSetIdForItem(hoverItemId) > 0) {
-            UpdateSetTooltip(pThis, 0, 0, hoverItemId, true);
+        if (companionItemId > 0 && ResolveSetIdForItem(companionItemId) > 0) {
+            g_activeEquip = companionPe;
+            UpdateSetTooltip(pThis, 0, 0, companionItemId, true);
         } else if (pThis == g_activeMainTooltip) {
             HideSetTooltip();
             g_activeMainTooltip = nullptr;
             g_activeEquip = nullptr;
         }
-        if (hoverItemId > 0) {
-            // Track owner tip for ClearToolTip / growth lifecycle (set or non-set).
+        if (companionItemId > 0 && companionItemId / 1000000 == 1) {
+            // Track owner tip for ClearToolTip / growth lifecycle (equip only).
+            // Pets/cash (5xxxxxx) must not be cast to GW_ItemSlotEquip*.
+            // Companion pe is normal under fashion overlay when main tip is cash.
             g_activeMainTooltip = pThis;
-            // Same object as set tip: pass pe from a4 (GW_ItemSlotEquip*).
             EquipGrowth_OnEquipTipDrawn(
-                    pThis, reinterpret_cast<::GW_ItemSlotEquip*>(a4));
+                    pThis, reinterpret_cast<::GW_ItemSlotEquip*>(companionPe));
         } else if (pThis == g_activeMainTooltip) {
             EquipGrowth_Hide();
             g_primaryShowItemId = 0;
@@ -1809,6 +1973,14 @@ void SetItem_RedrawActivePanel() {
 void SetItem_OnEquipTipDrawn(CUIToolTip* tip, GW_ItemSlotEquip* pe) {
     SetItemMod::AfterEquipTipDrawn(
             tip, reinterpret_cast<SetItemMod::GW_ItemSlotEquip*>(pe));
+}
+
+void SetItem_ReleaseCustomMainTipWithoutHidingSet(CUIToolTip* tip) {
+    // Detach ownership so ClearToolTip on Addon tip does not HideSetTooltip.
+    // Next CUIEquip ShowItemToolTip rebinds g_activeMainTooltip + UpdateSetTooltip.
+    if (tip && tip == SetItemMod::g_activeMainTooltip) {
+        SetItemMod::g_activeMainTooltip = nullptr;
+    }
 }
 
 bool SetItem_TryGetActiveSetTooltipRect(int& outX, int& outY, int& outW, int& outH) {

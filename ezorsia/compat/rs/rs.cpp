@@ -350,20 +350,34 @@ public:
 RsGr2D::FindScreenMode_t RsGr2D::FindScreenMode = nullptr;
 
 // Persist field tier into config.ini so next boot leaves follow-login mode.
-static std::string rs_config_ini_path() {
+static std::string rs_config_ini_path_from_module(HMODULE mod) {
     char path[MAX_PATH] = {};
+    if (!mod || !GetModuleFileNameA(mod, path, MAX_PATH))
+        return {};
+    std::string p(path);
+    const size_t slash = p.find_last_of("\\/");
+    if (slash == std::string::npos)
+        return {};
+    return p.substr(0, slash + 1) + "config.ini";
+}
+
+static std::string rs_config_ini_path() {
     HMODULE self = nullptr;
     if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                            reinterpret_cast<LPCSTR>(&rs_config_ini_path), &self) && self) {
-        if (GetModuleFileNameA(self, path, MAX_PATH)) {
-            std::string p(path);
-            const size_t slash = p.find_last_of("\\/");
-            if (slash != std::string::npos)
-                return p.substr(0, slash + 1) + "config.ini";
-        }
+        const std::string dllIni = rs_config_ini_path_from_module(self);
+        if (!dllIni.empty())
+            return dllIni;
     }
+    const std::string exeIni = rs_config_ini_path_from_module(nullptr);
+    if (!exeIni.empty())
+        return exeIni;
     return "config.ini";
+}
+
+static int rs_read_tier_from_ini() {
+    return GetPrivateProfileIntA("general", "soScreenResolution", -1, rs_config_ini_path().c_str());
 }
 
 static void rs_persist_tier_to_ini(int tier) {
@@ -472,6 +486,8 @@ static void rs_patchMouseLimits(int w, int h) {
     Memory::WriteInt(0x0059A8B1 + 1, h); // SetCursorPos clamp Y
     Memory::WriteInt(0x0059A169 + 2, static_cast<unsigned int>(0 - w / 2)); // cursor vector X
     Memory::WriteInt(0x0059A15D + 2, static_cast<unsigned int>(0 - h / 2)); // cursor vector Y
+    Memory::WriteInt(0x0059A09C + 2, static_cast<unsigned int>(w / 2)); // LoadCursorState center X
+    Memory::WriteInt(0x0059A0A2 + 6, static_cast<unsigned int>(h / 2)); // LoadCursorState center Y
     Memory::WriteInt(0x009DFE68 + 3, w); // viewport width
     Memory::WriteInt(0x009DFCF0 + 3, h); // viewport height
     char buf[96];
@@ -1113,6 +1129,10 @@ static void rs_switchToSize(int nw, int nh, bool loginUi = false) {
     const bool needFieldOriginHeal = !loginUi && !rs_originActive;
     if (sameSize && !needLoginUiReapply && !needFieldOriginHeal) {
         rs_syncClientDims(nw, nh);
+        // Login UpdateResolution clobbers mouse clamps; heal on field re-enter / map warp
+        // even when Gr2D dims already match (relogin, deferred tier, same-size Origin).
+        if (!loginUi)
+            rs_patchMouseLimits(nw, nh);
         char buf[96];
         sprintf_s(buf, "[RS] switch no-op (already %dx%d loginUi=%d)", nw, nh, loginUi ? 1 : 0);
         RsLogFlush(buf);
@@ -1177,6 +1197,18 @@ static void rs_restoreLoginResolution() {
     // Display-only: login/char-select goes back to width×height. Do not change
     // rs_tier or persist soScreenResolution — next field enter still uses the
     // saved in-game tier.
+    if (rs_deferredTier >= 0) {
+        const int t = rs_deferredTier;
+        rs_deferredTier = -1;
+        rs_tier = t;
+        rs_field_follow_login = false;
+        if (CConfig::IsInstantiated())
+            CConfig::GetInstance()->SetOpt_Int(CConfig::GLOBAL_OPT, "soScreenResolution", rs_tier);
+        rs_persist_tier_to_ini(rs_tier);
+        char deferBuf[96];
+        sprintf_s(deferBuf, "[RS] restore login — flushed deferred tier %d to config", t);
+        RsLogFlush(deferBuf);
+    }
     char buf[192];
     sprintf_s(buf, "[RS] restore login %dx%d (was %dx%d originActive=%d keep field tier=%d)",
               rs_login_w, rs_login_h, rs_width, rs_height, rs_originActive ? 1 : 0, rs_tier);
@@ -1203,8 +1235,14 @@ static auto s_set_stage = reinterpret_cast<void(__cdecl*)(CStage*, void*)>(0x007
 void __cdecl rs_set_stage_hook(CStage* pStage, void* pParam) {
     // Free ResMan canvas/property cache before stage builds (World Select was E_POINTER
     // with maxFree≈5MB). IDA set_stage@0x777347 — existing RS hook, no new VA.
-    // Flush before BOTH field and login transitions; fail-soft inside helper.
-    rs_resman_flush_cached(0);
+    // Skip pre-flush on in-field warp (CField→CField): NPC UtilDlgEx may still be
+    // drawing when warp arrives; flush frees its canvas → E_POINTER (FM warp 2026-08-24).
+    const bool enteringField =
+        pStage && pStage->IsKindOf(reinterpret_cast<const CRTTI*>(0x00BED758));
+    const bool inFieldWarp = enteringField && get_field() != nullptr;
+    if (!inFieldWarp) {
+        rs_resman_flush_cached(0);
+    }
 
     if (pStage && pStage->IsKindOf(reinterpret_cast<const CRTTI*>(0x00BED758))) {
         std::cout << "[RS] set_stage -> CField tier=" << rs_tier
@@ -1328,16 +1366,22 @@ void CConfig::LoadGlobal_hook() {
     CConfig::LoadGlobal(this);
     // config.ini soScreenResolution is the field-tier source of truth. A stale or
     // missing Global.opt default (often 0 = 800x600) must not clobber it on relogin.
+    const int iniTier = rs_read_tier_from_ini();
+    if (iniTier >= 0 && iniTier <= RS_TIER_MAX) {
+        rs_tier = iniTier;
+        rs_field_follow_login = false;
+    }
     if (!rs_field_follow_login) {
         SetOpt_Int(GLOBAL_OPT, "soScreenResolution", rs_tier);
     }
 }
 
 void CConfig::SaveGlobal_hook() {
-    CConfig::SaveGlobal(this);
     if (!rs_field_follow_login) {
         SetOpt_Int(GLOBAL_OPT, "soScreenResolution", rs_tier);
+        rs_persist_tier_to_ini(rs_tier);
     }
+    CConfig::SaveGlobal(this);
 }
 
 // ===== CUISysOpt: resolution combo =====
@@ -1513,6 +1557,7 @@ void CConfig::ApplySysOpt_hook(void* pSysOpt, int bApplyVideo) {
     rs_tier_dims(sel, wantW, wantH);
     // Prefer re-apply when live dims still mismatch (prior ScreenResolution soft/hard fail).
     if (sel == rs_tier && !rs_field_follow_login && rs_width == wantW && rs_height == wantH) {
+        rs_persist_tier_to_ini(sel);
         char buf[96];
         sprintf_s(buf, "[RS] ApplySysOpt no-op (tier %d already live %dx%d)", sel, rs_width, rs_height);
         RsLogFlush(buf);

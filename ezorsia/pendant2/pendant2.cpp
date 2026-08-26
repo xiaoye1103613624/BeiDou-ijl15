@@ -8,8 +8,8 @@
 // Wear/stats (shoulders.cpp): Occ OFF; ExtraRing Get/Set+UI ON; Addon Get/Set; apply max55.
 //
 // Mapping (UI red marks):
-//   9 = 口袋 Po / BP33 / −33 → (104,200) right of 鞋子
-//   10 = 辅助 134/135 only → (137,200); 109 盾 = vanilla native Si path
+//   9 = 口袋 Po / BP33 / −33 → (5,35) EquipAddon overlay (GetSlotXY parked)
+//   10 = 辅助 134/135 only → (5,101); 109 盾 = vanilla native Si path
 //   Badge BP54 + Totem1 BP55 live on Addon — parked off-panel on main Equip.
 //
 // Design: raise draw with ae-style `mov eax,55;nop` — NOT add-imm+flag (BP54 hang).
@@ -47,10 +47,10 @@ static constexpr int kClassicRing6X = 137;
 static constexpr int kClassicRing6Y = 35;
 
 // Red-9 pocket / red-10 aux — wired by EquipAddon while Equip open (not here).
-static constexpr int kClassicRed9X = 104;
-static constexpr int kClassicRed9Y = 200;
-static constexpr int kClassicRed10X = 137;
-static constexpr int kClassicRed10Y = 200;
+static constexpr int kClassicRed9X = 5;
+static constexpr int kClassicRed9Y = 35;
+static constexpr int kClassicRed10X = 5;
+static constexpr int kClassicRed10Y = 101;
 static constexpr int kOffPanelX = -2000;
 static constexpr int kOffPanelY = -2000;
 static constexpr int kClassicRingBp15X = 104;

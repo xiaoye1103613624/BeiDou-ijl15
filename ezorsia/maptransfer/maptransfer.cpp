@@ -190,9 +190,13 @@ void ExpandPatches() {
     Memory::CodeCave(Cave_Decode_MapTransferEx, 0x004E63F0, 8);
 
     // CUIMapTransfer::OnCreate — enable scrollbar + expand counts
+    // Regular rock (缩地石) uses a shorter UI without VScr; forcing the scrollbar
+    // CreateCtrl there leaves CCtrlScrollBar+0x18 null → SetRange raises E_POINTER.
+    // Always take the VIP UI asset branch (string 0xB91) so layout matches scrollbar.
+    Memory::WriteByte(0x008394B1, 0xEB); // jnz vip_ui → jmp vip_ui
     {
         unsigned char nops2[] = {0x90, 0x90};
-        WriteBytes(0x008396FE, nops2, 2);
+        WriteBytes(0x008396FE, nops2, 2); // always create scrollbar
     }
     Memory::CodeCave(Cave_OnCreateScrollBarRange, 0x0083975B, 8);
     WriteAbsLeaEcx(0x00839866, g_adwMapTransfer);

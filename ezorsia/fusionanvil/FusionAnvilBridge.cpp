@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "FusionAnvilApi.h"
+#include "Client.h"
 
 namespace FusionAnvil {
 void EnsurePacketHooks() {
@@ -11,6 +12,9 @@ void EnsureHooks() {
 }
 
 void EnsureTooltipHooks() {
+    if (!Client::enableFusionAnvilTooltipHooks) {
+        return;
+    }
     AttachFusionAnvilTooltipHooks();
 }
 

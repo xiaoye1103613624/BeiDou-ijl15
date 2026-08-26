@@ -22,7 +22,6 @@
 #include "quicklogin/QuickLoginApi.h"
 #include "charslots/CharSlotsApi.h"
 #include "airskill/AirSkillApi.h"
-#include "hyperskill/HyperSkillApi.h"
 #include "maptransfer/MapTransferExpandApi.h"
 #include "statdetail/StatDetailExtApi.h"
 #pragma comment(lib, "ws2_32.lib")
@@ -120,13 +119,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 			Client::quickLogin = reader.GetBoolean("optional", "quickLogin", true);
 			Client::allowCashTrade = reader.GetBoolean("optional", "allowCashTrade", true);
 			Client::enableAirSkill = reader.GetBoolean("optional", "enableAirSkill", true);
-			Client::enableHyperSkill = reader.GetBoolean("optional", "enableHyperSkill", true);
 			Client::enableEquipCategoryOverride =
 					reader.GetBoolean("optional", "enableEquipCategoryOverride", false);
 			Client::enableFusionAnvilTooltipHooks =
 					reader.GetBoolean("optional", "enableFusionAnvilTooltipHooks", false);
-			Client::autoLoadHyperSkillBooks = reader.GetBoolean("optional", "autoLoadHyperSkillBooks", true);
-			Client::autoLoadHyperRevertSlim = reader.GetBoolean("optional", "autoLoadHyperRevertSlim", true);
 			// MapleRoot Full: SetResManParam(..., retain, -1) + optional SweepCache/CField flush.
 			Client::enableResManTimeout = reader.GetBoolean("optional", "enableResManTimeout", false);
 			Client::resManRetainMs = reader.GetInteger("optional", "resManRetainMs", 60000);
@@ -276,15 +272,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		try {
 			if (Client::enableAirSkill) {
 				AttachAirSkillMod();
-			}
-		} catch (...) {
-		}
-		try {
-			if (Client::enableHyperSkill) {
-				AttachHyperSkillMod();
-				if (Client::autoLoadHyperSkillBooks) {
-					AttachHyperBookLoader();
-				}
 			}
 		} catch (...) {
 		}
