@@ -25,6 +25,11 @@
 #include "../cashshop/CashShopApi.h"
 #include "../equipgrowth/EquipGrowthApi.h"
 #include "../coloringprism/ColoringPrismApi.h"
+#include "../weather/WeatherApi.h"
+#include "../newchardice/NewCharDiceApi.h"
+#include "../invexpand/InvExpandApi.h"
+#include "../windowtitle/WindowTitleApi.h"
+#include "../combatpower/CombatPowerApi.h"
 
 namespace {
 std::vector<CompatModule> g_modules;
@@ -56,15 +61,26 @@ void ModRegistry::RegisterBuiltins() {
     g_builtinsRegistered = true;
     RegisterHpMpAlertModule();
 
+    CompatModule windowTitle{};
+    windowTitle.name = "WindowTitle";
+    windowTitle.onAttach = []() {
+        WindowTitle::RegisterPacketHandler();
+    };
+    windowTitle.onTick = []() {
+        WindowTitle::OnTick();
+    };
+    ModRegistry::RegisterModule(std::move(windowTitle));
+
+    CombatPower::RegisterModule();
+
     // Keep in sync with LazyCompatInit.cpp / dllmain.cpp. 0 = full late UI.
 #ifndef BISECT_DISABLE_LATE_UI_HOOKS
 #define BISECT_DISABLE_LATE_UI_HOOKS 0
 #endif
 
 #if !BISECT_DISABLE_LATE_UI_HOOKS
-    // Soft-disable WorldMap module attach (enter MapHelper / 0x8007000D bisect).
-    // Config disableWorldMap=true also skips; keep hard-off until enter green.
-    if (false && !Client::disableWorldMap) {
+    // WorldMap tooltip — re-enabled for S9 (server WORLD_MAP_PLAYERS already wired).
+    if (!Client::disableWorldMap) {
         CompatModule worldMap{};
         worldMap.name = "WorldMapInfo";
         worldMap.onAttach = []() {
@@ -188,17 +204,18 @@ void ModRegistry::RegisterBuiltins() {
     };
     ModRegistry::RegisterModule(std::move(setItem));
 
-    // Growth companion tip: soft-disabled by default (enter 0x8007000D / GROWTH_TIP_REEN).
-    // Config enableGrowthCompanion/enableEquipGrowthTip can re-enable later after UIWindow tips are green.
+    // Growth companion tip. Re-enabled with SetItemUI after enter 0x8007000D bisect:
+    // hover-lazy SetToolTip_String2 (does not load GrowthEnabled/Disabled canvases).
+    // Config enableGrowthCompanion=false still gates paint/request inside EquipGrowth*.
     CompatModule equipGrowth{};
     equipGrowth.name = "EquipGrowth";
     equipGrowth.onAttach = []() {
-        if (!Client::enableGrowthCompanionTip) {
-            std::cout << "[ModRegistry] EquipGrowth skipped (enableGrowthCompanion=false)" << std::endl;
-            return;
-        }
         EquipGrowth::RegisterPacketHandler();
         EquipGrowth::EnsureHooks();
+        if (!Client::enableGrowthCompanionTip) {
+            std::cout << "[ModRegistry] EquipGrowth handlers on; UI gated (enableGrowthCompanion=false)"
+                      << std::endl;
+        }
     };
     ModRegistry::RegisterModule(std::move(equipGrowth));
 
@@ -232,6 +249,7 @@ void ModRegistry::RegisterBuiltins() {
     sideToolbar.name = "SideToolbar";
     sideToolbar.onAttach = []() {
         // No UI at attach — create only from OnTick after enter-game.
+        SideToolbar::RegisterPacketHandler();
     };
     sideToolbar.onTick = []() {
         SideToolbar::OnTick();
@@ -247,6 +265,32 @@ void ModRegistry::RegisterBuiltins() {
         CashShopWnd_Tick();
     };
     ModRegistry::RegisterModule(std::move(cashShopWindow));
+
+    CompatModule invExpand{};
+    invExpand.name = "InvExpand";
+    invExpand.onAttach = []() {
+        // UI Detour attached in LazyCompatInit EnsureHooks (Field enter).
+    };
+    ModRegistry::RegisterModule(std::move(invExpand));
+
+    CompatModule weather{};
+    weather.name = "Weather";
+    weather.onAttach = []() {
+        Weather_RegisterPacketHandlers();
+        AttachWeatherMod();
+        AttachWeatherWindMod();
+    };
+    ModRegistry::RegisterModule(std::move(weather));
+
+    CompatModule newCharDice{};
+    newCharDice.name = "NewCharDice";
+    newCharDice.onAttach = []() {
+        // Layout/packet hooks already applied from DllMain AttachNewCharDiceMod.
+    };
+    newCharDice.onTick = []() {
+        NewCharDice::OnClientTick();
+    };
+    ModRegistry::RegisterModule(std::move(newCharDice));
 #endif
 }
 
@@ -276,9 +320,7 @@ void ModRegistry::Initialize() {
         PacketDispatcher::InstallHook(true);
     }
     // Rebind after InstallHook so DirectHandler survives dispatcher init order.
-    if (Client::enableGrowthCompanionTip) {
-        EquipGrowth::RegisterPacketHandler();
-    }
+    EquipGrowth::RegisterPacketHandler();
     g_initialized = true;
 }
 

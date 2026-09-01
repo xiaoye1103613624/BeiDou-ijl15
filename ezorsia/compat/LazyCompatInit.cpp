@@ -21,7 +21,9 @@
 #include "../shoulders/ShoulderApi.h"
 #include "../equipaddon/EquipAddonApi.h"
 #include "../vskill/VSkillCastApi.h"
+#include "../bounce/BounceSkillApi.h"
 #include "../coloringprism/ColoringPrismApi.h"
+#include "../invexpand/InvExpandApi.h"
 #include "../WorldMapInfo.h"
 // EquipGrowth stays off FieldInit. InvResize hooks from ModRegistry onTick.
 // BuffTimer auto-inits via BuffTimerAutoInit in BuffTimerMod.cpp (no explicit Attach).
@@ -94,11 +96,14 @@ void EnsureInitializedOnce() {
     std::cout << "[LazyCompat] SKIP FusionAnvilTip (enter 0x8007000D bisect)" << std::endl;
     LC_ENSURE("EquipCompare", EquipCompare::EnsureHooks());
     LC_ENSURE("SlotLock", SlotLock::EnsureHooks());
-    // Soft-disable SetItem UI tip hooks for same enter COM family.
-    // LC_ENSURE("SetItemUI", SetItem::EnsureUiHooks());
-    std::cout << "[LazyCompat] SKIP SetItemUI (enter 0x8007000D bisect)" << std::endl;
+    // SetItem companion tip (套装属性). Was soft-disabled during enter 0x8007000D
+    // bisect; MXD_dev keeps this on — re-enable so set bonus tooltip shows again.
+    // Addresses unchanged (kDrawToolTipEquip=0x008ED0D2, kShowItemToolTip=0x008F5B20,
+    // kToolTipClear=0x008E6E23; PE-verified on BeiDou.exe 2026-08-30).
+    LC_ENSURE("SetItemUI", SetItem::EnsureUiHooks());
     LC_ENSURE("SideToolbar", SideToolbar::EnsureHooks());
     LC_ENSURE("CashShopWindow", CashShopWindow::EnsureHooks());
+    LC_ENSURE("InvExpand", InvExpand::EnsureHooks());
     LC_ENSURE("EquipAddon", EquipAddon::EnsureHooks());
     LC_ENSURE("Pendant2", EnsurePendant2AfterFieldEnter());
 #undef LC_ENSURE
@@ -137,9 +142,10 @@ void InstallBootstrapHookOnce() {
     }
     g_bootstrapInstalled = true;
 
-    // Cap refresh to 60Hz before login/char-select (high-Hz white-screen).
-    // Safe at DllMain: only patches + Detour on IWzPackage create; no UI deps.
-    Client::RefreshRate();
+    // Cap refresh to 60Hz — MUST run after InitializeGr2D (Gr2D* @0xBF14EC).
+    // Calling RefreshRate in DllMain races PcCreateObject_IWzPackage → Gr2D E_FAIL
+    // ("Failed in finding proper screen mode for Gr2D") on S9. MXD_dev keeps this OFF.
+    // Client::RefreshRate();
 
 #if !BISECT_DISABLE_LATE_UI_HOOKS
     // getCharInfo (inventory + equips) arrives on character login, before
@@ -154,9 +160,12 @@ void InstallBootstrapHookOnce() {
     // after IDA confirms the real IsHerosWillSkill VA.
     // AttachVSkillCastMod();
 #endif
+    // Beginner bounce 1050/1054: DoActiveSkill→DoBoundJump + FlashJump (PE-verified VAs).
+    // Outside late-UI bisect so bounce still works if tip hooks are skipped.
+    AttachBounceSkillMod();
     // DropItemAura DISABLED: do not insert/consume drop-grade byte (server also stopped sending it).
     // DropItemAura::AttachHooks();
-    // EquipAddon real slot UI stays stub-only; EnsureHooks above is the existing stub path.
+    // EquipAddon UI hooks attach on first CField (EnsureHooks above).
 
     typedef void(__fastcall* FieldInit_t)(void* pThis, void* edx);
     static auto originalFieldInit = reinterpret_cast<FieldInit_t>(kCFieldInit);

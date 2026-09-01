@@ -13,6 +13,9 @@ public:
     MEMBER_AT(int, 0x8, m_nHeight)
     MEMBER_AT(int, 0xC, m_nWidth)
     MEMBER_AT(IWzGr2DLayerPtr, 0x10, m_pLayer)
+    // CUIToolTip::MakeLayer (0x008F3141) stores caller's nLeft/nTop here before CreateLayer.
+    MEMBER_AT(int, 0x14, m_nLayerLeft)
+    MEMBER_AT(int, 0x18, m_nLayerTop)
 
     MEMBER_HOOK(IWzCanvasPtr*, 0x008F3141, MakeLayer, IWzCanvasPtr* result, int nLeft, int nTop, int bDoubleOutline, int bLogin, int bCharToolTip, unsigned int uColor)
 

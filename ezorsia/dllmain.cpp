@@ -10,16 +10,20 @@
 #include "SelectCharMacFix.h"
 #include "compat/ModRegistry.h"
 #include "compat/LazyCompatInit.h"
+#include "equipaddon/EquipAddonApi.h"
 #include "higherstoragelist/HigherStorageListApi.h"
 #include "highershoplist/HigherShopListApi.h"
+#include "newchardice/NewCharDiceApi.h"
 #include "maxhpmp/MaxHpMpApi.h"
 #include "level300/Level300Api.h"
 #include "mesouncap/MesoUncapApi.h"
 #include "gamedata/GameDataGuardApi.h"
+#include "gamedata/SkillTipCrashGuardsApi.h"
 #include "personalshop/PersonalShopApi.h"
 #include "quicklogin/QuickLoginApi.h"
 #include "charslots/CharSlotsApi.h"
 #include "shoulders/ShoulderApi.h"
+#include "maptransfer/MapTransferExpandApi.h"
 #include "compat/rs/rs.h"
 #include "compat/hook.h"
 #include "Memory.h"
@@ -100,7 +104,21 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		// Paths still recorded via rs_resman CrashDiag_NoteWzPath when that path is used.
 		CrashDiag_Init(hModule);
 		BootLogStage("DllMain ATTACH begin");
-		INIReader reader("config.ini");
+		// Must load beside ijl15.dll — not CWD. Persist already writes there; relative
+		// "config.ini" made boot miss soScreenResolution whenever Start-in ≠ client dir.
+		std::string configIniPath;
+		{
+			char dllPath[MAX_PATH] = {};
+			if (hModule && GetModuleFileNameA(hModule, dllPath, MAX_PATH)) {
+				std::string p(dllPath);
+				const size_t slash = p.find_last_of("\\/");
+				if (slash != std::string::npos)
+					configIniPath = p.substr(0, slash + 1) + "config.ini";
+			}
+			if (configIniPath.empty())
+				configIniPath = "config.ini";
+		}
+		INIReader reader(configIniPath);
 		if (reader.ParseError() == 0) {
 			Client::m_nGameWidth = reader.GetInteger("general", "width", 1280);
 			Client::m_nGameHeight = reader.GetInteger("general", "height", 720);
@@ -136,11 +154,30 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 			Client::talkTime = reader.GetInteger("optional", "talkTime", 2000);
 			Client::quickLogin = reader.GetBoolean("optional", "quickLogin", true);
 			Client::allowCashTrade = reader.GetBoolean("optional", "allowCashTrade", true);
+			// Prefer enableGrowthCompanion; also accept legacy enableEquipGrowthTip.
+			// Default true: hover-lazy companion tip (SetToolTip_String2); not enter-path.
 			Client::enableGrowthCompanionTip =
 					reader.GetBoolean("optional", "enableGrowthCompanion",
-							reader.GetBoolean("optional", "enableEquipGrowthTip", false));
+							reader.GetBoolean("optional", "enableEquipGrowthTip", true));
+			Client::enableNativeAdventurerDice =
+					reader.GetBoolean("optional", "enableNativeAdventurerDice", true);
+			Client::expandItem = reader.GetBoolean("optional", "expandItem", true);
+			Client::expandItemUI = reader.GetBoolean("optional", "expandItemUI", true);
+			Client::expandItemSlotLimits = reader.GetBoolean("optional", "expandItemSlotLimits", true);
+			Client::expandItemSort2 = reader.GetBoolean("optional", "expandItemSort2", true);
+			// width/height = login + char-select. soScreenResolution = field after enter.
+			// Omit soScreenResolution → follow-login (field stays at login dims).
 			rs_tier = reader.GetInteger("general", "soScreenResolution", -1);
+			rs_field_follow_login = (rs_tier < 0);
+			BootLog("config.ini loaded from %s soScreenResolution=%d follow_login=%d",
+					configIniPath.c_str(), rs_tier, rs_field_follow_login ? 1 : 0);
+		} else {
+			BootLog("config.ini ParseError=%d path=%s — using defaults",
+					reader.ParseError(), configIniPath.c_str());
 		}
+		// Belt-and-suspenders: Win32 profile API on the same absolute path (covers
+		// INIReader miss / encoding edge cases for the persisted field tier).
+		rs_sync_tier_from_ini();
 
 		Hook_CreateMutexA(true); //multiclient //ty darter, angel, and alias!
 		HookCreateWindowExA(true); //default ezorsia
@@ -161,8 +198,24 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 
 		Client::UpdateGameStartup();
 
+		// Custom.wz SysOpt stretch (fail-soft). Needed so resolution combo + OK/Cancel
+		// at y=338/372 sit on the stretched backgrnd (vanilla dialog clips them).
+		rs_resman_init();
+		if (rs_tier < 0) {
+			rs_tier = rs_tier_from_dims(Client::m_nGameWidth, Client::m_nGameHeight);
+			rs_field_follow_login = true;
+		}
+		if (rs_tier > RS_TIER_MAX) rs_tier = 0;
+
 		std::cout << "Applying resolution " << Client::m_nGameWidth << "x" << Client::m_nGameHeight << std::endl;
 		Client::UpdateResolution();
+		// RS set_stage / follow-login use rs_login_* (defaults 800x600). Without sync,
+		// login restore re-applies 800 UpdateResolution inside an HD window → empty
+		// wooden-board mid/bottom planks and squeezed ID/PW (see rs.cpp restore path).
+		rs_set_login_dims(Client::m_nGameWidth, Client::m_nGameHeight);
+		rs_width = Client::m_nGameWidth;
+		rs_height = Client::m_nGameHeight;
+		rs_adjust_cy = (rs_height > 600) ? (rs_height - 600) / 2 : 0;
 		Client::FixMouseWheel();
 		Client::Chinese();
 		Client::LongQuickSlot();
@@ -171,7 +224,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		Client::JumpCap();
 		Client::FixChatPosHook();
 		Client::NoPassword();
+		BootLogStage("pre MoreHook");
 		Client::MoreHook();
+		BootLogStage("post MoreHook");
 		Client::DeleteChar();
 
 		// Early patches that are safe at DllMain (no late UI).
@@ -179,6 +234,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		AttachLoadTrace();
 		HigherStorageList::ApplyPatches();
 		HigherShopList::ApplyPatches();
+		AttachNewCharDiceMod();
 		AttachMaxHpMpMod();
 		// Must match PacketCreator writeShort(level)+writeLong(exp); without this,
 		// CHARLIST mis-aligns → garbage avatar UOLs → 0x80030002 on channel select.
@@ -186,6 +242,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		AttachLevel300ModSafe();
 		AttachMesoUncapMod();
 		AttachGameDataGuard();
+		AttachSkillTipCrashGuards();
 		AttachPersonalShopMod();
 		if (Client::quickLogin) {
 			AttachQuickLoginMod();
@@ -195,6 +252,18 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		}
 		AttachCharSlotsMod();
 		AttachShoulderSlotsFix();
+		// MapTransfer expand TEMPORARILY OFF (2026-08-30): select-char -> set_stage AV
+		// at BeiDou.exe+0x6292F9 (null+0x3D) with preceding hr=0x800401F8/0x80004003.
+		// Hook sites IDA-verified OK on S9 EXE, but expand still correlated with channel-enter
+		// crash; keep vanilla 5/10 until decode/UI path is proven. Must stay in sync with
+		// GameConstants.TROCK_MAP_SIZE / VIP_TROCK_MAP_SIZE on the server.
+		// AttachMapTransferExpandMod();
+
+		Client::ExpandItem();
+		try {
+			EquipAddon::InstallLoginPersistEarly();
+		} catch (...) {
+		}
 
 		// Late UI + packet modules attach on first CField via LazyCompat.
 		// (replaces early ModRegistry::Initialize + BossHP::Hook in DllMain)

@@ -2022,6 +2022,8 @@ KeyValuePair newKeyValuePairs[] = {
     {5055, "金锤子不能用于\r黑龙项环。"},
     {5056, "金锤子已提高的强化次数: %d"},
     {5057, "金锤子已提高的强化次数: 2(MAX)"},
+    // accountSharable tip: Movement is possible only within the account
+    {5197, "可在账号内移动"},
     {5217, "[GM]您已收到管理员的来信.请点击右上角的信封."},
     {5220, "仅在登机时才可用 %s."},
     {5223, "该道具只能装备一个。"},
@@ -2034,6 +2036,8 @@ KeyValuePair newKeyValuePairs[] = {
     {5262, "已完成"},
     {5263, "未完成"},
     {5273, "封印至 %04d年%d月%d日 %02d:%02d"},
+    // onlyEquip tip: Unique Equipped Item (push 0x149B @ 0x008E87DB/0x008E8823/0x008E884E)
+    {5275, "固有装备"},
     {5280, "扔掉多少？"},
     {5281, "点击箭头，可以提升相应的属性。"},
     {5282, "对战士而言，最重要的属性是力量，此外"},
@@ -2120,7 +2124,8 @@ bool Hook_StringPool__GetString(bool bEnable)	//hook stringpool modification //t
 		auto ret = _StringPool__GetString(pThis, edx, result, nIdx, formal);
         if (nIdx == 1163)
         {
-            *ret = "BeiDou";
+            // Initial CreateWindow caption; in-game title is driven by WindowTitle::OnTick.
+            *ret = "XiaoYeMS v0.0.1";
         }
 		switch (nIdx)
 		{
