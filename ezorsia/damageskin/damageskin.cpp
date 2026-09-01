@@ -165,9 +165,11 @@ static bool ResolveDamageSkinRootPath() {
     if (g_damageSkinRoot[0] != L'\0') {
         return true;
     }
+    // Prefer BasicEff.img/damageSkin: live clients often ship a stub DamageSkin.img
+    // with only ~20 skins (→ 3 shop pages), while BasicEff holds the full catalog.
     static const wchar_t* kPaths[] = {
-        L"Effect/DamageSkin.img",
         L"Effect/BasicEff.img/damageSkin",
+        L"Effect/DamageSkin.img",
     };
     for (const wchar_t* path : kPaths) {
         try {

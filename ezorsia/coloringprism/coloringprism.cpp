@@ -102,13 +102,42 @@ static unsigned To8(float v) {
     return (unsigned)i;
 }
 
-static void DrawTrack(IWzCanvasPtr c, const RECT& rc, int val, unsigned color) {
+static IWzCanvasPtr LoadSprite(const wchar_t* p) {
+    IWzCanvasPtr c;
+    try { c = get_unknown(get_rm()->GetObjectA(const_cast<wchar_t*>(p), vtEmpty, vtEmpty)); } catch (...) {}
+    return c;
+}
+
+// MapleStory button canvases live under <state>/0 (e.g. BtOK/normal/0).
+static IWzCanvasPtr LoadBtn(const wchar_t* base, const wchar_t* state) {
+    wchar_t path[160];
+    _snwprintf_s(path, _countof(path), _TRUNCATE, L"%s/%s/0", base, state);
+    IWzCanvasPtr c = LoadSprite(path);
+    if (c) return c;
+    _snwprintf_s(path, _countof(path), _TRUNCATE, L"%s/%s", base, state);
+    c = LoadSprite(path);
+    if (c) return c;
+    _snwprintf_s(path, _countof(path), _TRUNCATE, L"%s/0", base);
+    return LoadSprite(path);
+}
+
+// Background already paints slider wells; only overlay the thumb (no grey track fill).
+static void DrawTrack(IWzCanvasPtr c, const RECT& rc, int val, unsigned /*color*/,
+                      IWzCanvasPtr thumb) {
     if (!c) return;
     try {
-        c->DrawRectangle(rc.left, rc.top + 4, rc.right - rc.left, 6, 0xFF404050);
         float t = (float)(val - kSliderMin) / (float)(kSliderMax - kSliderMin);
         int x = rc.left + (int)(t * (rc.right - rc.left));
-        c->DrawRectangle(x - 4, rc.top, 8, 14, color);
+        if (thumb) {
+            int tw = 8, th = 14;
+            try { tw = (int)thumb->width; th = (int)thumb->height; } catch (...) {}
+            try {
+                c->CopyEx(x - tw / 2, rc.top + (rc.bottom - rc.top - th) / 2, thumb,
+                          CANVAS_ALPHATYPE::CA_REMOVEALPHA, 0, 0, 0, 0, 0, 0, vtEmpty);
+            } catch (...) {}
+        } else {
+            c->DrawRectangle(x - 4, rc.top, 8, 14, 0xFFE0E0E0);
+        }
     } catch (...) {
     }
 }
@@ -121,6 +150,7 @@ public:
 
     IWzCanvasPtr m_bg;
     IWzCanvasPtr m_btOk[3], m_btCancel[3], m_btClose[3], m_btOff[3];
+    IWzCanvasPtr m_thumb;
 
     int m_itemId = 0;
     short m_slot = 0;
@@ -168,8 +198,9 @@ public:
     }
 
     void SoftRefresh() {
-        if (m_itemId <= 0) return;
-        EquipDye::SoftRefreshPreview(m_itemId, FromSliders(m_slideH, m_slideS, m_slideL));
+        // Live WZ canvas mutation during UI drag/slider is unstable (CANVAS.DLL AV).
+        // Preview uses the HSL color swatch in Draw(); confirm still applies dye.
+        (void)m_itemId;
     }
 
     void Hint(const char* gbk) {
@@ -189,14 +220,14 @@ public:
         }
         if (m_itemId > 0) {
             EquipDye::RestoreSharedWzForItem(m_itemId);
-            EquipDye::SoftRefreshPreview(m_itemId, m_enterHsl);
         }
         m_itemId = itemId;
         m_slot = slot;
         m_invType = (signed char)((slot < 0) ? 0xFF : invType);
         m_enterHsl = EquipDye::GetOwnedHsl(itemId);
         ToSliders(m_enterHsl, m_slideH, m_slideS, m_slideL);
-        SoftRefresh();
+        // Do not mutate shared Character.wz canvases while the dialog is open —
+        // SoftRefreshPreview/DyeItemWzCommonActions races CANVAS.DLL and can AV on drop.
         play_ui_sound(L"DlgNotice");
         return true;
     }
@@ -243,9 +274,6 @@ public:
     void CancelAndClose() {
         if (m_itemId > 0) {
             EquipDye::RestoreSharedWzForItem(m_itemId);
-            if (!m_enterHsl.nearZero()) {
-                EquipDye::SoftRefreshPreview(m_itemId, m_enterHsl);
-            }
         }
         Destroy();
     }
@@ -272,11 +300,12 @@ public:
 
     void BlitBtn(IWzCanvasPtr c, IWzCanvasPtr* bt, const RECT& rc, int id) {
         int st = (m_hoverBtn == id) ? 1 : 0;
-        if (bt[st]) Blit(c, bt[st], rc.left, rc.top);
-        else if (bt[0]) Blit(c, bt[0], rc.left, rc.top);
-        else {
-            try { c->DrawRectangle(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, 0xFF606070); } catch (...) {}
-        }
+        IWzCanvasPtr spr = bt[st] ? bt[st] : bt[0];
+        if (!spr) return;
+        int bw = rc.right - rc.left, bh = rc.bottom - rc.top;
+        try { bw = (int)spr->width; bh = (int)spr->height; } catch (...) {}
+        Blit(c, spr, rc.left + ((rc.right - rc.left) - bw) / 2,
+             rc.top + ((rc.bottom - rc.top) - bh) / 2);
     }
 };
 
@@ -284,23 +313,26 @@ CUIColoringPrism::CUIColoringPrism() {
     ms_pInstance = this;
     g_coloringPrismWndOpen = true;
     m_bg = LoadSprite(L"UI/UIWindow.img/ColoringPrism/backgrnd");
-    m_btOk[0] = LoadSprite(L"UI/UIWindow.img/ColoringPrism/BtOK/normal");
-    m_btOk[1] = LoadSprite(L"UI/UIWindow.img/ColoringPrism/BtOK/mouseOver");
-    m_btOk[2] = LoadSprite(L"UI/UIWindow.img/ColoringPrism/BtOK/pressed");
-    m_btCancel[0] = LoadSprite(L"UI/UIWindow.img/ColoringPrism/BtCancel/normal");
-    m_btCancel[1] = LoadSprite(L"UI/UIWindow.img/ColoringPrism/BtCancel/mouseOver");
-    m_btCancel[2] = LoadSprite(L"UI/UIWindow.img/ColoringPrism/BtCancel/pressed");
-    m_btClose[0] = LoadSprite(L"UI/UIWindow.img/ColoringPrism/BtClose/normal");
-    m_btClose[1] = LoadSprite(L"UI/UIWindow.img/ColoringPrism/BtClose/mouseOver");
-    m_btClose[2] = LoadSprite(L"UI/UIWindow.img/ColoringPrism/BtClose/pressed");
-    m_btOff[0] = LoadSprite(L"UI/UIWindow.img/ColoringPrism/BtOff/normal");
-    m_btOff[1] = LoadSprite(L"UI/UIWindow.img/ColoringPrism/BtOff/mouseOver");
-    m_btOff[2] = LoadSprite(L"UI/UIWindow.img/ColoringPrism/BtOff/pressed");
-    if (!m_btOk[0]) m_btOk[0] = LoadSprite(L"UI/UIWindow.img/ColoringPrism/BtOK/0");
-    if (!m_btCancel[0]) m_btCancel[0] = LoadSprite(L"UI/UIWindow.img/ColoringPrism/BtCancel/0");
-    if (!m_btClose[0]) m_btClose[0] = LoadSprite(L"UI/UIWindow.img/ColoringPrism/BtClose/0");
-    if (!m_btOff[0]) m_btOff[0] = LoadSprite(L"UI/UIWindow.img/ColoringPrism/BtOff/0");
+    constexpr wchar_t kOk[] = L"UI/UIWindow.img/ColoringPrism/BtOK";
+    constexpr wchar_t kCancel[] = L"UI/UIWindow.img/ColoringPrism/BtCancel";
+    constexpr wchar_t kClose[] = L"UI/UIWindow.img/ColoringPrism/BtClose";
+    constexpr wchar_t kOff[] = L"UI/UIWindow.img/ColoringPrism/BtOff";
+    m_btOk[0] = LoadBtn(kOk, L"normal");
+    m_btOk[1] = LoadBtn(kOk, L"mouseOver");
+    m_btOk[2] = LoadBtn(kOk, L"pressed");
+    m_btCancel[0] = LoadBtn(kCancel, L"normal");
+    m_btCancel[1] = LoadBtn(kCancel, L"mouseOver");
+    m_btCancel[2] = LoadBtn(kCancel, L"pressed");
+    m_btClose[0] = LoadBtn(kClose, L"normal");
+    m_btClose[1] = LoadBtn(kClose, L"mouseOver");
+    m_btClose[2] = LoadBtn(kClose, L"pressed");
+    m_btOff[0] = LoadBtn(kOff, L"normal");
+    m_btOff[1] = LoadBtn(kOff, L"mouseOver");
+    m_btOff[2] = LoadBtn(kOff, L"pressed");
+    m_thumb = LoadSprite(L"UI/UIWindow.img/ColoringPrism/enabled/thumb0");
+    if (!m_thumb) m_thumb = LoadSprite(L"UI/Basic.img/Slider/thumbNormal");
 
+    // Hit boxes (pre-regression layout). BtOK/Cancel ~47x19, BtOff ~81x18; blit centers in rect.
     m_rcClose = {kWndW - 22, 4, kWndW - 6, 20};
     m_rcOk = {40, 350, 120, 380};
     m_rcCancel = {180, 350, 260, 380};
@@ -327,23 +359,23 @@ void CUIColoringPrism::Draw(const RECT* /*pRect*/) {
         try { c->DrawRectangle(0, 0, kWndW, kWndH, 0xCC202028); } catch (...) {}
     }
 
-    try {
-        unsigned color = 0xFF808890;
-        if (m_itemId > 0) {
+    // Preview well: only paint a color swatch when an item is loaded (no empty grey block).
+    if (m_itemId > 0) {
+        try {
             DyeHsl hsl = FromSliders(m_slideH, m_slideS, m_slideL);
             float hr = (hsl.hue + 180.f) / 360.f;
             float r = 0.4f + 0.5f * hr;
             float g = 0.4f + 0.5f * (hsl.sat + 1.f) * 0.5f;
             float b = 0.4f + 0.5f * (hsl.light + 1.f) * 0.5f;
-            color = 0xFF000000u | (To8(r) << 16) | (To8(g) << 8) | To8(b);
+            unsigned color = 0xFF000000u | (To8(r) << 16) | (To8(g) << 8) | To8(b);
+            c->DrawRectangle(90, 80, 120, 140, color);
+        } catch (...) {
         }
-        c->DrawRectangle(90, 80, 120, 140, color);
-    } catch (...) {
     }
 
-    DrawTrack(c, m_rcTrackH, m_slideH, 0xFFE08080);
-    DrawTrack(c, m_rcTrackS, m_slideS, 0xFF80E080);
-    DrawTrack(c, m_rcTrackL, m_slideL, 0xFF8080E0);
+    DrawTrack(c, m_rcTrackH, m_slideH, 0xFFE08080, m_thumb);
+    DrawTrack(c, m_rcTrackS, m_slideS, 0xFF80E080, m_thumb);
+    DrawTrack(c, m_rcTrackL, m_slideL, 0xFF8080E0, m_thumb);
 
     BlitBtn(c, m_btOk, m_rcOk, 1);
     BlitBtn(c, m_btCancel, m_rcCancel, 2);

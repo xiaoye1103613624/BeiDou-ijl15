@@ -2,6 +2,8 @@
 #include "DamageRankInput.h"
 #include "compat/hook.h"
 #include "compat/wvs/wndman.h"
+#include "../storagebag/StorageBagApi.h"
+#include "../invresize/InvResizeApi.h"
 
 namespace {
 static void ClearDamageRankFocus(CWndMan* wndMan) {
@@ -20,6 +22,14 @@ int CWndMan::TranslateMessageImpl_hook(
         WPARAM& wParam,
         LPARAM& lParam,
         LRESULT* plResult) {
+    // Inventory BAG button lives in the title-bar strip — CUIItem::OnMouseButton
+    // never sees those clicks. StorageBag must handle them here (msg by-ref so
+    // it can eat WM_LBUTTONDOWN/UP as WM_NULL). Was documented but never called.
+    if (StorageBag_HandleMouseMessage(msg, wParam, lParam, plResult)) {
+        return 0;
+    }
+    (void)InvResize_HandleMouseMessage(msg, wParam, lParam, plResult);
+
     const bool damageRankMouse =
             DamageRank_HandleMouseMessage(msg, wParam, lParam, plResult);
 

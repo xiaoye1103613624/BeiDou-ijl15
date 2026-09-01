@@ -50,11 +50,10 @@ CLogin* CLogin::Constructor_hook() {
     this->m_bSubStepChanged = 0;
     this->m_nSubStep = 0;
 
-    keybd_event(VK_MENU, 0, 0, 0);
+    // Removed keybd_event(VK_MENU): synthetic Alt can leave the key stuck down.
     if (CWvsApp::GetInstance()) {
         SetForegroundWindow(CWvsApp::GetInstance()->m_hWnd);
     }
-    keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
 
     return ret;
 }

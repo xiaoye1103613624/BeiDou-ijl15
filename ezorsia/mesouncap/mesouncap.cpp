@@ -208,6 +208,11 @@ void __cdecl MesoFormatNumber_Fredrick(void* zxOut, int /*value*/, int /*withCom
     MesoLog("FormatNumber fredrick -> %llu", g_lFredrickMeso);
 }
 
+void __cdecl MesoFormatNumber_Character(void* zxOut, int /*value*/, int /*withComma*/) {
+    FormatAssignGame(zxOut, g_lMeso);
+    MesoLog("FormatNumber character -> %llu", g_lMeso);
+}
+
 // thiscall draw helper: set active fmt source then jump to original (no stack rewrite).
 void __declspec(naked) MesoWrapFmt_StorageMeso_Naked() {
     __asm {
@@ -326,6 +331,7 @@ void AttachMesoUncapMod() {
     void* const wrapCharFmt = reinterpret_cast<void*>(&MesoWrapFmt_CharOnStorage_Naked);
     void* const fmtNumStor = reinterpret_cast<void*>(&MesoFormatNumber_Active);
     void* const fmtNumFred = reinterpret_cast<void*>(&MesoFormatNumber_Fredrick);
+    void* const fmtNumChar = reinterpret_cast<void*>(&MesoFormatNumber_Character);
     void* const encWithdraw = CastHook(&MesoEncode8_StorageWithdraw);
     void* const encDeposit = CastHook(&MesoEncode8_StorageDeposit);
     void* const encTrade = CastHook(&MesoEncode8_TradeSetMeso);
@@ -369,6 +375,16 @@ void AttachMesoUncapMod() {
 
         // Hired merchant draw
         { 0x006FBA12, kAddr_ZXString_cstr, fmtHm, "Format_HM_Meso_1" },
+
+        // Personal shop / player-interaction meso (FormatNumber + Fuse paths)
+        { 0x006F0388, kAddr_FormatNumber, fmtNumChar, "FormatNumber_PersonalShop_Meso" },
+        { 0x006F03BE, kAddr_ZXString_cstr, fmtChar, "Format_PersonalShop_Meso" },
+
+        // NPC shop (CShopDlg) — player balance only; do not hook item price c_str sites
+        { 0x00755E97, kAddr_FormatNumber, fmtNumChar, "FormatNumber_CShopDlg_Meso" },
+        { 0x00755ED1, kAddr_ZXString_cstr, fmtChar, "Format_CShopDlg_Meso_FuseFmt" },
+        { 0x007562C5, kAddr_ZXString_cstr, fmtChar, "Format_CShopDlg_Meso_FuseA" },
+        { 0x00756364, kAddr_ZXString_cstr, fmtChar, "Format_CShopDlg_Meso_FuseB" },
 
         // Settlement / compare UI character meso
         { 0x005B885E, kAddr_ZXString_cstr, fmtChar, "Format_Settle_Meso_1" },

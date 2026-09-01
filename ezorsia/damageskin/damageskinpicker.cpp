@@ -1116,7 +1116,7 @@ int CUIDamageSkinPicker::OnMouseMove(int rx, int ry) {
                 // Look up the real catalog price; fall back to the
                 // placeholder if the server hasn't pushed a catalog yet.
                 int skinId = m_vShopList[idx];
-                long long price = 10000000LL;
+                long long price = 1000000000LL; // 10亿 meso，与服务端 DEFAULT_PRICE_MESOS 一致
                 for (const auto& e : g_vShopCatalog) {
                     if (e.nID == skinId) { price = e.llPrice; break; }
                 }
@@ -1297,12 +1297,12 @@ void CUIDamageSkinPicker::OnMouseButton(unsigned int msg, unsigned int /*wParam*
                     return;
                 }
 
-                long long price = 10000000LL;
+                long long price = 1000000000LL; // 10亿 meso，与服务端 DEFAULT_PRICE_MESOS 一致
                 for (const auto& e : g_vShopCatalog) {
                     if (e.nID == id) { price = e.llPrice; break; }
                 }
 
-                // Format "10,000,000" with thousand separators.
+                // Format "1,000,000,000" with thousand separators.
                 char priceStr[32];
                 char digits[24];
                 int n = 0;

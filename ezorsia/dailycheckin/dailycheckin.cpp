@@ -171,6 +171,9 @@ public:
     IWzFontPtr   m_pFontBody;     // white bold — tooltip body lines
     IWzFontPtr   m_pFontAccent;   // amber bold — tooltip meso line
     IWzFontPtr   m_pFontShadow;   // black bold — 1px text shadow
+    IWzFontPtr   m_pFontUiTitle;  // dark title bar text
+    IWzFontPtr   m_pFontUiBanner; // white banner text
+    IWzFontPtr   m_pFontUiDay;    // white day-label text
     int          m_hoverDay;      // day (1..28) currently hovered, or -1
 
     RECT m_rcClose;
@@ -294,6 +297,72 @@ public:
         MakeFont(m_pFontBody,   0xFFFFFFFF, 12);   // white
         MakeFont(m_pFontAccent, 0xFFFFE08A, 12);   // light gold (meso line)
         MakeFont(m_pFontShadow, 0xFF000000, 12);   // black shadow
+        MakeFont(m_pFontUiTitle,  0xFF202020, 12);
+        MakeFont(m_pFontUiBanner, 0xFFFFFFFF, 12);
+        MakeFont(m_pFontUiDay,    0xFFFFFFFF, 11);
+    }
+
+    // GBK UI chrome over baked English art (title / banner / DAY N labels).
+    static int MeasureGbkWidth(const char* gbk) {
+        if (!gbk || !*gbk) return 0;
+        int w = 0;
+        for (const unsigned char* p = reinterpret_cast<const unsigned char*>(gbk); *p; ++p) {
+            if (*p >= 0x80 && *(p + 1)) {
+                w += 12;
+                ++p;
+            } else {
+                w += 6;
+            }
+        }
+        return w;
+    }
+
+    void DrawLocalizedChrome(IWzCanvasPtr c) {
+        if (!c) return;
+        try {
+            EnsureTooltipFonts();
+            // Title: mei ri qian dao (GBK)
+            static const char kTitleGbk[] = "\xC3\xBF\xC8\xD5\xC7\xA9\xB5\xBD";
+            RECT rcTitle = { 4, 2, kWndW - 20, 17 };
+            Fill(c, rcTitle, 0xFFE8E8E8);
+            if (m_pFontUiTitle) {
+                int tw = MeasureGbkWidth(kTitleGbk);
+                int tx = (kWndW - tw) / 2;
+                if (tx < 8) tx = 8;
+                ShadowText(c, tx, 3, kTitleGbk, m_pFontUiTitle);
+            }
+            // Banner GBK
+            static const char kBannerGbk[] =
+                "\xC3\xBF\xCC\xEC\xBB\xD8\xC0\xB4\xC1\xEC\xC8\xA1\xB8\xFC\xB6\xE0\xBD\xB1\xC0\xF8\xA3\xA1";
+            RECT rcBanner = { 4, 20, kWndW - 4, 50 };
+            Fill(c, rcBanner, 0xFF2A3548);
+            if (m_pFontUiBanner) {
+                int tw = MeasureGbkWidth(kBannerGbk);
+                int tx = (kWndW - tw) / 2;
+                if (tx < 10) tx = 10;
+                ShadowText(c, tx, 28, kBannerGbk, m_pFontUiBanner);
+            }
+            // Day label: "di N tian" (GBK)
+            static const char kDayPrefix[] = "\xB5\xDA";
+            static const char kDaySuffix[] = "\xCC\xEC";
+            for (int d = 1; d <= kDays; ++d) {
+                int idx = d - 1, row = idx / kCols, col = idx % kCols;
+                int cl = kCol0 + col * kColPitch;
+                int ct = kRowLabel0 + row * kRowPitch;
+                RECT rcLabel = { cl, ct, cl + kCellW, ct + 18 };
+                Fill(c, rcLabel, 0xFFE070A0);
+                char label[24];
+                _snprintf(label, sizeof(label), "%s%d%s", kDayPrefix, d, kDaySuffix);
+                label[sizeof(label) - 1] = 0;
+                if (m_pFontUiDay) {
+                    int tw = MeasureGbkWidth(label);
+                    int tx = cl + (kCellW - tw) / 2;
+                    if (tx < cl + 1) tx = cl + 1;
+                    ShadowText(c, tx, ct + 3, label, m_pFontUiDay);
+                }
+            }
+        } catch (...) {
+        }
     }
     // Text with a 1px black drop shadow.
     void ShadowText(IWzCanvasPtr c, int x, int y, const char* s, IWzFontPtr font) const {
@@ -352,7 +421,12 @@ public:
             ShadowText(c, hx, y + 4, lines[0].c_str(), titleF);                      // gold header, centred
             int ty = y + titleH + 6;
             for (size_t i = 1; i < lines.size(); ++i) {
-                IWzFontPtr f = (lines[i].find("mesos") != std::string::npos && m_pFontAccent) ? m_pFontAccent : bodyF;
+                IWzFontPtr f = bodyF;
+                if (m_pFontAccent &&
+                    (lines[i].find("mesos") != std::string::npos ||
+                     lines[i].find("\xBD\xF0\xB1\xD2") != std::string::npos)) {
+                    f = m_pFontAccent;
+                }
                 ShadowText(c, x + padX, ty, lines[i].c_str(), f);
                 ty += lineH;
             }
@@ -424,6 +498,7 @@ void CUIDailyCheckin::OnDestroy() {
     m_pBg = nullptr; m_pBtClose[0] = nullptr; m_pBtClose[1] = nullptr;
     m_pFont = nullptr; m_pFontTitle = nullptr; m_pFontBody = nullptr;
     m_pFontAccent = nullptr; m_pFontShadow = nullptr;
+    m_pFontUiTitle = nullptr; m_pFontUiBanner = nullptr; m_pFontUiDay = nullptr;
     if (ms_pInstance == this) ms_pInstance = nullptr;
     CWnd::OnDestroy();
 }
@@ -436,6 +511,8 @@ void CUIDailyCheckin::Draw(const RECT* pRect) {
 
     // (1) Custom background (title, banner, 28 labelled wells are baked into the art).
     BlitAt(pCanvas, m_pBg, 0, 0);
+    // (1b) Overlay Chinese chrome so English baked art is covered.
+    DrawLocalizedChrome(pCanvas);
 
     // (2) Each day: reward icon + state overlay. Icons stay vibrant so the grid reads as a full
     //     reward preview; only state is signalled by tint/border/check.
@@ -548,6 +625,13 @@ static void HandleSnapshotCompat(CompatInPacket* packet) {
         std::string s = DecodePacketString(packet);
         if (i < kDays) g_state.tip[i] = std::move(s);
     }
+    // Read trailing claim message BEFORE creating/drawing the window, so a short
+    // legacy packet cannot leave us mid-decode while UI is already live.
+    std::string claimMsg;
+    if (packet->CanRead(2)) {
+        claimMsg = DecodePacketString(packet);
+    }
+
     g_state.ready = true;
 
     CUIDailyCheckin* w = EnsureWindow();
@@ -555,13 +639,20 @@ static void HandleSnapshotCompat(CompatInPacket* packet) {
 
     if (justClaimed >= 1 && justClaimed <= kDays) {
         play_ui_sound(L"BtMouseClick");
-        char buf[160];
-        _snprintf(buf, sizeof(buf),
-                  "Daily Check-In\r\n\r\nDay %d reward claimed!\r\nCheck your inventory.",
-                  justClaimed);
-        buf[sizeof(buf) - 1] = 0;
+        char buf[192];
+        const char* msg = claimMsg.c_str();
+        if (claimMsg.empty()) {
+            // Fallback GBK claim notice (mei ri qian dao / di N tian ...)
+            _snprintf(buf, sizeof(buf),
+                      "\xC3\xBF\xC8\xD5\xC7\xA9\xB5\xBD\r\n\r\n"
+                      "\xB5\xDA %d \xCC\xEC\xBD\xB1\xC0\xF8\xD2\xD1\xC1\xEC\xC8\xA1\xA3\xA1\r\n"
+                      "\xC7\xEB\xB2\xE9\xBF\xB4\xB1\xB3\xB0\xFC\xA1\xA3",
+                      justClaimed);
+            buf[sizeof(buf) - 1] = 0;
+            msg = buf;
+        }
         try {
-            ZXString<char> zmsg(buf);
+            ZXString<char> zmsg(msg);
             CUtilDlg_Notice(zmsg, nullptr, nullptr, 0, 0);
         } catch (...) {}
     }
