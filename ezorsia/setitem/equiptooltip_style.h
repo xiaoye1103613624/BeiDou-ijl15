@@ -14,6 +14,10 @@ void AttachEquipTooltipStyleHooks();
 // Remember hover tip screen position from ShowItemToolTip (before Draw).
 void EquipTooltipStyle_NoteHoverPos(CUIToolTip* tip, int x, int y);
 
+// Read last NoteHoverPos for tip (or any noted tip if tip is null / mismatch).
+// Returns false if nothing noted.
+bool EquipTooltipStyle_GetHoverPos(CUIToolTip* tip, int& outX, int& outY);
+
 // Replace vanilla equip tip body with custom Dotum/ColonCenter canvas.
 // Returns true if handled ? caller must NOT call vanilla DrawToolTip_Equip.
 bool EquipTooltipStyle_TryDrawCustom(

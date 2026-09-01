@@ -2,7 +2,7 @@
 //   - No DllMain UI attach.
 //   - When pendant2_ui=true after CField:
 //       * AlignClassicDrawToHitTest + classic rings/medal/belt/shoulder
-//       * GetSlotXY/HitTest/BE27E0: red3/4 (BP52/53); badge/totem parked (Addon)
+//       * GetSlotXY/HitTest only (NEVER BE27E0/KeyConfig); badge/totem parked (Addon)
 //       * Char HT end → BE241C; draw loop-end mov eax,55 (NOT ForceDrawLoop)
 //       * Classic PE HitTest[≥50] not written (cash overflow fix)
 //       * HitTest remaps also sync shoulders DLL table (tip/dblclick)
@@ -14,3 +14,4 @@
 void AttachPendant2SlotsFix();
 void EnsurePendant2AfterFieldEnter();
 void Pendant2OnClientTick();
+void Pendant2EnsureNarrowEquipLayout();

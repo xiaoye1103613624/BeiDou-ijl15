@@ -12,6 +12,11 @@ void AttachSetItemMod();
 void AttachSetItemUiHooks();
 void SetItem_RedrawActivePanel();
 bool SetItem_TryGetActiveSetTooltipRect(int& outX, int& outY, int& outW, int& outH);
+bool SetItem_TryGetActiveCompareSetTooltipRect(int& outX, int& outY, int& outW, int& outH);
+bool SetItem_TryGetActiveAltSetTooltipRect(int& outX, int& outY, int& outW, int& outH);
+void SetItem_UpdateCompareCompanion(CUIToolTip* compareTip, int itemId);
+void SetItem_HideCompareCompanion();
+void SetItem_RelayoutCompareCompanion(CUIToolTip* compareTip);
 
 namespace SetItemData {
 int g_finalDamagePercent = 0;
@@ -165,5 +170,25 @@ int GetSkillBonusLevel(int skillId) {
 
 bool TryGetActiveSetTooltipRect(int& outX, int& outY, int& outW, int& outH) {
     return SetItem_TryGetActiveSetTooltipRect(outX, outY, outW, outH);
+}
+
+bool TryGetActiveCompareSetTooltipRect(int& outX, int& outY, int& outW, int& outH) {
+    return SetItem_TryGetActiveCompareSetTooltipRect(outX, outY, outW, outH);
+}
+
+bool TryGetActiveAltSetTooltipRect(int& outX, int& outY, int& outW, int& outH) {
+    return SetItem_TryGetActiveAltSetTooltipRect(outX, outY, outW, outH);
+}
+
+void UpdateCompareCompanion(CUIToolTip* compareTip, int itemId) {
+    SetItem_UpdateCompareCompanion(compareTip, itemId);
+}
+
+void HideCompareCompanion() {
+    SetItem_HideCompareCompanion();
+}
+
+void RelayoutCompareCompanion(CUIToolTip* compareTip) {
+    SetItem_RelayoutCompareCompanion(compareTip);
 }
 } // namespace SetItem

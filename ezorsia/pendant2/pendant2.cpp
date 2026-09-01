@@ -1,5 +1,7 @@
-// Stamp: ADDON_LOGIN_HOVER_SAFE_20260803 (ROW3 enter baseline + login/hover fixes)
-// Prior: SENDBUSY_BOOTSAFE (do not re-embed that stamp) / FIX / PERSIST / ROW3 / STATS
+// Stamp: FIX_NO_BE27E0_KEYPOS_20260830
+//   Root cause of 键盘错位: old code wrote Equip coords into 0xBE27E0
+//   (CUIKeyConfig::s_aptKeyPos — IDA sub_8354E4 / EXE xrefs @833AC2,8354F8).
+//   Fix: never write BE27E0; heal stock keypos if sentinel corrupted.
 //
 // UI (this file): classic layout, BP23 park, char HT extend, flag cave,
 //   char equip icon draw loop fixed max BP55 (NOT ForceDrawLoop).
@@ -15,6 +17,7 @@
 // Design: raise draw with ae-style `mov eax,55;nop` — NOT add-imm+flag (BP54 hang).
 //
 // Policy: NEVER ForceDrawLoop (setne→mov al,1) @ 0x007FEFB9. NEVER pet HT @ 801214/8013A3.
+//   NEVER write 0xBE27E0 as an Equip table.
 
 #include "stdafx.h"
 #include "Pendant2Api.h"
@@ -71,33 +74,25 @@ static constexpr int kBp23ParkX = -128;
 static constexpr int kBp23ParkY = -128;
 
 extern "C" __declspec(dllexport) const char* Pendant2_GetStamp() {
-    return "ADDON_LOGIN_HOVER_SAFE_20260803";
+    return "FIX_NO_BE27E0_KEYPOS_20260830";
 }
 
 static constexpr int kPendant2BodyPart = 51;
 static constexpr int kPendant2Index = 50;
-static constexpr int kPendant2Be27Index = 51;
 static constexpr int kShoulderBodyPart = 20;
 static constexpr int kShoulderIndex = 19;
-static constexpr int kShoulderBe27Index = 20;
 static constexpr int kRing5BodyPart = 52;
 static constexpr int kRing5Index = 51;
-static constexpr int kRing5Be27Index = 52;
 static constexpr int kRing6BodyPart = 53;
 static constexpr int kRing6Index = 52;
-static constexpr int kRing6Be27Index = 53;
 static constexpr int kBadgeBodyPart = 54;
 static constexpr int kBadgeIndex = 53; // HitTest/GetSlotXY: BP = index+1
-static constexpr int kBadgeBe27Index = 54;
 static constexpr int kTotemBodyPart = 55;
 static constexpr int kTotemIndex = 54;
-static constexpr int kTotemBe27Index = 55;
 static constexpr int kPocketBodyPart = 33;
 static constexpr int kPocketIndex = 32;
-static constexpr int kPocketBe27Index = 33;
 static constexpr int kSubWeaponBodyPart = 10;
 static constexpr int kSubWeaponIndex = 9;
-static constexpr int kSubWeaponBe27Index = 10;
 static constexpr int kClassicRingBp12Index = 11;
 static constexpr int kClassicRingBp13Index = 12;
 static constexpr int kClassicRingBp15Index = 14;
@@ -118,7 +113,11 @@ static constexpr int kExtraPendantFlagOff = 0x5E8;
 
 static constexpr DWORD kClassicHitTestTable = 0x00BE2260;
 static constexpr DWORD kClassicGetSlotXyTable = 0x00BE2580;
-static constexpr DWORD kCuiEquipBe27Table = 0x00BE27E0;
+static constexpr DWORD kClassicCashSlotXyTable = 0x00BE23F0; // flag==0 GetSlotXY
+// FORBIDDEN as Equip table: 0x00BE27E0 = CUIKeyConfig::s_aptKeyPos
+// (EXE xrefs 0x833AC2 / 0x8354F8; IDA sub_8354E4). Heal-only below.
+static constexpr DWORD kAptKeyPosTable = 0x00BE27E0;
+static constexpr int kAptKeyPosCount = 91; // main keyboard + bottom modifiers
 
 // Character GetBodyPartFromPoint @ 0x7FEC6F end cmp.
 // BP55 end: BE2260 + 55*8 + 4 = BE241C
@@ -186,6 +185,10 @@ static void PatchTableSlot(DWORD tableBase, int index, int x, int y) {
     // Extended BP51–55 HitTest lives in shoulders DLL table — do not smash cash.
     // GetBodyPartFromPoint walks the DLL table (shoulders redirect), so any
     // classic HT remap must also update g_hitTestExt or tip/dblclick miss.
+    // Never route Equip remaps through kAptKeyPosTable / BE27E0.
+    if (tableBase == kAptKeyPosTable) {
+        return;
+    }
     if (tableBase == kClassicHitTestTable) {
         Shoulder_SetExtHitTestSlot(index, x, y);
         if (index >= 50) {
@@ -200,6 +203,40 @@ static void PatchTableSlot(DWORD tableBase, int index, int x, int y) {
     slots[index].x = x;
     slots[index].y = y;
     VirtualProtect(slots + index, sizeof(EquipSlotPos), oldProt, &oldProt);
+}
+
+// Stock CUIKeyConfig::s_aptKeyPos[0..90] from BeiDou.exe .data @ BE27E0.
+// Sentinel: [2]=(48,66) Esc-row '1', [16]=(64,99) Tab, [42]=(38,165) Shift.
+static const EquipSlotPos kStockAptKeyPos[kAptKeyPosCount] = {
+    {0, 0}, {0, 0}, {48, 66}, {82, 66}, {116, 66}, {150, 66}, {184, 66}, {218, 66},
+    {252, 66}, {286, 66}, {320, 66}, {354, 66}, {388, 66}, {422, 66}, {0, 0}, {0, 0},
+    {64, 99}, {98, 99}, {132, 99}, {166, 99}, {200, 99}, {234, 99}, {268, 99}, {302, 99},
+    {336, 99}, {370, 99}, {404, 99}, {438, 99}, {0, 0}, {22, 198}, {81, 132}, {115, 132},
+    {149, 132}, {183, 132}, {217, 132}, {251, 132}, {285, 132}, {319, 132}, {353, 132},
+    {387, 132}, {421, 132}, {14, 66}, {38, 165}, {472, 99}, {98, 165}, {132, 165},
+    {166, 165}, {200, 165}, {234, 165}, {268, 165}, {302, 165}, {336, 165}, {370, 165},
+    {0, 0}, {457, 165}, {0, 0}, {122, 198}, {233, 198}, {0, 0}, {82, 27}, {116, 27},
+    {150, 27}, {184, 27}, {226, 27}, {260, 27}, {294, 27}, {328, 27}, {370, 27},
+    {404, 27}, {0, 0}, {0, 0}, {548, 66}, {0, 0}, {582, 66}, {0, 0}, {0, 0}, {0, 0},
+    {0, 0}, {0, 0}, {548, 99}, {0, 0}, {582, 99}, {514, 66}, {514, 99}, {0, 0},
+    {0, 0}, {0, 0}, {438, 27}, {472, 27}, {461, 198}, {348, 198},
+};
+
+static void HealAptKeyPosIfCorrupted() {
+    auto* live = reinterpret_cast<EquipSlotPos*>(kAptKeyPosTable);
+    const bool ok = live[2].x == 48 && live[2].y == 66 && live[16].x == 64 && live[16].y == 99
+        && live[42].x == 38 && live[42].y == 165;
+    if (ok) {
+        return;
+    }
+    DWORD oldProt = 0;
+    if (!VirtualProtect(live, sizeof(EquipSlotPos) * kAptKeyPosCount, PAGE_EXECUTE_READWRITE, &oldProt)) {
+        return;
+    }
+    for (int i = 0; i < kAptKeyPosCount; ++i) {
+        live[i] = kStockAptKeyPos[i];
+    }
+    VirtualProtect(live, sizeof(EquipSlotPos) * kAptKeyPosCount, oldProt, &oldProt);
 }
 
 static EquipSlotPos ReadTableSlot(DWORD tableBase, int index) {
@@ -326,44 +363,36 @@ static void FixZeroDrawSlots() {
 
     PatchTableSlot(kClassicGetSlotXyTable, kPendant2Index, kClassicPendant2X, kClassicPendant2Y);
     PatchTableSlot(kClassicHitTestTable, kPendant2Index, kClassicPendant2X, kClassicPendant2Y);
-    PatchTableSlot(kCuiEquipBe27Table, kPendant2Be27Index, kClassicPendant2X, kClassicPendant2Y);
 
     PatchTableSlot(kClassicGetSlotXyTable, kShoulderIndex, kClassicShoulderX, kClassicShoulderY);
     PatchTableSlot(kClassicHitTestTable, kShoulderIndex, kClassicShoulderX, kClassicShoulderY);
-    PatchTableSlot(kCuiEquipBe27Table, kShoulderBe27Index, kClassicShoulderX, kClassicShoulderY);
+    // flag==0 GetSlotXY reads BE23F0 — native BP20 is (71,233) off-panel.
+    PatchTableSlot(kClassicCashSlotXyTable, kShoulderIndex, kClassicShoulderX, kClassicShoulderY);
 
     PatchTableSlot(kClassicGetSlotXyTable, kClassicRingBp15Index, kClassicRingBp15X, kClassicRingBp15Y);
     PatchTableSlot(kClassicHitTestTable, kClassicRingBp15Index, kClassicRingBp15X, kClassicRingBp15Y);
-    PatchTableSlot(kCuiEquipBe27Table, 15, kClassicRingBp15X, kClassicRingBp15Y);
 
     PatchTableSlot(kClassicGetSlotXyTable, kClassicRingBp16Index, kClassicRingBp16X, kClassicRingBp16Y);
     PatchTableSlot(kClassicHitTestTable, kClassicRingBp16Index, kClassicRingBp16X, kClassicRingBp16Y);
-    PatchTableSlot(kCuiEquipBe27Table, 16, kClassicRingBp16X, kClassicRingBp16Y);
 
     PatchTableSlot(kClassicGetSlotXyTable, kClassicRingBp12Index, kClassicRingBp12X, kClassicRingBp12Y);
     PatchTableSlot(kClassicHitTestTable, kClassicRingBp12Index, kClassicRingBp12X, kClassicRingBp12Y);
-    PatchTableSlot(kCuiEquipBe27Table, 12, kClassicRingBp12X, kClassicRingBp12Y);
 
     PatchTableSlot(kClassicGetSlotXyTable, kClassicRingBp13Index, kClassicRingBp13X, kClassicRingBp13Y);
     PatchTableSlot(kClassicHitTestTable, kClassicRingBp13Index, kClassicRingBp13X, kClassicRingBp13Y);
-    PatchTableSlot(kCuiEquipBe27Table, 13, kClassicRingBp13X, kClassicRingBp13Y);
 
     PatchTableSlot(kClassicGetSlotXyTable, kRing5Index, kClassicRing5X, kClassicRing5Y);
     PatchTableSlot(kClassicHitTestTable, kRing5Index, kClassicRing5X, kClassicRing5Y);
-    PatchTableSlot(kCuiEquipBe27Table, kRing5Be27Index, kClassicRing5X, kClassicRing5Y);
 
     PatchTableSlot(kClassicGetSlotXyTable, kRing6Index, kClassicRing6X, kClassicRing6Y);
     PatchTableSlot(kClassicHitTestTable, kRing6Index, kClassicRing6X, kClassicRing6Y);
-    PatchTableSlot(kCuiEquipBe27Table, kRing6Be27Index, kClassicRing6X, kClassicRing6Y);
 
     // Badge / Totem1 OFF main Equip (Addon paints them).
     PatchTableSlot(kClassicGetSlotXyTable, kBadgeIndex, kOffPanelX, kOffPanelY);
     PatchTableSlot(kClassicHitTestTable, kBadgeIndex, kOffPanelX, kOffPanelY);
-    PatchTableSlot(kCuiEquipBe27Table, kBadgeBe27Index, kOffPanelX, kOffPanelY);
 
     PatchTableSlot(kClassicGetSlotXyTable, kTotemIndex, kOffPanelX, kOffPanelY);
     PatchTableSlot(kClassicHitTestTable, kTotemIndex, kOffPanelX, kOffPanelY);
-    PatchTableSlot(kCuiEquipBe27Table, kTotemBe27Index, kOffPanelX, kOffPanelY);
 
     // Pocket/red10: EquipAddon::WirePocketAndSiSlots (Equip-open only).
     // 109 shield: leave vanilla BP10 GetSlotXY/HT untouched.
@@ -371,9 +400,7 @@ static void FixZeroDrawSlots() {
     (void)kPocketBodyPart;
     (void)kSubWeaponBodyPart;
     (void)kPocketIndex;
-    (void)kPocketBe27Index;
     (void)kSubWeaponIndex;
-    (void)kSubWeaponBe27Index;
     (void)kClassicRed9X;
     (void)kClassicRed9Y;
     (void)kClassicRed10X;
@@ -410,6 +437,9 @@ static void AttachUiHooksOnce() {
         return;
     }
     LoadPendant2UiFlagOnce();
+    // KeyConfig heal is independent of pendant2_ui — old builds / other modules
+    // may have left s_aptKeyPos poisoned before Equip hooks attach.
+    HealAptKeyPosIfCorrupted();
     if (!g_pendant2UiEnabled) {
         return;
     }
@@ -429,6 +459,7 @@ static void AttachUiHooksOnce() {
 
     AlignClassicDrawToHitTest();
     FixZeroDrawSlots();
+    HealAptKeyPosIfCorrupted();
     PatchCharHitTestForBp55();
     PatchCharDrawLoopForBp55();
     PatchClassicLayoutDeltas();
@@ -453,17 +484,44 @@ void EnsurePendant2AfterFieldEnter() {
 
 void Pendant2OnClientTick() {
     if (!g_uiHooksAttached) {
+        // Still try KeyConfig heal if field-enter attach was skipped (pendant2_ui off).
+        static bool s_healedOnce = false;
+        if (!s_healedOnce) {
+            s_healedOnce = true;
+            HealAptKeyPosIfCorrupted();
+        }
         return;
     }
     PumpExtraPendantFlags();
+    // Re-assert gold classic seats — races after other UI patches can wipe
+    // GetSlotXY/HT. Do NOT write BE27E0 as Equip (KeyConfig s_aptKeyPos).
+    // Dual-table: flag==0 → BE23F0, flag!=0 → BE2580 (native BP20=(71,233)).
+    PatchTableSlot(kClassicGetSlotXyTable, kShoulderIndex, kClassicShoulderX, kClassicShoulderY);
+    PatchTableSlot(kClassicCashSlotXyTable, kShoulderIndex, kClassicShoulderX, kClassicShoulderY);
+    PatchTableSlot(kClassicHitTestTable, kShoulderIndex, kClassicShoulderX, kClassicShoulderY);
+    Shoulder_SetExtHitTestSlot(kShoulderIndex, kClassicShoulderX, kClassicShoulderY);
+    static DWORD s_lastDiagTick = 0;
+    const DWORD now = GetTickCount();
+    if (now - s_lastDiagTick > 5000) {
+        s_lastDiagTick = now;
+        Shoulder_ReassertUiAndDiag();
+    }
+    PatchTableSlot(kClassicGetSlotXyTable, kPendant2Index, kClassicPendant2X, kClassicPendant2Y);
+    PatchTableSlot(kClassicHitTestTable, kPendant2Index, kClassicPendant2X, kClassicPendant2Y);
+    PatchTableSlot(kClassicGetSlotXyTable, kRing5Index, kClassicRing5X, kClassicRing5Y);
+    PatchTableSlot(kClassicHitTestTable, kRing5Index, kClassicRing5X, kClassicRing5Y);
+    PatchTableSlot(kClassicGetSlotXyTable, kRing6Index, kClassicRing6X, kClassicRing6Y);
+    PatchTableSlot(kClassicHitTestTable, kRing6Index, kClassicRing6X, kClassicRing6Y);
     // Re-assert Addon park only; pocket/red10 gated inside WirePocketAndSiSlots.
     PatchTableSlot(kClassicGetSlotXyTable, kBadgeIndex, kOffPanelX, kOffPanelY);
     PatchTableSlot(kClassicHitTestTable, kBadgeIndex, kOffPanelX, kOffPanelY);
-    PatchTableSlot(kCuiEquipBe27Table, kBadgeBe27Index, kOffPanelX, kOffPanelY);
     Shoulder_SetExtHitTestSlot(kBadgeIndex, kOffPanelX, kOffPanelY);
     PatchTableSlot(kClassicGetSlotXyTable, kTotemIndex, kOffPanelX, kOffPanelY);
     PatchTableSlot(kClassicHitTestTable, kTotemIndex, kOffPanelX, kOffPanelY);
-    PatchTableSlot(kCuiEquipBe27Table, kTotemBe27Index, kOffPanelX, kOffPanelY);
     Shoulder_SetExtHitTestSlot(kTotemIndex, kOffPanelX, kOffPanelY);
     EquipAddon::WirePocketAndSiSlots();
+}
+
+void Pendant2EnsureNarrowEquipLayout() {
+    PatchClassicLayoutDeltas();
 }

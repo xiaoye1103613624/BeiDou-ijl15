@@ -307,6 +307,22 @@ CUIToolTip* g_activeMainTooltip = nullptr;
 GW_ItemSlotEquip* g_activeEquip = nullptr;
 static alignas(8) char g_setTooltipBuf[kSetTooltipBufSize];
 static bool g_setTooltipInited = false;
+// Second buffer: set tip for the equipped item in the compare column.
+static alignas(8) char g_cmpSetTooltipBuf[kSetTooltipBufSize];
+static bool g_cmpSetTooltipInited = false;
+static int g_cmpLastSetId = 0;
+static int g_cmpLastItemId = 0;
+static int g_cmpLastEquippedCount = 0;
+static int g_cmpLastDockX = 0;
+static int g_cmpLastDockY = 0;
+// Third buffer: opposite-band set for the same slot family as hover (cash↔normal).
+static alignas(8) char g_altSetTooltipBuf[kSetTooltipBufSize];
+static bool g_altSetTooltipInited = false;
+static int g_altLastSetId = 0;
+static int g_altLastItemId = 0;
+static int g_altLastEquippedCount = 0;
+static int g_altLastDockX = 0;
+static int g_altLastDockY = 0;
 int g_lastLayoutX = 0;
 int g_lastLayoutY = 0;
 int g_lastSetId = 0;
@@ -385,13 +401,50 @@ static std::set<int> GetLocalEquippedItemIds() {
     if (!pCharData) {
         return ids;
     }
-    for (int pos = -60; pos <= -1; ++pos) {
+    // Include −62 (aux) / −61 (heart) + addon BP; prior −60..−1 missed body seats.
+    // Cash: only vanilla fashion −101..−119. Sidecar cash −154..−162 is emptied by
+    // EquipAddon GetItem hook (same ZRef as −bp) — scanning them double-counts set
+    // pieces and wrongly activates unmet tiers (white/lime + bonus preview).
+    for (int pos = -62; pos <= -1; ++pos) {
+        const int itemId = FetchEquippedItemAt(pCharData, pos);
+        if (itemId > 0) {
+            ids.insert(itemId);
+        }
+    }
+    for (int pos = -119; pos <= -101; ++pos) {
         const int itemId = FetchEquippedItemAt(pCharData, pos);
         if (itemId > 0) {
             ids.insert(itemId);
         }
     }
     return ids;
+}
+
+// Split normal vs cash equipped ids (for dual set tips + hover band detection).
+static void CollectEquippedByBand(std::set<int>& outNormal, std::set<int>& outCash) {
+    outNormal.clear();
+    outCash.clear();
+    void* pCtx = *reinterpret_cast<void**>(kAddr_CWvsContext_Instance);
+    if (!pCtx) {
+        return;
+    }
+    void* pCharData = *reinterpret_cast<void**>(
+            reinterpret_cast<char*>(pCtx) + kOffset_CharacterData_InContext);
+    if (!pCharData) {
+        return;
+    }
+    for (int pos = -62; pos <= -1; ++pos) {
+        const int itemId = FetchEquippedItemAt(pCharData, pos);
+        if (itemId > 0) {
+            outNormal.insert(itemId);
+        }
+    }
+    for (int pos = -119; pos <= -101; ++pos) {
+        const int itemId = FetchEquippedItemAt(pCharData, pos);
+        if (itemId > 0) {
+            outCash.insert(itemId);
+        }
+    }
 }
 
 static std::string GetItemDisplayName(int itemId) {
@@ -671,8 +724,10 @@ static std::vector<SetTipLine> BuildSetTooltipLayout(int setId, int hoverItemId)
             if (!TierHasStats(bonus)) {
                 continue;
             }
+            // Off-by-one: "3件套效果" needs exactly equippedCount >= 3 (not > 2 / not > 3).
+            // Unmet tiers stay Grey; met tiers use lime header + white/orange stats.
             const bool active = equippedCount >= req;
-            // "N????" ? no indent; same lime as title when active.
+            // "N件套效果" — no indent; same lime as title when active.
             char header[48];
             _snprintf_s(header, _countof(header), _TRUNCATE,
                     "%d\xCC\xD7\xD7\xB0\xD0\xA7\xB9\xFB", req);
@@ -1141,6 +1196,17 @@ static CUIToolTip* EnsureSetTooltip() {
     return reinterpret_cast<CUIToolTip*>(g_setTooltipBuf);
 }
 
+static CUIToolTip* EnsureCmpSetTooltip() {
+    if (!g_cmpSetTooltipInited) {
+        g_cmpSetTooltipInited = true;
+        reinterpret_cast<void(__thiscall*)(void*)>(ClientAddresses::kToolTipCtor)(
+                g_cmpSetTooltipBuf);
+    }
+    return reinterpret_cast<CUIToolTip*>(g_cmpSetTooltipBuf);
+}
+
+static void HideAltSetTooltip();
+
 static void HideSetTooltip() {
     if (g_setTooltipInited) {
         reinterpret_cast<void(__thiscall*)(void*)>(ClientAddresses::kToolTipClear)(
@@ -1149,9 +1215,43 @@ static void HideSetTooltip() {
     g_lastSetId = 0;
     g_lastHoverItemId = 0;
     g_lastEquippedCount = 0;
-    g_primaryShowItemId = 0;
-    // Compare tip may have been parked to the right of set ? pull back beside hover.
+    // Keep g_primaryShowItemId — cleared only on real tip dismiss (!g_inShowItemToolTip).
+    HideAltSetTooltip();
+    // Compare tip may have been parked to the right of set — pull back beside hover.
     EquipCompare::RelayoutActiveCompareTip();
+}
+
+static void HideCmpSetTooltip() {
+    if (g_cmpSetTooltipInited) {
+        reinterpret_cast<void(__thiscall*)(void*)>(ClientAddresses::kToolTipClear)(
+                g_cmpSetTooltipBuf);
+    }
+    g_cmpLastSetId = 0;
+    g_cmpLastItemId = 0;
+    g_cmpLastEquippedCount = 0;
+    g_cmpLastDockX = 0;
+    g_cmpLastDockY = 0;
+}
+
+static CUIToolTip* EnsureAltSetTooltip() {
+    if (!g_altSetTooltipInited) {
+        g_altSetTooltipInited = true;
+        reinterpret_cast<void(__thiscall*)(void*)>(ClientAddresses::kToolTipCtor)(
+                g_altSetTooltipBuf);
+    }
+    return reinterpret_cast<CUIToolTip*>(g_altSetTooltipBuf);
+}
+
+static void HideAltSetTooltip() {
+    if (g_altSetTooltipInited) {
+        reinterpret_cast<void(__thiscall*)(void*)>(ClientAddresses::kToolTipClear)(
+                g_altSetTooltipBuf);
+    }
+    g_altLastSetId = 0;
+    g_altLastItemId = 0;
+    g_altLastEquippedCount = 0;
+    g_altLastDockX = 0;
+    g_altLastDockY = 0;
 }
 
 bool TryGetActiveSetTooltipRect(int& outX, int& outY, int& outW, int& outH) {
@@ -1173,9 +1273,65 @@ bool TryGetActiveSetTooltipRect(int& outX, int& outY, int& outW, int& outH) {
         if (outH <= 0) {
             outH = setTip->m_pLayer->height;
         }
-        outX = setTip->m_pLayer->rx;
-        outY = setTip->m_pLayer->ry;
+        // Prefer MakeLayer-stored / forced dock (shop/storage often leave rx/ry=0).
+        const int storedX = setTip->m_nLayerLeft;
+        const int storedY = setTip->m_nLayerTop;
+        if (storedX != 0 || storedY != 0) {
+            outX = storedX;
+            outY = storedY;
+        } else {
+            outX = setTip->m_pLayer->rx;
+            outY = setTip->m_pLayer->ry;
+        }
         return outW > 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool TryGetActiveCompareSetTooltipRect(int& outX, int& outY, int& outW, int& outH) {
+    outX = outY = outW = outH = 0;
+    if (!g_cmpSetTooltipInited || g_cmpLastSetId <= 0) {
+        return false;
+    }
+    __try {
+        CUIToolTip* setTip = reinterpret_cast<CUIToolTip*>(g_cmpSetTooltipBuf);
+        if (!setTip || !setTip->m_pLayer) {
+            return false;
+        }
+        outW = setTip->m_nWidth;
+        outH = setTip->m_nHeight;
+        if (outW <= 0) {
+            outW = setTip->m_pLayer->width;
+        }
+        if (outH <= 0) {
+            outH = setTip->m_pLayer->height;
+        }
+        const int storedX = setTip->m_nLayerLeft;
+        const int storedY = setTip->m_nLayerTop;
+        if (storedX != 0 || storedY != 0) {
+            outX = storedX;
+            outY = storedY;
+        } else if (g_cmpLastDockX != 0 || g_cmpLastDockY != 0) {
+            outX = g_cmpLastDockX;
+            outY = g_cmpLastDockY;
+        } else {
+            outX = setTip->m_pLayer->rx;
+            outY = setTip->m_pLayer->ry;
+        }
+        return outW > 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static bool HasCmpSetTooltipLayer() {
+    if (!g_cmpSetTooltipInited) {
+        return false;
+    }
+    __try {
+        CUIToolTip* setTip = reinterpret_cast<CUIToolTip*>(g_cmpSetTooltipBuf);
+        return setTip->m_pLayer != nullptr;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
@@ -1192,8 +1348,11 @@ static int SafeReadTipWidth(CUIToolTip* setTip, int fallback) {
     return drawW;
 }
 
-static void ShowSetTooltipAt(int x, int y, int setId, int hoverItemId, CUIToolTip* fontTip,
-        int preferredWidth) {
+static void ShowSetTooltipAt(CUIToolTip* setTip, int x, int y, int setId, int hoverItemId,
+        CUIToolTip* fontTip, int preferredWidth) {
+    if (!setTip) {
+        return;
+    }
     std::vector<SetTipLine> lines = BuildSetTooltipLayout(setId, hoverItemId);
     if (lines.empty()) {
         lines = BuildServerFallbackLayout(setId);
@@ -1206,12 +1365,16 @@ static void ShowSetTooltipAt(int x, int y, int setId, int hoverItemId, CUIToolTi
     if (!g_setTipFonts.ready || !g_setTipFonts.white) {
         return;
     }
-    // Orange names for PAD/MAD ? retry if first CreateSetFont failed.
+    // Unmet tiers must stay visibly grey — retry if first CreateSetFont failed
+    // (fallback GetSetTipFont(Grey) would otherwise paint white = false "active").
+    if (!g_setTipFonts.grey) {
+        CreateSetFont(g_setTipFonts.grey, kColGrey, 12, false);
+    }
+    // Orange names for PAD/MAD — retry if first CreateSetFont failed.
     if (!g_setTipFonts.orange) {
         CreateSetFont(g_setTipFonts.orange, kColOrange, 12, false);
     }
 
-    CUIToolTip* setTip = EnsureSetTooltip();
     setTip->ClearToolTip();
 
     const int width = preferredWidth > 40 ? preferredWidth : ResolveSetTipWidth(fontTip, lines);
@@ -1288,6 +1451,9 @@ static bool HasSetTooltipLayer() {
 // Dock set tip to the RIGHT of the hovered equip tip: [hover] [set] [compare].
 static constexpr int kSetTipGap = 4;
 
+// Read where the main equip tip was placed. Prefer MakeLayer-stored nLeft/nTop
+// (+0x14/+0x18): shop/storage/cash often leave layer rx/ry at 0 even when the tip
+// is visible, which used to park the set companion at screen (0,0).
 static void ReadMainTooltipOrigin(CUIToolTip* mainTip, int fallbackX, int fallbackY,
         int& mainX, int& mainY, int& mainW) {
     mainX = fallbackX;
@@ -1298,8 +1464,16 @@ static void ReadMainTooltipOrigin(CUIToolTip* mainTip, int fallbackX, int fallba
     }
     __try {
         mainW = mainTip->m_nWidth;
-        if (mainTip->m_pLayer) {
-            // rx/ry may be 0 at left/top — still valid screen coords
+        const int storedX = mainTip->m_nLayerLeft;
+        const int storedY = mainTip->m_nLayerTop;
+        // Stored MakeLayer coords are the ShowItemToolTip screen anchor.
+        if (storedX != 0 || storedY != 0) {
+            mainX = storedX;
+            mainY = storedY;
+        } else if (fallbackX != 0 || fallbackY != 0) {
+            mainX = fallbackX;
+            mainY = fallbackY;
+        } else if (mainTip->m_pLayer) {
             mainX = mainTip->m_pLayer->rx;
             mainY = mainTip->m_pLayer->ry;
         }
@@ -1310,13 +1484,14 @@ static void ReadMainTooltipOrigin(CUIToolTip* mainTip, int fallbackX, int fallba
     }
 }
 
-// Dock set tip to the RIGHT of the hovered equip tip: [hover] [set] [compare].
+// Dock set tip to the RIGHT of the hovered equip tip: [hover] [set] [growth?] [compare].
+// Never flip to the left of the equip tip — keep the right-hand companion chain.
 static void ComputeSetTooltipRightOfMain(CUIToolTip* mainTip, int setW,
         int& outX, int& outY) {
     int mainX = 0;
     int mainY = 0;
     int mainW = 0;
-    ReadMainTooltipOrigin(mainTip, 0, 0, mainX, mainY, mainW);
+    ReadMainTooltipOrigin(mainTip, g_lastLayoutX, g_lastLayoutY, mainX, mainY, mainW);
     if (mainW <= 0) {
         mainW = 180;
     }
@@ -1328,10 +1503,7 @@ static void ComputeSetTooltipRightOfMain(CUIToolTip* mainTip, int setW,
     if (outY < 0) {
         outY = 0;
     }
-    const int screenW = get_screen_width();
-    if (screenW > 0 && outX + setW > screenW) {
-        outX = (std::max)(0, screenW - setW);
-    }
+    // Soft clamp only: keep right of equip; may sit partly off-screen on narrow views.
     if (outX < 0) {
         outX = 0;
     }
@@ -1351,11 +1523,362 @@ static int SafeGetSetTipWidth(CUIToolTip* setTip) {
 
 static void SafeRelMoveSetTip(CUIToolTip* setTip, int setX, int setY) {
     __try {
-        if (setTip && setTip->m_pLayer) {
-            setTip->m_pLayer->RelMove(setX, setY);
+        if (!setTip || !setTip->m_pLayer) {
+            return;
         }
+        // RelMove + force rx/ry (same as FusionAnvil companion tips). MakeLayer_hook
+        // screen-clamp can leave companions at (0,0) when rs_width/size disagree.
+        setTip->m_pLayer->RelMove(setX, setY);
+        setTip->m_pLayer->rx = setX;
+        setTip->m_pLayer->ry = setY;
+        setTip->m_nLayerLeft = setX;
+        setTip->m_nLayerTop = setY;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
+}
+
+static void ReadTipOrigin(CUIToolTip* tip, int& outX, int& outY, int& outW) {
+    outX = outY = outW = 0;
+    if (!tip) {
+        return;
+    }
+    __try {
+        outW = tip->m_nWidth;
+        const int storedX = tip->m_nLayerLeft;
+        const int storedY = tip->m_nLayerTop;
+        if (storedX != 0 || storedY != 0) {
+            outX = storedX;
+            outY = storedY;
+        } else if (tip->m_pLayer) {
+            outX = tip->m_pLayer->rx;
+            outY = tip->m_pLayer->ry;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        outW = 0;
+    }
+}
+
+static void ComputeCmpSetDockRightOfCompare(CUIToolTip* compareTip, int setW, int& outX,
+        int& outY) {
+    int cx = 0, cy = 0, cw = 0;
+    ReadTipOrigin(compareTip, cx, cy, cw);
+    if (cw <= 0) {
+        cw = 180;
+    }
+    if (setW <= 0) {
+        setW = 180;
+    }
+    outX = cx + cw + kSetTipGap;
+    outY = cy;
+    if (outY < 0) {
+        outY = 0;
+    }
+    if (outX < 0) {
+        outX = 0;
+    }
+}
+
+void RelayoutCompareCompanion(CUIToolTip* compareTip) {
+    if (!compareTip || g_cmpLastSetId <= 0 || !HasCmpSetTooltipLayer()) {
+        return;
+    }
+    CUIToolTip* setTip = reinterpret_cast<CUIToolTip*>(g_cmpSetTooltipBuf);
+    int tipW = SafeGetSetTipWidth(setTip);
+    if (tipW <= 0) {
+        tipW = 180;
+    }
+    int setX = 0, setY = 0;
+    ComputeCmpSetDockRightOfCompare(compareTip, tipW, setX, setY);
+    SafeRelMoveSetTip(setTip, setX, setY);
+    g_cmpLastDockX = setX;
+    g_cmpLastDockY = setY;
+}
+
+void HideCompareCompanion() {
+    HideCmpSetTooltip();
+}
+
+void UpdateCompareCompanion(CUIToolTip* compareTip, int itemId) {
+    if (!compareTip || !IsEquipItemId(itemId)) {
+        HideCmpSetTooltip();
+        return;
+    }
+    EnsureSetItemDatabaseLoaded();
+    const int setId = ResolveSetIdForItem(itemId);
+    if (setId <= 0) {
+        HideCmpSetTooltip();
+        return;
+    }
+    // Same set already shown beside hover — do not duplicate on the compare side.
+    if (setId == g_lastSetId && g_lastSetId > 0 && HasSetTooltipLayer()) {
+        HideCmpSetTooltip();
+        return;
+    }
+
+    std::vector<SetTipLine> layout = BuildSetTooltipLayout(setId, itemId);
+    if (layout.empty()) {
+        layout = BuildServerFallbackLayout(setId);
+    }
+    if (layout.empty()) {
+        HideCmpSetTooltip();
+        return;
+    }
+
+    const std::set<int> equipped = GetLocalEquippedItemIds();
+    int equippedCount = 0;
+    const LocalSetDef* def = GetSetDef(setId);
+    if (def) {
+        for (int id : def->itemIds) {
+            if (equipped.count(id) > 0) {
+                ++equippedCount;
+            }
+        }
+    }
+
+    const int setW = ResolveSetTipWidth(compareTip, layout);
+    CUIToolTip* setTip = EnsureCmpSetTooltip();
+
+    if (setId == g_cmpLastSetId && itemId == g_cmpLastItemId &&
+            equippedCount == g_cmpLastEquippedCount && HasCmpSetTooltipLayer()) {
+        RelayoutCompareCompanion(compareTip);
+        return;
+    }
+
+    g_cmpLastSetId = setId;
+    g_cmpLastItemId = itemId;
+    g_cmpLastEquippedCount = equippedCount;
+
+    int setX = 0, setY = 0;
+    ComputeCmpSetDockRightOfCompare(compareTip, setW, setX, setY);
+    ShowSetTooltipAt(setTip, setX, setY, setId, itemId, compareTip, setW);
+    const int renderedW = SafeGetSetTipWidth(setTip);
+    if (renderedW > 0) {
+        ComputeCmpSetDockRightOfCompare(compareTip, renderedW, setX, setY);
+        SafeRelMoveSetTip(setTip, setX, setY);
+    }
+    g_cmpLastDockX = setX;
+    g_cmpLastDockY = setY;
+}
+
+static bool HasAltSetTooltipLayer() {
+    if (!g_altSetTooltipInited) {
+        return false;
+    }
+    __try {
+        CUIToolTip* setTip = reinterpret_cast<CUIToolTip*>(g_altSetTooltipBuf);
+        return setTip->m_pLayer != nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool TryGetActiveAltSetTooltipRect(int& outX, int& outY, int& outW, int& outH) {
+    outX = outY = outW = outH = 0;
+    if (!g_altSetTooltipInited || g_altLastSetId <= 0) {
+        return false;
+    }
+    __try {
+        CUIToolTip* setTip = reinterpret_cast<CUIToolTip*>(g_altSetTooltipBuf);
+        if (!setTip || !setTip->m_pLayer) {
+            return false;
+        }
+        outW = setTip->m_nWidth;
+        outH = setTip->m_nHeight;
+        if (outW <= 0) {
+            outW = setTip->m_pLayer->width;
+        }
+        if (outH <= 0) {
+            outH = setTip->m_pLayer->height;
+        }
+        const int storedX = setTip->m_nLayerLeft;
+        const int storedY = setTip->m_nLayerTop;
+        if (storedX != 0 || storedY != 0) {
+            outX = storedX;
+            outY = storedY;
+        } else if (g_altLastDockX != 0 || g_altLastDockY != 0) {
+            outX = g_altLastDockX;
+            outY = g_altLastDockY;
+        } else {
+            outX = setTip->m_pLayer->rx;
+            outY = setTip->m_pLayer->ry;
+        }
+        return outW > 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Equip slot family (100=hat … 113=belt …). Same family = same body-slot class.
+static int EquipSlotFamily(int itemId) {
+    if (itemId < 1000000) {
+        return 0;
+    }
+    return itemId / 10000;
+}
+
+// Best set among `band` pieces that share hover's slot family (≠ hoverSetId).
+// Does NOT fall back to unrelated sets (e.g. hat set while inspecting a belt).
+static int BestRelatedSetIdInBand(const std::set<int>& band, int hoverSetId, int hoverItemId) {
+    const int family = EquipSlotFamily(hoverItemId);
+    if (family <= 0) {
+        return 0;
+    }
+    std::map<int, int> counts;
+    for (int id : band) {
+        if (EquipSlotFamily(id) != family) {
+            continue;
+        }
+        const int sid = ResolveSetIdForItem(id);
+        if (sid > 0 && sid != hoverSetId) {
+            ++counts[sid];
+        }
+    }
+    int best = 0;
+    int bestC = 0;
+    for (const auto& kv : counts) {
+        if (kv.second > bestC) {
+            best = kv.first;
+            bestC = kv.second;
+        }
+    }
+    return best;
+}
+
+// Opposite-band set tip only when the hover item is equipped on one band and the
+// other band has a same-slot-family set (cash belt ↔ normal belt).
+// Bag hover must NOT pick the equipped same-slot set here — that belongs to the
+// compare companion (right of compare tip). Doing so injected a middle tip that
+// highlighted an arbitrary equipped piece (e.g. hat while comparing staves).
+static int FindAltSetId(int hoverSetId, int hoverItemId) {
+    if (hoverItemId <= 0 || EquipSlotFamily(hoverItemId) <= 0) {
+        return 0;
+    }
+    std::set<int> normal;
+    std::set<int> cash;
+    CollectEquippedByBand(normal, cash);
+    const bool hoverInCash = cash.count(hoverItemId) > 0;
+    const bool hoverInNormal = normal.count(hoverItemId) > 0;
+    if (hoverInCash && !hoverInNormal) {
+        return BestRelatedSetIdInBand(normal, hoverSetId, hoverItemId);
+    }
+    if (hoverInNormal && !hoverInCash) {
+        return BestRelatedSetIdInBand(cash, hoverSetId, hoverItemId);
+    }
+    // Bag / not equipped / on both bands: no alt tip.
+    return 0;
+}
+
+static void ComputeAltSetDock(CUIToolTip* mainTip, int setW, int& outX, int& outY) {
+    int gx = 0, gy = 0, gw = 0, gh = 0;
+    if (EquipGrowth::TryGetActiveGrowthTooltipRect(gx, gy, gw, gh) && gw > 0) {
+        outX = gx + gw + kSetTipGap;
+        outY = gy;
+    } else {
+        int sx = 0, sy = 0, sw = 0, sh = 0;
+        if (TryGetActiveSetTooltipRect(sx, sy, sw, sh) && sw > 0) {
+            outX = sx + sw + kSetTipGap;
+            outY = sy;
+        } else {
+            ComputeSetTooltipRightOfMain(mainTip, setW, outX, outY);
+            return;
+        }
+    }
+    if (outY < 0) {
+        outY = 0;
+    }
+    if (outX < 0) {
+        outX = 0;
+    }
+}
+
+static void UpdateAltSetTooltip(CUIToolTip* mainTip, int hoverItemId, int hoverSetId) {
+    if (!mainTip) {
+        HideAltSetTooltip();
+        return;
+    }
+    EnsureSetItemDatabaseLoaded();
+    const int altSetId = FindAltSetId(hoverSetId, hoverItemId);
+    if (altSetId <= 0) {
+        HideAltSetTooltip();
+        return;
+    }
+    // Representative piece for orange hover highlight in alt tip:
+    // prefer same slot family as hover, else first equipped in set.
+    int repItemId = 0;
+    std::set<int> normal;
+    std::set<int> cash;
+    CollectEquippedByBand(normal, cash);
+    const LocalSetDef* def = GetSetDef(altSetId);
+    const int hoverFamily = EquipSlotFamily(hoverItemId);
+    if (def) {
+        for (int id : def->itemIds) {
+            if (normal.count(id) == 0 && cash.count(id) == 0) {
+                continue;
+            }
+            if (hoverFamily > 0 && EquipSlotFamily(id) == hoverFamily) {
+                repItemId = id;
+                break;
+            }
+            if (repItemId <= 0) {
+                repItemId = id;
+            }
+        }
+    }
+    if (repItemId <= 0) {
+        HideAltSetTooltip();
+        return;
+    }
+
+    std::vector<SetTipLine> layout = BuildSetTooltipLayout(altSetId, repItemId);
+    if (layout.empty()) {
+        layout = BuildServerFallbackLayout(altSetId);
+    }
+    if (layout.empty()) {
+        HideAltSetTooltip();
+        return;
+    }
+
+    const std::set<int> equipped = GetLocalEquippedItemIds();
+    int equippedCount = 0;
+    if (def) {
+        for (int id : def->itemIds) {
+            if (equipped.count(id) > 0) {
+                ++equippedCount;
+            }
+        }
+    }
+
+    const int setW = ResolveSetTipWidth(mainTip, layout);
+    CUIToolTip* setTip = EnsureAltSetTooltip();
+
+    if (altSetId == g_altLastSetId && repItemId == g_altLastItemId &&
+            equippedCount == g_altLastEquippedCount && HasAltSetTooltipLayer()) {
+        int tipW = SafeGetSetTipWidth(setTip);
+        if (tipW <= 0) {
+            tipW = setW;
+        }
+        int setX = 0, setY = 0;
+        ComputeAltSetDock(mainTip, tipW, setX, setY);
+        SafeRelMoveSetTip(setTip, setX, setY);
+        g_altLastDockX = setX;
+        g_altLastDockY = setY;
+        return;
+    }
+
+    g_altLastSetId = altSetId;
+    g_altLastItemId = repItemId;
+    g_altLastEquippedCount = equippedCount;
+
+    int setX = 0, setY = 0;
+    ComputeAltSetDock(mainTip, setW, setX, setY);
+    ShowSetTooltipAt(setTip, setX, setY, altSetId, repItemId, mainTip, setW);
+    const int renderedW = SafeGetSetTipWidth(setTip);
+    if (renderedW > 0) {
+        ComputeAltSetDock(mainTip, renderedW, setX, setY);
+        SafeRelMoveSetTip(setTip, setX, setY);
+    }
+    g_altLastDockX = setX;
+    g_altLastDockY = setY;
 }
 
 static void UpdateSetTooltip(CUIToolTip* mainTip, int posX, int posY,
@@ -1367,8 +1890,11 @@ static void UpdateSetTooltip(CUIToolTip* mainTip, int posX, int posY,
 
     try {
         g_activeMainTooltip = mainTip;
-        g_lastLayoutX = posX;
-        g_lastLayoutY = posY;
+        // Keep last ShowItemToolTip screen anchor when callers pass (0,0).
+        if (posX != 0 || posY != 0) {
+            g_lastLayoutX = posX;
+            g_lastLayoutY = posY;
+        }
 
         EnsureSetItemDatabaseLoaded();
         if (!IsEquipItemId(itemId)) {
@@ -1378,7 +1904,16 @@ static void UpdateSetTooltip(CUIToolTip* mainTip, int posX, int posY,
         }
         const int setId = ResolveSetIdForItem(itemId);
         if (setId <= 0) {
-            HideSetTooltip();
+            // No set on hover — alt only if same-slot counterpart on other band has a set.
+            if (g_setTooltipInited) {
+                reinterpret_cast<void(__thiscall*)(void*)>(ClientAddresses::kToolTipClear)(
+                        g_setTooltipBuf);
+            }
+            g_lastSetId = 0;
+            g_lastHoverItemId = itemId;
+            g_lastEquippedCount = 0;
+            UpdateAltSetTooltip(mainTip, itemId, 0);
+            EquipCompare::RelayoutActiveCompareTip();
             g_inTooltipUpdate = false;
             return;
         }
@@ -1395,6 +1930,8 @@ static void UpdateSetTooltip(CUIToolTip* mainTip, int posX, int posY,
             layout = BuildServerFallbackLayout(setId);
         }
         if (layout.empty()) {
+            UpdateAltSetTooltip(mainTip, itemId, setId);
+            EquipCompare::RelayoutActiveCompareTip();
             g_inTooltipUpdate = false;
             return;
         }
@@ -1423,6 +1960,7 @@ static void UpdateSetTooltip(CUIToolTip* mainTip, int posX, int posY,
             }
             ComputeSetTooltipRightOfMain(mainTip, tipW, setX, setY);
             SafeRelMoveSetTip(setTip, setX, setY);
+            UpdateAltSetTooltip(mainTip, itemId, setId);
             EquipCompare::RelayoutActiveCompareTip();
             g_inTooltipUpdate = false;
             return;
@@ -1435,7 +1973,7 @@ static void UpdateSetTooltip(CUIToolTip* mainTip, int posX, int posY,
         int setX = 0;
         int setY = 0;
         ComputeSetTooltipRightOfMain(mainTip, setW, setX, setY);
-        ShowSetTooltipAt(setX, setY, setId, itemId, mainTip, setW);
+        ShowSetTooltipAt(EnsureSetTooltip(), setX, setY, setId, itemId, mainTip, setW);
         // Re-anchor with actual rendered width (estimate can differ slightly).
         CUIToolTip* setTip = reinterpret_cast<CUIToolTip*>(g_setTooltipBuf);
         const int renderedW = SafeGetSetTipWidth(setTip);
@@ -1443,6 +1981,7 @@ static void UpdateSetTooltip(CUIToolTip* mainTip, int posX, int posY,
             ComputeSetTooltipRightOfMain(mainTip, renderedW, setX, setY);
             SafeRelMoveSetTip(setTip, setX, setY);
         }
+        UpdateAltSetTooltip(mainTip, itemId, setId);
         EquipCompare::RelayoutActiveCompareTip();
     } catch (...) {
         HideSetTooltip();
@@ -1621,10 +2160,28 @@ auto CUIToolTip__DrawToolTip_Equip =
         reinterpret_cast<void(__thiscall*)(CUIToolTip*, int, GW_ItemSlotEquip*)>(
                 ClientAddresses::SetItem::kDrawToolTipEquip);
 
+static void SyncLayoutFromTipOnly(CUIToolTip* tip) {
+    if (!tip) {
+        return;
+    }
+    __try {
+        if (tip->m_nLayerLeft != 0 || tip->m_nLayerTop != 0) {
+            g_lastLayoutX = tip->m_nLayerLeft;
+            g_lastLayoutY = tip->m_nLayerTop;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 static void AfterEquipTipDrawn(CUIToolTip* pThis, GW_ItemSlotEquip* pe) {
-    // During ShowItemToolTip, companion tips are refreshed AFTER Original returns
-    // (same as set tip). Skip here to avoid double-create while g_inShowItemToolTip.
-    if (g_inShowItemToolTip || !pThis || !pe) {
+    // Must run even inside ShowItemToolTip: that is when MakeLayer has just written
+    // m_nLayerLeft/Top. Skipping here left bag/equip with no set tip whenever the
+    // outer ShowItemToolTip item-id read missed (shop still painted via other paths).
+    if (!pThis || !pe) {
+        return;
+    }
+    // Equipped compare tip must not replace hover set/growth companions.
+    if (EquipCompare::IsEquippedCompareTip(pThis) || EquipCompare::IsShowingCompareTip()) {
         return;
     }
     const int itemId = SafeGetItemId(pe);
@@ -1635,11 +2192,15 @@ static void AfterEquipTipDrawn(CUIToolTip* pThis, GW_ItemSlotEquip* pe) {
     if (g_primaryShowItemId > 0 && itemId != g_primaryShowItemId) {
         return;
     }
+    SyncLayoutFromTipOnly(pThis);
     if (ResolveSetIdForItem(itemId) > 0) {
         g_activeEquip = pe;
-        UpdateSetTooltip(pThis, 0, 0, itemId, true);
+        UpdateSetTooltip(pThis, g_lastLayoutX, g_lastLayoutY, itemId, true);
     }
-    EquipGrowth_OnEquipTipDrawn(pThis, reinterpret_cast<::GW_ItemSlotEquip*>(pe));
+    // Growth: only from post-ShowItemToolTip path to avoid double work while drawing.
+    if (!g_inShowItemToolTip) {
+        EquipGrowth_OnEquipTipDrawn(pThis, reinterpret_cast<::GW_ItemSlotEquip*>(pe));
+    }
 }
 
 void __fastcall CUIToolTip__DrawToolTip_Equip_SetItem_hook(
@@ -1655,21 +2216,30 @@ auto CUIToolTip__ClearToolTip =
 void __fastcall CUIToolTip__ClearToolTip_SetItem_hook(
         CUIToolTip* pThis, void* /*edx*/) {
     if (pThis == g_activeMainTooltip) {
-        HideSetTooltip();
-        EquipGrowth_Hide();
-        g_activeMainTooltip = nullptr;
-        g_activeEquip = nullptr;
-        g_primaryShowItemId = 0;
+        // Mid-ShowItemToolTip Clear rebuilds the main tip canvas. Do NOT wipe
+        // companion state / primary hover lock — that caused flaky set tips on
+        // CUIEquip (AfterEquipTipDrawn lost g_primaryShowItemId).
+        if (!g_inShowItemToolTip) {
+            HideSetTooltip();
+            HideAltSetTooltip();
+            EquipGrowth_Hide();
+            g_activeMainTooltip = nullptr;
+            g_activeEquip = nullptr;
+            g_primaryShowItemId = 0;
+            EquipCompare::ClearPendingCompare();
+        }
     }
     CUIToolTip__ClearToolTip(pThis);
 }
 
+// IDA 0x8F5B20 stack (retn 0x20): arg0=nLeft, arg1=nTop, arg2=item*, …
+// Same layout as EquipCompare / cashshop / storagebag — not __int64* POINT.
 typedef int(__thiscall* ShowItemToolTip_t)(
         CUIToolTip* pThis,
-        __int64* pos,
-        int* a3,
-        int* a4,
-        int a5,
+        int nLeft,
+        int nTop,
+        int* item,
+        void* param,
         int a6,
         int a7,
         int a8,
@@ -1677,36 +2247,45 @@ typedef int(__thiscall* ShowItemToolTip_t)(
 static auto Original_ShowItemToolTip = reinterpret_cast<ShowItemToolTip_t>(
         ClientAddresses::SetItem::kShowItemToolTip);
 
-static void ReadTooltipPoint(__int64* pos, int& outX, int& outY) {
-    outX = 0;
-    outY = 0;
-    if (!pos) {
+static void SyncLayoutFromTip(CUIToolTip* tip) {
+    if (!tip) {
         return;
     }
-    const int* pt = reinterpret_cast<const int*>(pos);
-    outX = pt[0];
-    outY = pt[1];
+    __try {
+        if (tip->m_nLayerLeft != 0 || tip->m_nLayerTop != 0) {
+            g_lastLayoutX = tip->m_nLayerLeft;
+            g_lastLayoutY = tip->m_nLayerTop;
+            EquipTooltipStyle_NoteHoverPos(tip, g_lastLayoutX, g_lastLayoutY);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
 }
 
 int __fastcall Hook_ShowItemToolTip(
         CUIToolTip* pThis,
         void* /*edx*/,
-        __int64* pos,
-        int* a3,
-        int* a4,
-        int a5,
+        int nLeft,
+        int nTop,
+        int* item,
+        void* param,
         int a6,
         int a7,
         int a8,
         unsigned int a9) {
-    if (!a4) {
+    // Compare tip nested ShowItemToolTip must not steal hover set/growth companions.
+    if (EquipCompare::IsEquippedCompareTip(pThis) || EquipCompare::IsShowingCompareTip()) {
+        return Original_ShowItemToolTip(pThis, nLeft, nTop, item, param, a6, a7, a8, a9);
+    }
+
+    if (!item) {
         if (pThis == g_activeMainTooltip) {
             HideSetTooltip();
             g_activeMainTooltip = nullptr;
             g_activeEquip = nullptr;
             g_primaryShowItemId = 0;
         }
-        return Original_ShowItemToolTip(pThis, pos, a3, a4, a5, a6, a7, a8, a9);
+        EquipCompare::ClearPendingCompare();
+        return Original_ShowItemToolTip(pThis, nLeft, nTop, item, param, a6, a7, a8, a9);
     }
 
     struct ShowItemToolTipScope {
@@ -1718,23 +2297,30 @@ int __fastcall Hook_ShowItemToolTip(
         }
     } scope;
 
-    const int hoverItemId = ReadShowItemToolTipItemId(a4);
+    const int hoverItemId = ReadShowItemToolTipItemId(item);
     g_primaryShowItemId = hoverItemId;
+    // Remember screen anchor from the call site (NPC shop / storage / cash / bag).
+    g_lastLayoutX = nLeft;
+    g_lastLayoutY = nTop;
+    EquipTooltipStyle_NoteHoverPos(pThis, nLeft, nTop);
     const int result = Original_ShowItemToolTip(
-            pThis, pos, a3, a4, a5, a6, a7, a8, a9);
+            pThis, nLeft, nTop, item, param, a6, a7, a8, a9);
+
+    // After MakeLayer, tip+0x14/+0x18 hold the true screen anchor.
+    SyncLayoutFromTip(pThis);
 
     try {
         if (hoverItemId > 0 && ResolveSetIdForItem(hoverItemId) > 0) {
-            UpdateSetTooltip(pThis, 0, 0, hoverItemId, true);
+            UpdateSetTooltip(pThis, g_lastLayoutX, g_lastLayoutY, hoverItemId, true);
         } else if (pThis == g_activeMainTooltip) {
             HideSetTooltip();
             g_activeMainTooltip = nullptr;
             g_activeEquip = nullptr;
         }
         if (hoverItemId > 0) {
-            // Same object as set tip: pass pe from a4 (GW_ItemSlotEquip*).
+            // Same object as set tip: pass pe from item (GW_ItemSlotEquip*).
             EquipGrowth_OnEquipTipDrawn(
-                    pThis, reinterpret_cast<::GW_ItemSlotEquip*>(a4));
+                    pThis, reinterpret_cast<::GW_ItemSlotEquip*>(item));
         } else if (pThis == g_activeMainTooltip) {
             EquipGrowth_Hide();
             g_primaryShowItemId = 0;
@@ -1745,6 +2331,17 @@ int __fastcall Hook_ShowItemToolTip(
         g_primaryShowItemId = 0;
     }
 
+    // After hover companions: show compare to the right of set/growth (or hover).
+    EquipCompare::FlushPendingAfterCompanions(
+            pThis,
+            g_lastLayoutX,
+            g_lastLayoutY,
+            item,
+            a6,
+            a7,
+            a8,
+            a9);
+
     return result;
 }
 
@@ -1754,7 +2351,7 @@ void RedrawActivePanel() {
     }
     g_lastSetId = 0;
     g_lastEquippedCount = 0;
-    UpdateSetTooltip(g_activeMainTooltip, 0, 0, g_lastHoverItemId, false);
+    UpdateSetTooltip(g_activeMainTooltip, g_lastLayoutX, g_lastLayoutY, g_lastHoverItemId, false);
 }
 } // namespace SetItemMod
 
@@ -1767,8 +2364,34 @@ void SetItem_OnEquipTipDrawn(CUIToolTip* tip, GW_ItemSlotEquip* pe) {
             tip, reinterpret_cast<SetItemMod::GW_ItemSlotEquip*>(pe));
 }
 
+void SetItem_ReleaseCustomMainTipWithoutHidingSet(CUIToolTip* tip) {
+    if (tip && tip == SetItemMod::g_activeMainTooltip) {
+        SetItemMod::g_activeMainTooltip = nullptr;
+    }
+}
+
 bool SetItem_TryGetActiveSetTooltipRect(int& outX, int& outY, int& outW, int& outH) {
     return SetItemMod::TryGetActiveSetTooltipRect(outX, outY, outW, outH);
+}
+
+bool SetItem_TryGetActiveCompareSetTooltipRect(int& outX, int& outY, int& outW, int& outH) {
+    return SetItemMod::TryGetActiveCompareSetTooltipRect(outX, outY, outW, outH);
+}
+
+bool SetItem_TryGetActiveAltSetTooltipRect(int& outX, int& outY, int& outW, int& outH) {
+    return SetItemMod::TryGetActiveAltSetTooltipRect(outX, outY, outW, outH);
+}
+
+void SetItem_UpdateCompareCompanion(CUIToolTip* compareTip, int itemId) {
+    SetItemMod::UpdateCompareCompanion(compareTip, itemId);
+}
+
+void SetItem_HideCompareCompanion() {
+    SetItemMod::HideCompareCompanion();
+}
+
+void SetItem_RelayoutCompareCompanion(CUIToolTip* compareTip) {
+    SetItemMod::RelayoutCompareCompanion(compareTip);
 }
 
 void AttachSetItemMod() {

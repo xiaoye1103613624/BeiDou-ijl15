@@ -783,6 +783,20 @@ void EquipTooltipStyle_NoteHoverPos(CUIToolTip* tip, int x, int y) {
     g_notedY = y;
 }
 
+bool EquipTooltipStyle_GetHoverPos(CUIToolTip* tip, int& outX, int& outY) {
+    outX = 0;
+    outY = 0;
+    if (!g_notedTip) {
+        return false;
+    }
+    if (tip && tip != g_notedTip) {
+        return false;
+    }
+    outX = g_notedX;
+    outY = g_notedY;
+    return true;
+}
+
 bool EquipTooltipStyle_TryDrawCustom(
         CUIToolTip* tip,
         GW_ItemSlotEquip* pe,

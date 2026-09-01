@@ -10,6 +10,8 @@ void Shoulder_RehookDblClickUnequipOutermost();
 // Sync one slot into the DLL HitTest table used by GetBodyPartFromPoint
 // (PE BE2260[≥50] must not be written — cash overflow). index = BP-1.
 void Shoulder_SetExtHitTestSlot(int index, int x, int y);
+// Re-assert BP20 coords + red cave + rewrite shoulder_diag.log (falsifiable stamp).
+void Shoulder_ReassertUiAndDiag();
 // True when EXE heap slab is CD64 (push 0x700 @0x778F02) AND native flag ON.
 bool Shoulder_UseNativeCd64Slots();
 // ZRef* for BP52/53 ring shadows (pad+pItem). Null if bp outside 52–53.
