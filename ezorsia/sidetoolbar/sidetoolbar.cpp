@@ -1,14 +1,14 @@
 // ============================================================
-// sidetoolbar.cpp — floating side toolbar with animated icon.
+// sidetoolbar.cpp — 4-category sidebar with horizontal sub-icons.
 //
-// Icon frames (v083 live UIWindow.img — avoid UIWindow2 merges that drop Item):
-//   UI/UIWindow.img/Minigame/Omok/stone/3/black/{0,1,2}
-// Layout: [icon | feature list]. Icon has no chrome/background.
-// Click icon to expand/collapse. Open features keep selected style.
+// Layout: GalaxyStar hub + 4 vertical categories; click category
+// to expand sub-feature icons horizontally. Hover shows GBK tips.
+// Icons: UI/MainNotice.img/{Prefix}/{Default|Appear}/{frame}
 // ============================================================
 
 #include "stdafx.h"
 #include "SideToolbarApi.h"
+#include "sidetoolbar_config.h"
 #include "Client.h"
 #include "beautyshop/BeautyShopApi.h"
 #include "dailycheckin/DailyCheckinApi.h"
@@ -39,51 +39,136 @@ static constexpr uintptr_t kAddr_CWvsContext_Instance = 0x00BE7918;
 static auto play_ui_sound = reinterpret_cast<void(__cdecl*)(const wchar_t*)>(kAddr_play_ui_sound);
 static auto get_basic_font = reinterpret_cast<IWzFontPtr*(__cdecl*)(IWzFontPtr*, int)>(kAddr_get_basic_font);
 
-static void* GetWvsContext() {
-    return *reinterpret_cast<void**>(kAddr_CWvsContext_Instance);
-}
-
-// Layout — QDeliveryIcon frames are 24x32; icon on the LEFT of the list.
-static constexpr int kIconW = 32;
-static constexpr int kIconH = 36;
-static constexpr int kIconPad = 2;
-static constexpr int kGap = 4;
-static constexpr int kPanelW = 120;
-static constexpr int kItemH = 22;
-static constexpr int kItemPadX = 6;
-static constexpr int kItemPadY = 3;
+// Slot = hit-rect only. MainNotice Default frames are ~32–47px — keep slots
+// large enough so 1:1 blit is never clipped / never scaled to fill.
+static constexpr int kHubW = 48;
+static constexpr int kHubH = 48;
+static constexpr int kCatW = 48;
+static constexpr int kCatH = 48;
+static constexpr int kSubW = 48;
+static constexpr int kSubH = 48;
+static constexpr int kPad = 4;
+static constexpr int kLeftPad = 6;
+static constexpr int kTopPad = 4;
 static constexpr int kAnimIntervalMs = 250;
-static constexpr int kAnimFrameCount = 3; // Omok black 0..2
-
-// 0..8 match SidebarToolHandler.java (SIDEBAR_TOOL 0xC6).
-// 9..13 are local client UI toggles (no server packet).
-enum FeatureId : int {
-    kToolConvenient = 0, // 便民工具
-    kToolEquipCenter,    // 装备中心
-    kToolExchange,       // 兑换中心
-    kToolVip,            // VIP会员
-    kToolGrowth,         // 成长系统
-    kToolDaily,          // 每日任务
-    kToolSocial,         // 社交系统
-    kToolCollect,        // 收集系统
-    kToolGm,             // GM工具
-    kServerToolCount = 9,
-    kFeatStorageBag = 9, // 收纳背包
-    kFeatDamageRank,     // 伤害统计
-    kFeatPartyTracker,   // 队伍追踪
-    kFeatBeauty,         // 美容美发
-    kFeatCheckin,        // 每日签到
-    kFeatCashShop,       // 现金商城
-    kFeatCount
-};
-
+static constexpr int kMaxAnimFrames = 12;
+static constexpr int kTipDelayMs = 300;
+static constexpr int kLongPressMs = 800;
+// Canvas room to the right of icons so tip text is not clipped by the CWnd layer.
+static constexpr int kTipReserveW = 280;
+static constexpr int kTipPadX = 2;
+static constexpr int kTipLineH = 16;
 static constexpr unsigned short kOpcode_SidebarTool = 0xC6;
 
 static auto ClientSocket_SendPacket =
     reinterpret_cast<void(__thiscall*)(void*, const COutPacket&)>(ClientAddresses::kSendPacket);
 
+// Runtime overrides from server SIDEBAR_CONFIG_SYNC (0x3733). Default: all visible.
+static bool g_toolVisible[SidebarConfig::kServerToolCount];
+static bool g_tipOverride[SidebarConfig::kServerToolCount];
+static char g_tipTitle[SidebarConfig::kServerToolCount][96];
+static char g_tipDesc[SidebarConfig::kServerToolCount][192];
+static bool g_runtimeInited = false;
+
+static void EnsureRuntimeDefaults() {
+    if (g_runtimeInited) {
+        return;
+    }
+    for (int i = 0; i < SidebarConfig::kServerToolCount; ++i) {
+        g_toolVisible[i] = true;
+        g_tipOverride[i] = false;
+        g_tipTitle[i][0] = '\0';
+        g_tipDesc[i][0] = '\0';
+    }
+    g_runtimeInited = true;
+}
+
+static bool IsServerToolVisible(int toolIndex) {
+    EnsureRuntimeDefaults();
+    if (toolIndex < 0 || toolIndex >= SidebarConfig::kServerToolCount) {
+        return false;
+    }
+    return g_toolVisible[toolIndex];
+}
+
+static bool IsSubVisible(const SidebarConfig::SubFeatureDef& sub) {
+    if (sub.actionKind == SidebarConfig::kActionClientUi) {
+        return true;
+    }
+    return IsServerToolVisible(sub.actionId);
+}
+
+static SidebarConfig::TipText ResolveSubTip(const SidebarConfig::SubFeatureDef& sub) {
+    if (sub.actionKind == SidebarConfig::kActionServerTool &&
+        sub.actionId >= 0 &&
+        sub.actionId < SidebarConfig::kServerToolCount) {
+        EnsureRuntimeDefaults();
+        if (g_tipOverride[sub.actionId] && g_tipTitle[sub.actionId][0]) {
+            return SidebarConfig::TipText{g_tipTitle[sub.actionId], g_tipDesc[sub.actionId]};
+        }
+    }
+    return sub.tip;
+}
+
+static int CountVisibleSubs(int catIndex) {
+    if (catIndex < 0 || catIndex >= SidebarConfig::kCategoryCount) {
+        return 0;
+    }
+    const auto& cat = SidebarConfig::kCategories[catIndex];
+    int n = 0;
+    for (int i = 0; i < cat.subCount; ++i) {
+        if (IsSubVisible(cat.subs[i])) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+static int LogicalSubFromVisible(int catIndex, int visibleIndex) {
+    if (catIndex < 0 || catIndex >= SidebarConfig::kCategoryCount || visibleIndex < 0) {
+        return -1;
+    }
+    const auto& cat = SidebarConfig::kCategories[catIndex];
+    int seen = 0;
+    for (int i = 0; i < cat.subCount; ++i) {
+        if (!IsSubVisible(cat.subs[i])) {
+            continue;
+        }
+        if (seen == visibleIndex) {
+            return i;
+        }
+        ++seen;
+    }
+    return -1;
+}
+
+enum HoverKind : int {
+    kHoverNone = 0,
+    kHoverHub,
+    kHoverCategory,
+    kHoverSub,
+};
+
+struct HoverTarget {
+    HoverKind kind = kHoverNone;
+    int catIndex = -1;
+    int subIndex = -1;
+};
+
+struct IconAnim {
+    IWzCanvasPtr frames[kMaxAnimFrames];
+    int frameCount = 0;
+    int currentFrame = 0;
+    int direction = 1;
+    DWORD lastTick = 0;
+    bool loaded = false;
+};
+
 static void SendSidebarTool(int toolIndex) {
-    if (toolIndex < 0 || toolIndex >= kServerToolCount) {
+    if (!IsServerToolVisible(toolIndex)) {
+        return;
+    }
+    if (toolIndex < 0 || toolIndex >= SidebarConfig::kServerToolCount) {
         return;
     }
     void* sock = *reinterpret_cast<void**>(ClientAddresses::kClientSocketPtr);
@@ -95,116 +180,237 @@ static void SendSidebarTool(int toolIndex) {
     ClientSocket_SendPacket(sock, o);
 }
 
-// GBK labels (client Dotum font expects ANSI/GBK on CN client).
-static const char* FeatureLabel(int id) {
-    switch (id) {
-    case kToolConvenient:   return "\xB1\xE3\xC3\xF1\xB9\xA4\xBE\xDF"; // 便民工具
-    case kToolEquipCenter:  return "\xD7\xB0\xB1\xB8\xD6\xD0\xD0\xC4"; // 装备中心
-    case kToolExchange:     return "\xB6\xD2\xBB\xBB\xD6\xD0\xD0\xC4"; // 兑换中心
-    case kToolVip:          return "VIP\xBB\xE1\xD4\xB1";             // VIP会员
-    case kToolGrowth:       return "\xB3\xC9\xB3\xA4\xCF\xB5\xCD\xB3"; // 成长系统
-    case kToolDaily:        return "\xC3\xBF\xC8\xD5\xC8\xCE\xCE\xF1"; // 每日任务
-    case kToolSocial:       return "\xC9\xE7\xBD\xBB\xCF\xB5\xCD\xB3"; // 社交系统
-    case kToolCollect:      return "\xCA\xD5\xBC\xAF\xCF\xB5\xCD\xB3"; // 收集系统
-    case kToolGm:           return "GM\xB9\xA4\xBE\xDF";               // GM工具
-    case kFeatStorageBag:  return "\xCA\xD5\xC4\xC9\xB1\xB3\xB0\xFC"; // 收纳背包
-    case kFeatDamageRank:   return "\xC9\xCB\xBA\xA6\xCD\xB3\xBC\xC6"; // 伤害统计
-    case kFeatPartyTracker: return "\xB6\xD3\xCE\xE9\xD7\xB7\xD7\xD9"; // 队伍追踪
-    case kFeatBeauty:       return "\xC3\xC0\xC8\xDD\xC3\xC0\xB7\xA2"; // 美容美发
-    case kFeatCheckin:      return "\xC3\xBF\xC8\xD5\xC7\xA9\xB5\xBD"; // 每日签到
-    case kFeatCashShop:     return "\xCF\xD6\xBD\xF0\xC9\xCC\xB3\xC7"; // 现金商城
-    default:                return "?";
+static IWzCanvasPtr LoadSpritePath(const wchar_t* path) {
+    IWzCanvasPtr canvas;
+    if (!path || !*path || !get_rm()) {
+        return canvas;
+    }
+    try {
+        canvas = get_unknown(get_rm()->GetObjectA(const_cast<wchar_t*>(path)));
+    } catch (...) {
+    }
+    return canvas;
+}
+
+// Only small quest/notice icons — never full window backdrops (those blow past the hit-rect).
+static const wchar_t* FallbackPathForPrefix(const wchar_t* prefix) {
+    if (!prefix) {
+        return L"UI/UIWindow.img/Quest/icon3/6";
+    }
+    if (wcscmp(prefix, L"GalaxyStar") == 0) return L"UI/UIWindow.img/Quest/icon3/6";
+    if (wcscmp(prefix, L"Daily") == 0) return L"UI/UIWindow.img/Quest/icon0/0";
+    if (wcscmp(prefix, L"attendance") == 0) return L"UI/UIWindow.img/Quest/icon8/0";
+    if (wcscmp(prefix, L"dailyGift") == 0) return L"UI/UIWindow.img/Quest/icon7/0";
+    if (wcscmp(prefix, L"mapleHelper") == 0) return L"UI/UIWindow.img/Quest/icon3/6";
+    if (wcscmp(prefix, L"mapleStyle") == 0) return L"UI/UIWindow.img/Quest/icon2/0";
+    if (wcscmp(prefix, L"itemCollection") == 0) return L"UI/UIWindow.img/Bag/BtOreBag/normal/0";
+    if (wcscmp(prefix, L"Event") == 0) return L"UI/UIWindow.img/Quest/icon6/0";
+    if (wcscmp(prefix, L"mapleAlarm") == 0) return L"UI/UIWindow.img/Quest/icon1/0";
+    if (wcscmp(prefix, L"Content") == 0) return L"UI/UIWindow.img/Quest/icon4/0";
+    if (wcscmp(prefix, L"advRemaster") == 0) return L"UI/UIWindow.img/Quest/icon5/0";
+    if (wcscmp(prefix, L"collection") == 0) return L"UI/UIWindow.img/Quest/icon5/0";
+    if (wcscmp(prefix, L"Achieve") == 0) return L"UI/UIWindow.img/UserInfo/bossPetCrown";
+    if (wcscmp(prefix, L"EventList") == 0) return L"UI/UIWindow.img/Quest/icon3/6";
+    if (wcscmp(prefix, L"Absolute") == 0) return L"UI/UIWindow.img/Quest/icon9/0";
+    return L"UI/UIWindow.img/Quest/icon3/6";
+}
+
+static void LoadIconAnim(IconAnim& anim, const wchar_t* prefix, const wchar_t* state) {
+    if (anim.loaded) {
+        return;
+    }
+    anim.loaded = true;
+    anim.frameCount = 0;
+
+    wchar_t path[160];
+    for (int i = 0; i < kMaxAnimFrames; ++i) {
+        swprintf_s(path, L"UI/MainNotice.img/%s/%s/%d", prefix, state, i);
+        anim.frames[i] = LoadSpritePath(path);
+        if (anim.frames[i]) {
+            anim.frameCount = i + 1;
+        } else if (i == 0) {
+            anim.frames[0] = LoadSpritePath(FallbackPathForPrefix(prefix));
+            if (anim.frames[0]) {
+                anim.frameCount = 1;
+            }
+            break;
+        } else {
+            break;
+        }
+    }
+    anim.lastTick = GetTickCount();
+}
+
+static IWzCanvasPtr CurrentIconFrame(IconAnim& anim, const wchar_t* prefix) {
+    LoadIconAnim(anim, prefix, L"Default");
+    if (anim.frameCount <= 0) {
+        return nullptr;
+    }
+    if (anim.frameCount == 1) {
+        return anim.frames[0];
+    }
+    const int idx = anim.currentFrame;
+    return anim.frames[(idx >= 0 && idx < anim.frameCount) ? idx : 0];
+}
+
+static void AdvanceIconAnim(IconAnim& anim) {
+    if (anim.frameCount <= 1) {
+        return;
+    }
+    const DWORD now = GetTickCount();
+    if (anim.lastTick == 0) {
+        anim.lastTick = now;
+        return;
+    }
+    if (now - anim.lastTick < static_cast<DWORD>(kAnimIntervalMs)) {
+        return;
+    }
+    anim.lastTick = now;
+    anim.currentFrame += anim.direction;
+    if (anim.currentFrame >= anim.frameCount - 1) {
+        anim.currentFrame = anim.frameCount - 1;
+        anim.direction = -1;
+    } else if (anim.currentFrame <= 0) {
+        anim.currentFrame = 0;
+        anim.direction = 1;
     }
 }
 
-static bool IsFeatureOpen(int id) {
+static bool IsClientUiOpen(SidebarConfig::ClientUiId id) {
     switch (id) {
-    case kFeatBeauty:
-        return BeautyShop_IsOpen();
-    case kFeatCheckin:
+    case SidebarConfig::kUiCheckin:
         return DailyCheckin_IsOpen();
-    case kFeatDamageRank:
-        return CUIDamageRank::IsPanelOpen();
-    case kFeatStorageBag:
+    case SidebarConfig::kUiBeauty:
+        return BeautyShop_IsOpen();
+    case SidebarConfig::kUiStorageBag:
         return BagWindow_IsOpen();
-    case kFeatPartyTracker:
-        return PartyBuffs_IsTrackerVisible();
-    case kFeatCashShop:
+    case SidebarConfig::kUiCashShop:
         return CashShopWnd_IsOpen();
+    case SidebarConfig::kUiPartyTracker:
+        return PartyBuffs_IsTrackerVisible();
+    case SidebarConfig::kUiDamageRank:
+        return CUIDamageRank::IsPanelOpen();
     default:
         return false;
     }
 }
 
-static unsigned int QueryOpenMask() {
-    unsigned int mask = 0;
-    for (int i = 0; i < kFeatCount; ++i) {
-        if (IsFeatureOpen(i)) {
-            mask |= (1u << i);
-        }
-    }
-    return mask;
-}
-
-static void CloseFeature(int id) {
+static void CloseClientUi(SidebarConfig::ClientUiId id) {
     switch (id) {
-    case kFeatBeauty:
-        BeautyShop_CloseWindow();
-        break;
-    case kFeatCheckin:
+    case SidebarConfig::kUiCheckin:
         DailyCheckin_Close();
         break;
-    case kFeatDamageRank:
-        CUIDamageRank::ClosePanel();
+    case SidebarConfig::kUiBeauty:
+        BeautyShop_CloseWindow();
         break;
-    case kFeatStorageBag:
+    case SidebarConfig::kUiStorageBag:
         BagWindow_Close();
         break;
-    case kFeatPartyTracker:
-        PartyBuffs_SetTrackerVisible(false);
-        break;
-    case kFeatCashShop:
+    case SidebarConfig::kUiCashShop:
         CashShopWnd_Close();
         break;
+    case SidebarConfig::kUiPartyTracker:
+        PartyBuffs_SetTrackerVisible(false);
+        break;
+    case SidebarConfig::kUiDamageRank:
+        CUIDamageRank::ClosePanel();
+        break;
     default:
         break;
     }
 }
 
-static void OpenFeature(int id) {
-    if (id >= 0 && id < kServerToolCount) {
-        SendSidebarTool(id);
-        return;
-    }
+static void OpenClientUi(SidebarConfig::ClientUiId id) {
     switch (id) {
-    case kFeatBeauty:
-        BeautyShop_OpenWindow();
-        break;
-    case kFeatCheckin:
+    case SidebarConfig::kUiCheckin:
         DailyCheckin_RequestOpen();
         break;
-    case kFeatDamageRank:
-        CUIDamageRank::ToggleBySidebar();
+    case SidebarConfig::kUiBeauty:
+        BeautyShop_OpenWindow();
         break;
-    case kFeatStorageBag:
+    case SidebarConfig::kUiStorageBag:
         BagWindow_Toggle();
         break;
-    case kFeatPartyTracker:
+    case SidebarConfig::kUiCashShop:
+        CashShopWnd_RequestOpen();
+        break;
+    case SidebarConfig::kUiPartyTracker:
         PartyBuffs_SetTrackerVisible(true);
         break;
-    case kFeatCashShop:
-        CashShopWnd_RequestOpen();
+    case SidebarConfig::kUiDamageRank:
+        CUIDamageRank::ToggleBySidebar();
         break;
     default:
         break;
     }
 }
 
-static void InvokeFeature(int id) {
-    if (id >= kServerToolCount && IsFeatureOpen(id)) {
-        CloseFeature(id);
-    } else {
-        OpenFeature(id);
+static bool IsSubOpen(const SidebarConfig::SubFeatureDef& sub) {
+    if (sub.actionKind == SidebarConfig::kActionClientUi) {
+        return IsClientUiOpen(static_cast<SidebarConfig::ClientUiId>(sub.actionId));
+    }
+    return false;
+}
+
+static void InvokeSub(const SidebarConfig::SubFeatureDef& sub) {
+    if (sub.actionKind == SidebarConfig::kActionClientUi) {
+        const auto id = static_cast<SidebarConfig::ClientUiId>(sub.actionId);
+        if (IsClientUiOpen(id)) {
+            CloseClientUi(id);
+        } else {
+            OpenClientUi(id);
+        }
+        return;
+    }
+    SendSidebarTool(sub.actionId);
+}
+
+// Blit at original pixel size — never scale/stretch to the slot.
+// CopyEx dstW/H must equal srcW/H (invresize rule) or WZ scales.
+// If art is larger than the hit-rect, clip to the rect (still 1:1 pixels, no upsample).
+static void BlitCentered(IWzCanvasPtr dst, IWzCanvasPtr src, const RECT& rc) {
+    if (!dst || !src) {
+        return;
+    }
+    int sw = 0;
+    int sh = 0;
+    try {
+        sw = src->width;
+        sh = src->height;
+    } catch (...) {
+    }
+    if (sw <= 0 || sh <= 0) {
+        return;
+    }
+    const int dw = rc.right - rc.left;
+    const int dh = rc.bottom - rc.top;
+    int copyW = sw;
+    int copyH = sh;
+    int srcX = 0;
+    int srcY = 0;
+    if (copyW > dw) {
+        srcX = (copyW - dw) / 2;
+        copyW = dw;
+    }
+    if (copyH > dh) {
+        srcY = (copyH - dh) / 2;
+        copyH = dh;
+    }
+    const int dx = rc.left + (dw - copyW) / 2;
+    const int dy = rc.top + (dh - copyH) / 2;
+    try {
+        dst->CopyEx(dx, dy, src, CANVAS_ALPHATYPE::CA_OVERWRITE, copyW, copyH, srcX, srcY, copyW, copyH);
+    } catch (...) {
+    }
+}
+
+static void FillRect(IWzCanvasPtr canvas, const RECT& rc, unsigned int color) {
+    if (!canvas) {
+        return;
+    }
+    try {
+        canvas->DrawRectangle(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, color);
+    } catch (...) {
     }
 }
 
@@ -214,17 +420,25 @@ public:
     inline static CUISideToolbar* ms_pInstance = nullptr;
     inline static CRTTI ms_RTTI{nullptr};
 
-    bool m_expanded = false;
-    int m_animFrame = 0;   // 0..6
-    int m_animDir = 1;     // +1 / -1
-    DWORD m_lastAnimTick = 0;
-    DWORD m_lastClickTick = 0; // debounce: one logical click
-    int m_hoverItem = -1;
-    bool m_iconHover = false;
-    unsigned int m_openMask = 0;
+    bool m_barExpanded = false;
+    int m_openCategory = -1;
+    int m_hoverCat = -1;
+    int m_hoverSub = -1;
+    bool m_hubHover = false;
+    HoverTarget m_tipTarget{};
+    HoverTarget m_tipShown{};
+    DWORD m_tipHoverStart = 0;
+    DWORD m_lastClickTick = 0;
+    DWORD m_catPressTick = 0;
+    int m_catPressIndex = -1;
+    bool m_longPressGmSent = false;
 
-    IWzCanvasPtr m_icon[kAnimFrameCount];
+    IconAnim m_hubAnim{};
+    IconAnim m_catAnim[SidebarConfig::kCategoryCount]{};
+    IconAnim m_subAnim[SidebarConfig::kCategoryCount][8]{};
+
     IWzFontPtr m_font;
+    IWzFontPtr m_fontTitle;
     IWzFontPtr m_fontShadow;
 
     CUISideToolbar();
@@ -245,47 +459,98 @@ public:
     virtual int IsKindOf(const CRTTI* pRTTI) const override { return ms_RTTI.IsKindOf(pRTTI); }
     virtual int OnSetFocus(int /*bFocus*/) override { return 0; }
     virtual void OnKey(unsigned int wParam, unsigned int lParam) override {
-        void* ctx = GetWvsContext();
+        void* ctx = *reinterpret_cast<void**>(kAddr_CWvsContext_Instance);
         if (ctx) {
             reinterpret_cast<int(__thiscall*)(void*, unsigned int, unsigned int)>(
                 kAddr_ProcessBasicUIKey)(ctx, wParam, lParam);
         }
     }
 
-    static int WndW() { return kIconPad + kIconW + kGap + kPanelW + kIconPad; }
+    int SubCountForOpenCategory() const {
+        return CountVisibleSubs(m_openCategory);
+    }
+
+    // Fixed max canvas size — NEVER resize CWnd layer on expand/collapse.
+    // Changing m_pLayer width/height stretches the existing canvas ("zoom"),
+    // and clips category icons that were drawn past the old canvas bounds.
+    static int MaxSubCount() {
+        int maxSubs = 0;
+        for (int i = 0; i < SidebarConfig::kCategoryCount; ++i) {
+            if (SidebarConfig::kCategories[i].subCount > maxSubs) {
+                maxSubs = SidebarConfig::kCategories[i].subCount;
+            }
+        }
+        return maxSubs;
+    }
+
+    static int WndW() {
+        // hub/cat column + widest subcategory row + tip text reserve (no clip)
+        const int subs = MaxSubCount();
+        int w = kLeftPad + kCatW + kPad;
+        if (subs > 0) {
+            w += subs * (kSubW + kPad) + kPad;
+        }
+        w += kTipReserveW;
+        return w + kLeftPad;
+    }
+
+    static int MeasureTipLineWidth(IWzFontPtr font, const char* gbk) {
+        if (!gbk || !gbk[0]) {
+            return 0;
+        }
+        if (font) {
+            try {
+                return static_cast<int>(font->CalcTextWidth(Ztl_bstr_t(gbk), Ztl_variant_t()));
+            } catch (...) {
+            }
+        }
+        // Fallback: ~6px ASCII / ~12px CJK (GBK) — better than a fixed narrow box.
+        int w = 0;
+        for (const unsigned char* p = reinterpret_cast<const unsigned char*>(gbk); *p; ++p) {
+            if (*p >= 0x80 && *(p + 1)) {
+                w += 12;
+                ++p;
+            } else {
+                w += 6;
+            }
+        }
+        return w;
+    }
+
     static int WndH() {
-        const int listH = kItemPadY * 2 + kFeatCount * kItemH;
-        return listH > kIconH ? listH : kIconH;
-    }
-    // Icon centered inside the tall layer (list expands around the same axis).
-    static int IconLocalY() { return (WndH() - kIconH) / 2; }
-    static int ListStartY() { return (WndH() - kFeatCount * kItemH) / 2; }
-
-    RECT IconRect() const {
-        const int x = kIconPad;
-        const int y = IconLocalY();
-        return {x, y, x + kIconW, y + kIconH};
+        const int catBlock = SidebarConfig::kCategoryCount * (kCatH + kPad);
+        const int hubBlock = kHubH + kPad;
+        return kTopPad + hubBlock + catBlock + kTopPad;
     }
 
-    // Feature list sits to the RIGHT of the icon.
-    RECT PanelRect() const {
-        const int x = kIconPad + kIconW + kGap;
-        return {x, 0, x + kPanelW, WndH()};
+    int HubY() const { return kTopPad; }
+    int CatStartY() const { return kTopPad + kHubH + kPad; }
+
+    RECT HubRect() const {
+        const int x = kLeftPad;
+        const int y = HubY();
+        return {x, y, x + kHubW, y + kHubH};
     }
 
-    RECT ItemRect(int index) const {
-        RECT panel = PanelRect();
-        const int y = ListStartY() + index * kItemH;
-        return {panel.left + kItemPadX, y, panel.right - kItemPadX, y + kItemH - 2};
+    RECT CategoryRect(int catIndex) const {
+        const int x = kLeftPad;
+        const int y = CatStartY() + catIndex * (kCatH + kPad);
+        return {x, y, x + kCatW, y + kCatH};
     }
 
-    int HitItem(int rx, int ry) const {
-        if (!m_expanded) {
+    RECT SubRect(int subIndex) const {
+        const int catY = CatStartY() + m_openCategory * (kCatH + kPad);
+        const int x = kLeftPad + kCatW + kPad + subIndex * (kSubW + kPad);
+        return {x, catY, x + kSubW, catY + kSubH};
+    }
+
+    int HitCategory(int rx, int ry) const {
+        if (!m_barExpanded) {
             return -1;
         }
         POINT pt{rx, ry};
-        for (int i = 0; i < kFeatCount; ++i) {
-            RECT rc = ItemRect(i);
+        for (int i = 0; i < SidebarConfig::kCategoryCount; ++i) {
+            RECT rc = CategoryRect(i);
             if (PtInRect(&rc, pt)) {
                 return i;
             }
@@ -293,85 +558,59 @@ public:
         return -1;
     }
 
-    static IWzCanvasPtr LoadSprite(const wchar_t* path) {
-        IWzCanvasPtr c;
-        try {
-            c = get_unknown(get_rm()->GetObjectA(const_cast<wchar_t*>(path)));
-        } catch (...) {
+    int HitSub(int rx, int ry) const {
+        if (!m_barExpanded || m_openCategory < 0) {
+            return -1;
         }
-        return c;
-    }
-
-    static void BlitA(IWzCanvasPtr dst, IWzCanvasPtr src, int x, int y) {
-        if (dst && src) {
-            try {
-                dst->CopyEx(x, y, src, CANVAS_ALPHATYPE::CA_OVERWRITE, 0, 0, 0, 0, 0, 0);
-            } catch (...) {
+        POINT pt{rx, ry};
+        const int count = SubCountForOpenCategory();
+        for (int i = 0; i < count; ++i) {
+            RECT rc = SubRect(i);
+            if (PtInRect(&rc, pt)) {
+                return i;
             }
         }
+        return -1;
     }
 
-    static void Fill(IWzCanvasPtr c, const RECT& rc, unsigned int color) {
-        if (!c) {
-            return;
+    HoverTarget ResolveHover(int rx, int ry) const {
+        HoverTarget t;
+        POINT pt{rx, ry};
+        RECT hubRc = HubRect();
+        if (PtInRect(&hubRc, pt)) {
+            t.kind = kHoverHub;
+            return t;
         }
-        try {
-            c->DrawRectangle(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, color);
-        } catch (...) {
+        const int cat = HitCategory(rx, ry);
+        if (cat >= 0) {
+            t.kind = kHoverCategory;
+            t.catIndex = cat;
+            return t;
         }
+        const int sub = HitSub(rx, ry);
+        if (sub >= 0) {
+            t.kind = kHoverSub;
+            t.catIndex = m_openCategory;
+            t.subIndex = sub;
+        }
+        return t;
     }
 
-    static void Stroke(IWzCanvasPtr c, const RECT& rc, unsigned int color) {
-        if (!c) {
-            return;
-        }
-        const int w = rc.right - rc.left;
-        const int h = rc.bottom - rc.top;
-        try {
-            c->DrawRectangle(rc.left, rc.top, w, 1, color);
-            c->DrawRectangle(rc.left, rc.bottom - 1, w, 1, color);
-            c->DrawRectangle(rc.left, rc.top, 1, h, color);
-            c->DrawRectangle(rc.right - 1, rc.top, 1, h, color);
-        } catch (...) {
-        }
-    }
-
-    void LoadAssets() {
-        // Primary: Omok stones. Fallbacks: Quest marker / CashShop tab (always in v083 UI).
-        static const wchar_t* kFrameSets[][kAnimFrameCount] = {
-            {
-                L"UI/UIWindow.img/Minigame/Omok/stone/3/black/0",
-                L"UI/UIWindow.img/Minigame/Omok/stone/3/black/1",
-                L"UI/UIWindow.img/Minigame/Omok/stone/3/black/2",
-            },
-            {
-                L"UI/UIWindow.img/Quest/icon3/6",
-                L"UI/UIWindow.img/Quest/icon3/6",
-                L"UI/UIWindow.img/Quest/icon3/6",
-            },
-            {
-                L"UI/Basic.img/Cursor/0/0",
-                L"UI/Basic.img/Cursor/0/0",
-                L"UI/Basic.img/Cursor/0/0",
-            },
-        };
-        bool any = false;
-        for (const auto& set : kFrameSets) {
-            any = false;
-            for (int i = 0; i < kAnimFrameCount; ++i) {
-                m_icon[i] = LoadSprite(set[i]);
-                if (m_icon[i]) {
-                    any = true;
-                }
-            }
-            if (any) {
-                break;
-            }
-        }
+    void LoadFonts() {
         m_font = nullptr;
+        m_fontTitle = nullptr;
         m_fontShadow = nullptr;
         try {
             get_basic_font(std::addressof(m_font), 0);
+        } catch (...) {
+        }
+        try {
+            PcCreateObject<IWzFontPtr>(L"Canvas#Font", m_fontTitle, nullptr);
+            if (m_fontTitle) {
+                auto fn = reinterpret_cast<HRESULT(__thiscall*)(
+                    IWzFont*, Ztl_bstr_t, unsigned long, unsigned long, const Ztl_variant_t&)>(kAddr_SetFont);
+                fn(m_fontTitle, L"Dotum", 12, 0xFFFFD070, Ztl_variant_t(L""));
+            }
         } catch (...) {
         }
         try {
@@ -379,40 +618,9 @@ public:
             if (m_fontShadow) {
                 auto fn = reinterpret_cast<HRESULT(__thiscall*)(
                     IWzFont*, Ztl_bstr_t, unsigned long, unsigned long, const Ztl_variant_t&)>(kAddr_SetFont);
-                fn(m_fontShadow, L"Dotum", 12, 0xFF000000, Ztl_variant_t(L""));
+                fn(m_fontShadow, L"Dotum", 11, 0xFF000000, Ztl_variant_t(L""));
             }
         } catch (...) {
-        }
-    }
-
-    void AdvanceAnim() {
-        const DWORD now = GetTickCount();
-        if (m_lastAnimTick == 0) {
-            m_lastAnimTick = now;
-            return;
-        }
-        if (now - m_lastAnimTick < static_cast<DWORD>(kAnimIntervalMs)) {
-            return;
-        }
-        m_lastAnimTick = now;
-        m_animFrame += m_animDir;
-        if (m_animFrame >= kAnimFrameCount - 1) {
-            m_animFrame = kAnimFrameCount - 1;
-            m_animDir = -1;
-        } else if (m_animFrame <= 0) {
-            m_animFrame = 0;
-            m_animDir = 1;
-        }
-        InvalidateRect(nullptr);
-    }
-
-    void RefreshOpenMask() {
-        const unsigned int next = QueryOpenMask();
-        if (next != m_openMask) {
-            m_openMask = next;
-            if (m_expanded) {
-                InvalidateRect(nullptr);
-            }
         }
     }
 
@@ -425,44 +633,169 @@ public:
         return true;
     }
 
-    void ToggleExpanded() {
-        m_expanded = !m_expanded;
-        m_hoverItem = -1;
-        if (m_expanded) {
-            m_openMask = QueryOpenMask();
+    void ToggleBar() {
+        m_barExpanded = !m_barExpanded;
+        if (!m_barExpanded) {
+            m_openCategory = -1;
         }
-        // Do NOT MoveWnd here — position is fixed; MoveWnd mid-click can eat the next click.
+        m_hoverCat = -1;
+        m_hoverSub = -1;
+        m_hubHover = false;
+        m_tipTarget = {};
+        m_tipShown = {};
+        m_tipHoverStart = 0;
         try {
-            play_ui_sound(m_expanded ? L"MenuUp" : L"MenuDown");
+            play_ui_sound(m_barExpanded ? L"MenuUp" : L"MenuDown");
         } catch (...) {
         }
         InvalidateRect(nullptr);
     }
+
+    void ToggleCategory(int catIndex) {
+        if (catIndex < 0 || catIndex >= SidebarConfig::kCategoryCount) {
+            return;
+        }
+        if (m_openCategory == catIndex) {
+            m_openCategory = -1;
+        } else {
+            m_openCategory = catIndex;
+        }
+        m_hoverSub = -1;
+        m_tipTarget = {};
+        m_tipShown = {};
+        m_tipHoverStart = 0;
+        try {
+            play_ui_sound(L"BtMouseClick");
+        } catch (...) {
+        }
+        InvalidateRect(nullptr);
+    }
+
+    void DrawIconSlot(IWzCanvasPtr canvas, const RECT& rc, IconAnim& anim, const wchar_t* prefix,
+                      bool /*hover*/, bool /*selected*/) {
+        // No slot chrome — icons render at original art size (doc: no border / no scale-up).
+        IWzCanvasPtr icon = CurrentIconFrame(anim, prefix);
+        BlitCentered(canvas, icon, rc);
+    }
+
+    void DrawOutlinedText(IWzCanvasPtr canvas, int x, int y, Ztl_bstr_t& text, IWzFontPtr font,
+                          IWzFontPtr shadow) {
+        if (!canvas || !font) {
+            return;
+        }
+        // 8-neighbor outline (no fill / no border box) for readability on game bg.
+        if (shadow) {
+            static constexpr int kOx[] = {-1, 0, 1, -1, 1, -1, 0, 1};
+            static constexpr int kOy[] = {-1, -1, -1, 0, 0, 1, 1, 1};
+            for (int i = 0; i < 8; ++i) {
+                try {
+                    canvas->DrawTextA(x + kOx[i], y + kOy[i], text, shadow);
+                } catch (...) {
+                }
+            }
+        }
+        try {
+            canvas->DrawTextA(x, y, text, font);
+        } catch (...) {
+        }
+    }
+
+    void DrawTip(IWzCanvasPtr canvas, const SidebarConfig::TipText& tip, int anchorX, int anchorY) {
+        if (!tip.title || !tip.desc) {
+            return;
+        }
+        const int titleW = MeasureTipLineWidth(m_fontTitle ? m_fontTitle : m_font, tip.title);
+        const int descW = MeasureTipLineWidth(m_font, tip.desc);
+        const int tipW = (std::max)(titleW, descW) + kTipPadX * 2;
+        const int tipH = kTipLineH * 2 + 6;
+        int tx = anchorX + 8;
+        int ty = anchorY - tipH / 2;
+        if (ty < 0) {
+            ty = 0;
+        }
+        const int maxBottom = WndH() - tipH;
+        if (ty > maxBottom) {
+            ty = (std::max)(0, maxBottom);
+        }
+        // Keep tip inside canvas so long lines are never clipped by the layer.
+        const int maxRight = WndW() - 2;
+        if (tx + tipW > maxRight) {
+            tx = maxRight - tipW;
+        }
+        if (tx < 0) {
+            tx = 0;
+        }
+        // Text-only tip: no background fill, no gold border frame.
+        try {
+            Ztl_bstr_t title(tip.title);
+            Ztl_bstr_t desc(tip.desc);
+            const int textX = tx + kTipPadX;
+            DrawOutlinedText(canvas, textX, ty + 2, title, m_fontTitle ? m_fontTitle : m_font,
+                             m_fontShadow);
+            DrawOutlinedText(canvas, textX, ty + 2 + kTipLineH + 2, desc, m_font, m_fontShadow);
+        } catch (...) {
+        }
+    }
+
+    void UpdateTipState(int rx, int ry) {
+        const HoverTarget next = ResolveHover(rx, ry);
+        if (next.kind != m_tipTarget.kind ||
+            next.catIndex != m_tipTarget.catIndex ||
+            next.subIndex != m_tipTarget.subIndex) {
+            m_tipTarget = next;
+            m_tipHoverStart = (next.kind == kHoverNone) ? 0 : GetTickCount();
+            m_tipShown = {};
+        }
+        if (m_tipTarget.kind != kHoverNone && m_tipHoverStart != 0) {
+            const DWORD elapsed = GetTickCount() - m_tipHoverStart;
+            if (elapsed >= static_cast<DWORD>(kTipDelayMs)) {
+                m_tipShown = m_tipTarget;
+            }
+        }
+    }
+
+    void CheckLongPress() {
+        if (m_catPressIndex < 0 || m_longPressGmSent || !m_barExpanded) {
+            return;
+        }
+        if (m_catPressIndex != 3) {
+            return;
+        }
+        const DWORD now = GetTickCount();
+        if (m_catPressTick == 0 || (now - m_catPressTick) < static_cast<DWORD>(kLongPressMs)) {
+            return;
+        }
+        m_longPressGmSent = true;
+        if (IsServerToolVisible(SidebarConfig::kToolGm)) {
+            SendSidebarTool(SidebarConfig::kToolGm);
+        }
+        try {
+            play_ui_sound(L"BtMouseClick");
+        } catch (...) {
+        }
+    }
+
 };
 
 CUISideToolbar::CUISideToolbar() {
-    LoadAssets();
-    m_lastAnimTick = GetTickCount();
-    m_openMask = QueryOpenMask();
-    m_expanded = false;
+    LoadFonts();
+    // Four categories always visible on enter; GalaxyStar still toggles collapse.
+    m_barExpanded = true;
+    m_openCategory = -1;
 
     const int w = WndW();
     const int h = WndH();
     const int screenH = get_screen_height();
-    // Icon centered in layer + window vertically centered → icon at screen mid.
     const int left = 6;
     const int top = (std::max)(0, (screenH - h) / 2);
     CreateWnd(left, top, w, h, 12, 1, nullptr, 0);
-    const bool pinned = rs_force_wnd_lt_abs(this, left, top);
-    (void)pinned; // tip-drawonly: no fopen(sidebar_debug) — absent from green 6D612F01
+    (void)rs_force_wnd_lt_abs(this, left, top);
     ms_pInstance = this;
 }
 
 void CUISideToolbar::OnDestroy() {
-    for (int i = 0; i < kAnimFrameCount; ++i) {
-        m_icon[i] = nullptr;
-    }
     m_font = nullptr;
+    m_fontTitle = nullptr;
     m_fontShadow = nullptr;
     if (ms_pInstance == this) {
         ms_pInstance = nullptr;
@@ -471,8 +804,16 @@ void CUISideToolbar::OnDestroy() {
 }
 
 void CUISideToolbar::Update() {
-    AdvanceAnim();
-    RefreshOpenMask();
+    AdvanceIconAnim(m_hubAnim);
+    for (int i = 0; i < SidebarConfig::kCategoryCount; ++i) {
+        AdvanceIconAnim(m_catAnim[i]);
+        const int subCount = SidebarConfig::kCategories[i].subCount;
+        for (int j = 0; j < subCount; ++j) {
+            AdvanceIconAnim(m_subAnim[i][j]);
+        }
+    }
+    CheckLongPress();
+    InvalidateRect(nullptr);
 }
 
 void CUISideToolbar::Draw(const RECT* pRect) {
@@ -482,127 +823,150 @@ void CUISideToolbar::Draw(const RECT* pRect) {
         return;
     }
 
-    // Wipe full window first. v083 canvas needs transparent WHITE (0x00FFFFFF),
-    // same as damage-rank — 0x00000000 does NOT clear and leaves a ghost list.
     RECT clearRc{0, 0, WndW(), WndH()};
-    Fill(canvas, clearRc, 0x00FFFFFF);
+    FillRect(canvas, clearRc, 0x00FFFFFF);
 
-    if (m_expanded) {
-        RECT panel = PanelRect();
-        Fill(canvas, panel, 0xE0181E28);
-        Stroke(canvas, panel, 0xFFD0A050);
+    const SidebarConfig::TipText hubTip = {"\xB1\xB1\xB6\xB7\xD6\xFA\xCA\xD6", "\xB5\xE3\xBB\xF7\xD5\xB9\xBF\xAA\x2F\xCA\xD5\xC6\xF0\xB2\xE0\xB1\xDF\xC0\xB8"};
 
-        for (int i = 0; i < kFeatCount; ++i) {
-            RECT irc = ItemRect(i);
-            const bool hover = (i == m_hoverItem);
-            const bool open = (m_openMask & (1u << i)) != 0;
+    DrawIconSlot(canvas, HubRect(), m_hubAnim, SidebarConfig::kHubIconPrefix, m_hubHover, false);
 
-            // Open features keep a selected (gold) look until closed.
-            unsigned int fill = 0xFF242C38;
-            unsigned int edge = 0xFF506070;
-            if (open) {
-                fill = hover ? 0xFF6A5018 : 0xFF4A3A10;
-                edge = 0xFFFFD070;
-            } else if (hover) {
-                fill = 0xFF3A4A60;
-                edge = 0xFF90A0B0;
-            }
-            Fill(canvas, irc, fill);
-            Stroke(canvas, irc, edge);
+    if (m_barExpanded) {
+        for (int i = 0; i < SidebarConfig::kCategoryCount; ++i) {
+            const auto& cat = SidebarConfig::kCategories[i];
+            const bool hover = (i == m_hoverCat);
+            const bool selected = (i == m_openCategory);
+            DrawIconSlot(canvas, CategoryRect(i), m_catAnim[i], cat.iconPrefix, hover, selected);
 
-            const char* label = FeatureLabel(i);
-            const int tx = irc.left + 8;
-            const int ty = irc.top + 5;
-            try {
-                Ztl_bstr_t text(label);
-                if (m_fontShadow) {
-                    canvas->DrawTextA(tx + 1, ty + 1, text, m_fontShadow);
+            if (selected) {
+                int visibleSlot = 0;
+                for (int j = 0; j < cat.subCount; ++j) {
+                    const auto& sub = cat.subs[j];
+                    if (!IsSubVisible(sub)) {
+                        continue;
+                    }
+                    const bool subHover = (m_hoverSub == visibleSlot);
+                    const bool subOpen = IsSubOpen(sub);
+                    DrawIconSlot(canvas, SubRect(visibleSlot), m_subAnim[i][j], sub.iconPrefix, subHover, subOpen);
+                    ++visibleSlot;
                 }
-                if (m_font) {
-                    canvas->DrawTextA(tx, ty, text, m_font);
-                }
-            } catch (...) {
             }
         }
     }
 
-    // Always draw solid chrome first — sprite-only icons can load but blit as fully
-    // transparent on some UIWindow.img formats, which looked like "toolbar missing".
-    RECT irc = IconRect();
-    Fill(canvas, irc, m_iconHover ? 0xFF6A5018 : 0xFF4A3A10);
-    Stroke(canvas, irc, 0xFFFFD070);
-    IWzCanvasPtr icon = m_icon[m_animFrame];
-    if (icon) {
-        int sw = 24, sh = 32;
-        try {
-            sw = icon->width;
-            sh = icon->height;
-        } catch (...) {
+    if (m_tipShown.kind == kHoverHub) {
+        RECT rc = HubRect();
+        DrawTip(canvas, hubTip, rc.right, (rc.top + rc.bottom) / 2);
+    } else if (m_tipShown.kind == kHoverCategory &&
+               m_tipShown.catIndex >= 0 &&
+               m_tipShown.catIndex < SidebarConfig::kCategoryCount) {
+        const auto& cat = SidebarConfig::kCategories[m_tipShown.catIndex];
+        RECT rc = CategoryRect(m_tipShown.catIndex);
+        DrawTip(canvas, cat.tip, rc.right, (rc.top + rc.bottom) / 2);
+    } else if (m_tipShown.kind == kHoverSub &&
+               m_tipShown.catIndex >= 0 &&
+               m_tipShown.catIndex < SidebarConfig::kCategoryCount) {
+        const auto& cat = SidebarConfig::kCategories[m_tipShown.catIndex];
+        const int logical = LogicalSubFromVisible(m_tipShown.catIndex, m_tipShown.subIndex);
+        if (logical >= 0 && logical < cat.subCount) {
+            RECT rc = SubRect(m_tipShown.subIndex);
+            DrawTip(canvas, ResolveSubTip(cat.subs[logical]), rc.right, (rc.top + rc.bottom) / 2);
         }
-        const int sx = irc.left + (kIconW - sw) / 2;
-        const int sy = irc.top + (kIconH - sh) / 2;
-        BlitA(canvas, icon, sx, sy);
     }
 }
 
 int CUISideToolbar::HitTest(int rx, int ry, CCtrlWnd** ppCtrl) {
-    // Rect hit only — do NOT delegate to CWnd::HitTest (it alpha-tests the canvas
-    // and can miss the icon sprite / treat uncleared ghost pixels oddly).
     if (ppCtrl) {
         *ppCtrl = nullptr;
     }
     POINT pt{rx, ry};
-    RECT icon = IconRect();
-    if (PtInRect(&icon, pt)) {
+    RECT hubRc = HubRect();
+    if (PtInRect(&hubRc, pt)) {
         return 1;
     }
-    if (m_expanded) {
-        RECT panel = PanelRect();
-        if (PtInRect(&panel, pt)) {
-            return 1;
-        }
+    if (!m_barExpanded) {
+        return 0;
+    }
+    if (HitCategory(rx, ry) >= 0) {
+        return 1;
+    }
+    if (HitSub(rx, ry) >= 0) {
+        return 1;
     }
     return 0;
 }
 
 void CUISideToolbar::OnMouseButton(unsigned int msg, unsigned int wParam, int rx, int ry) {
     POINT pt{rx, ry};
-    // Match other custom UIs (dailycheckin/bag): act on WM_LBUTTONDOWN.
-    // LBUTTONUP is not reliably delivered to CWnd on this client.
     if (msg == WM_LBUTTONDOWN) {
-        RECT icon = IconRect();
-        if (PtInRect(&icon, pt)) {
+        RECT hubRc = HubRect();
+        if (PtInRect(&hubRc, pt)) {
             if (AcceptClick()) {
-                ToggleExpanded();
+                ToggleBar();
             }
             return;
         }
-        const int item = HitItem(rx, ry);
-        if (item >= 0) {
+        if (!m_barExpanded) {
+            return;
+        }
+        const int cat = HitCategory(rx, ry);
+        if (cat >= 0) {
+            // Defer toggle to mouse-up so long-press GM on 会员中心 does not also flip the category.
+            m_catPressIndex = cat;
+            m_catPressTick = GetTickCount();
+            m_longPressGmSent = false;
+            return;
+        }
+        const int sub = HitSub(rx, ry);
+        if (sub >= 0 && m_openCategory >= 0) {
+            m_catPressIndex = -1;
             if (AcceptClick()) {
                 try {
                     play_ui_sound(L"BtMouseClick");
                 } catch (...) {
                 }
-                InvokeFeature(item);
-                m_openMask = QueryOpenMask();
+                const auto& catDef = SidebarConfig::kCategories[m_openCategory];
+                const int logical = LogicalSubFromVisible(m_openCategory, sub);
+                if (logical >= 0 && logical < catDef.subCount) {
+                    InvokeSub(catDef.subs[logical]);
+                }
                 InvalidateRect(nullptr);
             }
             return;
         }
     }
+    if (msg == WM_LBUTTONUP) {
+        if (m_catPressIndex >= 0 && !m_longPressGmSent && m_barExpanded) {
+            const int cat = m_catPressIndex;
+            if (HitCategory(rx, ry) == cat && AcceptClick()) {
+                ToggleCategory(cat);
+            }
+        }
+        m_catPressIndex = -1;
+        m_catPressTick = 0;
+        m_longPressGmSent = false;
+    }
     CWnd::OnMouseButton(msg, wParam, rx, ry);
 }
 
 int CUISideToolbar::OnMouseMove(int rx, int ry) {
-    POINT pt{rx, ry};
-    RECT icon = IconRect();
-    const bool ih = PtInRect(&icon, pt) ? true : false;
-    const int hi = HitItem(rx, ry);
-    if (ih != m_iconHover || hi != m_hoverItem) {
-        m_iconHover = ih;
-        m_hoverItem = hi;
+    POINT hoverPt{rx, ry};
+    RECT hubRc = HubRect();
+    const bool hubHover = PtInRect(&hubRc, hoverPt) ? true : false;
+    const int cat = HitCategory(rx, ry);
+    const int sub = HitSub(rx, ry);
+    if (hubHover != m_hubHover || cat != m_hoverCat || sub != m_hoverSub) {
+        m_hubHover = hubHover;
+        m_hoverCat = cat;
+        m_hoverSub = sub;
+        UpdateTipState(rx, ry);
         InvalidateRect(nullptr);
+    } else {
+        UpdateTipState(rx, ry);
+        if (m_tipShown.kind != m_tipTarget.kind ||
+            m_tipShown.catIndex != m_tipTarget.catIndex ||
+            m_tipShown.subIndex != m_tipTarget.subIndex) {
+            InvalidateRect(nullptr);
+        }
     }
     return 1;
 }
@@ -610,8 +974,13 @@ int CUISideToolbar::OnMouseMove(int rx, int ry) {
 void CUISideToolbar::OnMouseEnter(int bEnter) {
     CWnd::OnMouseEnter(bEnter);
     if (!bEnter) {
-        m_iconHover = false;
-        m_hoverItem = -1;
+        m_hubHover = false;
+        m_hoverCat = -1;
+        m_hoverSub = -1;
+        m_tipTarget = {};
+        m_tipShown = {};
+        m_tipHoverStart = 0;
+        m_catPressIndex = -1;
         InvalidateRect(nullptr);
     }
 }
@@ -636,8 +1005,6 @@ void DestroySideToolbarForLogout() {
         return;
     }
     CUISideToolbar::ms_pInstance = nullptr;
-    // Destroy removes Gr2D/layers. Skip `delete` — ZALLOC + multi-inherit (A041FF uses
-    // ZRefCounted release on registered singletons; this toolbar is not in that list).
     p->Destroy();
 }
 
@@ -651,7 +1018,32 @@ namespace SideToolbar {
 void DestroyForLogout() {
     DestroySideToolbarForLogout();
 }
+
+void ResetServerToolConfigDefaults() {
+    g_runtimeInited = false;
+    EnsureRuntimeDefaults();
 }
 
-// SideToolbar::EnsureHooks / OnTick live in SideToolbarBridge.cpp
-// (deferred create after enter-game ticks — do not create UI at CField).
+void ApplyServerToolConfig(int toolIndex, bool visible, const char* tipTitleGbk, const char* tipDescGbk) {
+    EnsureRuntimeDefaults();
+    if (toolIndex < 0 || toolIndex >= SidebarConfig::kServerToolCount) {
+        return;
+    }
+    g_toolVisible[toolIndex] = visible;
+    if (tipTitleGbk && tipTitleGbk[0]) {
+        strncpy_s(g_tipTitle[toolIndex], tipTitleGbk, _TRUNCATE);
+        if (tipDescGbk) {
+            strncpy_s(g_tipDesc[toolIndex], tipDescGbk, _TRUNCATE);
+        } else {
+            g_tipDesc[toolIndex][0] = '\0';
+        }
+        g_tipOverride[toolIndex] = true;
+    }
+}
+
+void InvalidateUi() {
+    if (CUISideToolbar::ms_pInstance) {
+        CUISideToolbar::ms_pInstance->InvalidateRect(nullptr);
+    }
+}
+}

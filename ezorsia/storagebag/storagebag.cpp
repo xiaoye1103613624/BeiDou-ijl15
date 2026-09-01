@@ -357,6 +357,25 @@ static constexpr int kResp_Snapshot = 1;
 static constexpr int kKindOre = 0, kKindScroll = 1, kKindChair = 2, kKindCash = 3;
 static constexpr int kKindCount = 4;
 
+// GBK tab labels (client Dotum font expects ANSI/GBK on CN client).
+static const char* BagTabLabel(int kind) {
+    switch (kind) {
+    case kKindScroll: return "\xBE\xED\xD6\xE1\xB0\xFC"; // 卷轴包
+    case kKindChair:  return "\xD2\xCE\xD7\xD3\xB0\xFC"; // 椅子包
+    case kKindCash:   return "\xD7\xF8\xC6\xEF\xB0\xFC"; // 坐骑包
+    default:          return "\xBF\xF3\xCA\xAF\xB0\xFC"; // 矿石包
+    }
+}
+
+static const char* BagSearchHint(int kind) {
+    switch (kind) {
+    case kKindScroll: return "\xCB\xD1\xCB\xF7\xBE\xED\xD6\xE1\x2E\x2E\x2E"; // 搜索卷轴...
+    case kKindChair:  return "\xCB\xD1\xCB\xF7\xD2\xCE\xD7\xD3\x2E\x2E\x2E"; // 搜索椅子...
+    case kKindCash:   return "\xCB\xD1\xCB\xF7\xD7\xF8\xC6\xEF\x2E\x2E\x2E"; // 搜索坐骑...
+    default:          return "\xCB\xD1\xCB\xF7\xBF\xF3\xCA\xAF\x2E\x2E\x2E"; // 搜索矿石...
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Geometry — matches the storage-bag art (UI/UIWindow.img/Bag/backgrnd, 207x248):
 // a shared background with a 5x5 grid. The four bag kinds are selected by clickable
@@ -573,6 +592,7 @@ public:
     int m_cursorState;    // cursor currently set for the bag window: 0 arrow / 12 finger (button press) / 5 hand (grid cells)
     IWzFontPtr m_pFont;          // basic font (light) — stack-count numerals on dark badges
     IWzFontPtr m_pFontDk;        // Dotum 11 dark — search text / bag label on the light art
+    IWzFontPtr m_pFontTab;       // Dotum 11 white — GBK category tab labels
 
     // --- art / chrome bundled under UI/UIWindow.img/Bag/* (+ Basic.img/VScr4) ---
     IWzCanvasPtr m_pBg;                        // shared background art (STORAGE BAG, 5x5 grid)
@@ -1059,6 +1079,16 @@ CUIBagWindow::CUIBagWindow(int initialKind, int nLeft, int nTop)
             if (FAILED(hr)) m_pFontDk = nullptr;
         }
     } catch (...) { m_pFontDk = nullptr; }
+    m_pFontTab = nullptr;
+    try {
+        PcCreateObject<IWzFontPtr>(L"Canvas#Font", m_pFontTab, nullptr);
+        if (m_pFontTab) {
+            HRESULT hr = reinterpret_cast<HRESULT(__thiscall*)(IWzFont*, Ztl_bstr_t, unsigned long,
+                unsigned long, const Ztl_variant_t&)>(kAddr_SetFont)(
+                m_pFontTab, L"Dotum", 11, 0xFFFFFFFF, Ztl_variant_t(L""));
+            if (FAILED(hr)) m_pFontTab = nullptr;
+        }
+    } catch (...) { m_pFontTab = nullptr; }
     s_bAwaitingSnapshot = false;     // a fresh window starts un-gated (no transfer in flight yet)
     SendBagReq_Open(m_activeKind);   // request the current snapshot for the active bag
 }
@@ -1070,7 +1100,7 @@ void CUIBagWindow::OnDestroy() {
     if (m_bTtInit) { __try { TT_Clear(m_ttBuf); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
     for (int k = 0; k < kKindCount; ++k) FreeBag(k);
     if (m_bTtInit) { __try { TT_Dtor(m_ttBuf); } __except (EXCEPTION_EXECUTE_HANDLER) {} m_bTtInit = false; }
-    m_pFont = nullptr; m_pFontDk = nullptr;
+    m_pFont = nullptr; m_pFontDk = nullptr; m_pFontTab = nullptr;
     m_pBg = nullptr;
     for (int k = 0; k < kKindCount; ++k) m_pTabOn[k] = nullptr;
     for (int i = 0; i < 2; ++i) { m_pPillL[i] = nullptr; m_pPillF[i] = nullptr; m_pPillR[i] = nullptr; }
@@ -1096,13 +1126,17 @@ void CUIBagWindow::Draw(const RECT* pRect) {
     //     the art (UI/UIWindow.img/Bag/backgrnd). The active bag is shown by the tab labels, not the bg.
     BlitAt(pCanvas, m_pBg, 0, 0);
 
-    // (1b) Tabs in the strip below the title — vanilla item-inventory style: a pink pill behind the
-    //      active kind, grey pills behind the rest, each with its white label centered on top.
+    // (1b) Tabs — pink/grey pills + white GBK labels (DrawText, not WZ colored glyphs).
     for (int k = 0; k < kKindCount; ++k) {
         bool sel = (k == m_activeKind);
         DrawTabPill(pCanvas, kTabHitLeft[k] + kPillPad, (kTabHitRight[k] - kTabHitLeft[k]) - 2 * kPillPad, sel);
-        if (m_pTabOn[k]) {
-            BlitA(pCanvas, m_pTabOn[k], kTabLabelX[k], kTabLabelY);   // all 4 tabs use vanilla WZ label art (Ore/Scroll/Chair/Cash); labels are edited in the WZ, not here
+        if (m_pFontTab) {
+            try {
+                pCanvas->DrawTextA(kTabLabelX[k], kTabLabelY, Ztl_bstr_t(BagTabLabel(k)), m_pFontTab,
+                                   Ztl_variant_t(), Ztl_variant_t());
+            } catch (...) {}
+        } else if (m_pTabOn[k]) {
+            BlitA(pCanvas, m_pTabOn[k], kTabLabelX[k], kTabLabelY);
         }
     }
 
@@ -1197,9 +1231,7 @@ void CUIBagWindow::Draw(const RECT* pRect) {
         if (m_searchLen > 0) {
             try { pCanvas->DrawTextA(kSearchTextX, kSearchTextY, Ztl_bstr_t(m_search), pfDk, Ztl_variant_t(), Ztl_variant_t()); } catch (...) {}
         } else if (!m_searchActive) {
-            static const wchar_t* kHints[kKindCount] =
-                { L"Buscar minérios...", L"Buscar pergaminhos...", L"Buscar cadeiras...", L"Buscar montarias..." };
-            const wchar_t* hint = kHints[m_activeKind];
+            const char* hint = BagSearchHint(m_activeKind);
             try { pCanvas->DrawTextA(kSearchTextX, kSearchTextY, Ztl_bstr_t(hint), pfDk, Ztl_variant_t(), Ztl_variant_t()); } catch (...) {}
         }
         // caret (blink ~500ms) right AFTER the typed text. DrawTextA returns the text HEIGHT (not width) and
@@ -1777,9 +1809,25 @@ void __fastcall CUIItem_Draw_bag_hook(void* pThis, void* /*edx*/, const RECT* pR
 typedef void(__thiscall* t_CUIItem_OnMouseButton)(void*, unsigned int, unsigned int, int, int);
 static auto CUIItem_OnMouseButton_bag = reinterpret_cast<t_CUIItem_OnMouseButton>(kAddr_CUIItem_OnMouseButton);
 void __fastcall CUIItem_OnMouseButton_bag_hook(void* pThis, void* /*edx*/, unsigned int msg, unsigned int wParam, int rx, int ry) {
-    // The BAG button lives in the title-bar strip, whose clicks never reach CUIItem::OnMouseButton
-    // (the engine captures them for window-dragging). The button is driven entirely by
-    // BagWindow_HandleMouseMessage at the WndProc level, so this hook just chains through.
+    // Right-click deposit (formerly via slotlock): when bag UI is open, deposit the clicked slot.
+    // pThis is IUIMsgHandler (+4); CUIItem object base is pThis - 4.
+    if (msg == WM_RBUTTONDOWN) {
+        void* pItemUi = reinterpret_cast<char*>(pThis) - 4;
+        int invType = 0;
+        int slot = 0;
+        __try {
+            invType = *reinterpret_cast<int*>(reinterpret_cast<char*>(pItemUi) + 0x05E4); // m_nItemTI
+            slot = reinterpret_cast<int(__thiscall*)(void*, int, int)>(0x0081DB7E)(
+                pItemUi, static_cast<int>(rx), static_cast<int>(ry));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            invType = 0;
+            slot = 0;
+        }
+        if (slot >= 1 && BagWindow_DepositFromInventory(invType, slot)) {
+            return;
+        }
+    }
+    // BAG title-bar button is driven by BagWindow_HandleMouseMessage (WndProc), not here.
     CUIItem_OnMouseButton_bag(pThis, msg, wParam, rx, ry);
 }
 

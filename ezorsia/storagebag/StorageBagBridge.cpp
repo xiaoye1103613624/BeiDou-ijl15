@@ -27,8 +27,9 @@ void EnsureHooks() {
     }
     g_storageBagHooksAttached = true;
     // Inventory BAG button clicks go through CWndMan::TranslateMessageImpl
-    // (DamageRankInput hook → StorageBag_HandleMouseMessage). Attach here too
-    // so bag clicks work even if DamageRank::AttachHooks order/fail changes.
+    // (DamageRankInput.cpp calls StorageBag_HandleMouseMessage first).
+    // AttachDamageRankInputHooks here so bag clicks work even if DamageRank
+    // attach order/fail changes.
     AttachDamageRankInputHooks();
     AttachStorageBagMod();
 }

@@ -10,7 +10,7 @@ void BagWindow_Toggle();
 void BagWindow_Close();
 bool BagWindow_IsOpen();
 bool StorageBag_HandleMouseMessage(unsigned int& msg, unsigned long wParam, long lParam, long* plResult);
-// Used by slotlock: right-click deposit when bag window is open. Returns true if consumed.
+// Right-click deposit when bag window is open (CUIItem OnMouseButton hook). Returns true if consumed.
 bool BagWindow_DepositFromInventory(int invType, int slot);
 
 namespace StorageBag {
