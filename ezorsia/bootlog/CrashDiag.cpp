@@ -74,18 +74,57 @@ void NoteWzPathInternal(const wchar_t* path) {
     SafeCopyWzPath(g_wzPaths[slot], kWzPathChars, path);
 }
 
+// SHARE_WRITE is required: Cursor/editors often keep the log open; FILE_SHARE_READ
+// alone makes CreateFile(FILE_APPEND_DATA) fail silently and we lose RecentWZ dumps.
+constexpr DWORD kLogShare = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+
 bool AppendFileA(const char* path, const char* data, int len) {
     if (!path || !path[0] || !data || len <= 0) {
         return false;
     }
-    HANDLE h = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+    HANDLE h = CreateFileA(path, FILE_APPEND_DATA, kLogShare, nullptr,
                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
         return false;
     }
     DWORD written = 0;
-    WriteFile(h, data, static_cast<DWORD>(len), &written, nullptr);
+    const BOOL ok = WriteFile(h, data, static_cast<DWORD>(len), &written, nullptr);
+    FlushFileBuffers(h);
     CloseHandle(h);
+    return ok && written == static_cast<DWORD>(len);
+}
+
+bool AppendFileW(const wchar_t* path, const char* data, int len) {
+    if (!path || !path[0] || !data || len <= 0) {
+        return false;
+    }
+    HANDLE h = CreateFileW(path, FILE_APPEND_DATA, kLogShare, nullptr,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    DWORD written = 0;
+    const BOOL ok = WriteFile(h, data, static_cast<DWORD>(len), &written, nullptr);
+    FlushFileBuffers(h);
+    CloseHandle(h);
+    return ok && written == static_cast<DWORD>(len);
+}
+
+bool DirFromModuleW(HMODULE mod, wchar_t* outDir, size_t outCch) {
+    if (!outDir || outCch < 4) {
+        return false;
+    }
+    outDir[0] = L'\0';
+    wchar_t full[MAX_PATH]{};
+    if (!GetModuleFileNameW(mod, full, MAX_PATH) || !full[0]) {
+        return false;
+    }
+    wchar_t* slash = wcsrchr(full, L'\\');
+    if (!slash) {
+        return false;
+    }
+    *(slash + 1) = L'\0';
+    wcscpy_s(outDir, outCch, full);
     return true;
 }
 
@@ -464,6 +503,9 @@ void WriteCrashLog(EXCEPTION_POINTERS* ep) {
     }
 
     AppendFileA(g_crashLogPath, buf, static_cast<int>(used));
+    // Also refresh beidou-wz-last.log so EOF/quiet-mode map crashes leave a
+    // dedicated RecentWZ snapshot even when throw_hr dump HRs were incomplete.
+    CrashDiag_DumpRecentWzPaths("VEH");
 }
 
 LONG CALLBACK CrashDiagVeh(EXCEPTION_POINTERS* ep) {
@@ -590,9 +632,10 @@ void NoteErrorInfoDescription(IErrorInfo* pInfo) {
 
 void __cdecl Hook_ComRaiseError(HRESULT hr, IErrorInfo* pInfo) {
     const unsigned uhr = static_cast<unsigned>(hr);
-    // Include 0x8007000D (ERROR_INVALID_DATA) — enter-map throw_hr family.
+    // Include 0x8007000D (ERROR_INVALID_DATA) and 0x80070026 (EOF) —
+    // enter-map throw_hr family (missing/truncated canvas in existing .img).
     if (uhr == static_cast<unsigned>(kE_POINTER) || uhr == 0x80030002u ||
-        uhr == 0x80004003u || uhr == 0x8007000Du) {
+        uhr == 0x80004003u || uhr == 0x8007000Du || uhr == 0x80070026u) {
         const LONG n = InterlockedIncrement(&g_comLogged);
         if (n <= kComErrorMax) {
             void* retAddr = _ReturnAddress();
@@ -613,7 +656,8 @@ void __cdecl Hook_ComRaiseError(HRESULT hr, IErrorInfo* pInfo) {
                     CrashDiag_EnsureFailDescFromGetObjectSpy();
                 }
                 WriteComErrorLog(hr, retAddr);
-                if (uhr == 0x80030002u || uhr == 0x80004003u || uhr == 0x8007000Du) {
+                if (uhr == 0x80030002u || uhr == 0x80004003u || uhr == 0x8007000Du ||
+                    uhr == 0x80070026u) {
                     CrashDiag_DumpRecentWzPaths("ComRaiseError");
                 }
             } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -723,10 +767,10 @@ void CrashDiag_EnsureFailDescFromGetObjectSpy() {
     }
 }
 
-void CrashDiag_DumpRecentWzPaths(const char* reason) {
-    char path[MAX_PATH]{};
-    strcpy_s(path, g_clientDir);
-    strcat_s(path, "beidou-wz-last.log");
+bool CrashDiag_DumpRecentWzPaths(const char* reason, DWORD* outGle) {
+    if (outGle) {
+        *outGle = 0;
+    }
 
     char buf[8192]{};
     size_t used = 0;
@@ -737,10 +781,56 @@ void CrashDiag_DumpRecentWzPaths(const char* reason) {
     used += sprintf_s(buf + used, sizeof(buf) - used, "reason=%s\r\n",
                       reason ? reason : "(null)");
     AppendRecentWz(buf, sizeof(buf), &used);
-    AppendFileA(path, buf, static_cast<int>(used));
 
-    // Also mirror into client_boot.log via BootLog (force unmute).
-    // BootLog.h is included by callers; keep this file independent — write only the file.
+    // 1) Prefer ANSI path under g_clientDir (same as BootLog).
+    if (g_clientDir[0]) {
+        char pathA[MAX_PATH]{};
+        strcpy_s(pathA, g_clientDir);
+        strcat_s(pathA, "beidou-wz-last.log");
+        if (AppendFileA(pathA, buf, static_cast<int>(used))) {
+            return true;
+        }
+        if (outGle) {
+            *outGle = GetLastError();
+        }
+    }
+
+    // 2) Unicode path from main EXE (handles non-ACP / Chinese dirs reliably).
+    wchar_t dirW[MAX_PATH]{};
+    if (DirFromModuleW(GetModuleHandleW(nullptr), dirW, MAX_PATH)) {
+        wchar_t pathW[MAX_PATH]{};
+        wcscpy_s(pathW, dirW);
+        wcscat_s(pathW, L"beidou-wz-last.log");
+        if (AppendFileW(pathW, buf, static_cast<int>(used))) {
+            // Refresh ANSI g_clientDir if it was empty/wrong.
+            if (!g_clientDir[0]) {
+                WideCharToMultiByte(CP_ACP, 0, dirW, -1, g_clientDir, MAX_PATH, nullptr, nullptr);
+            }
+            return true;
+        }
+        if (outGle) {
+            *outGle = GetLastError();
+        }
+    }
+
+    // 3) Unicode path beside ijl15.dll.
+    HMODULE ijl = g_hSelf ? g_hSelf : GetModuleHandleW(L"ijl15.dll");
+    if (DirFromModuleW(ijl, dirW, MAX_PATH)) {
+        wchar_t pathW[MAX_PATH]{};
+        wcscpy_s(pathW, dirW);
+        wcscat_s(pathW, L"beidou-wz-last.log");
+        if (AppendFileW(pathW, buf, static_cast<int>(used))) {
+            return true;
+        }
+        if (outGle) {
+            *outGle = GetLastError();
+        }
+    }
+
+    if (outGle && *outGle == 0) {
+        *outGle = ERROR_PATH_NOT_FOUND;
+    }
+    return false;
 }
 
 void CrashDiag_SetMsgContext(DWORD threadId, UINT msg, WPARAM wParam, LPARAM lParam) {

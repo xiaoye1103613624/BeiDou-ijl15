@@ -26,8 +26,9 @@ void CrashDiag_ClearMsgContext();
 // Optional: record a WZ path from other NameSpace hooks (e.g. rs_ns_hook).
 void CrashDiag_NoteWzPath(const wchar_t* path);
 
-// Dump recent WZ paths to BootLog / beidou-wz-last.log (no hooks required).
-void CrashDiag_DumpRecentWzPaths(const char* reason);
+// Dump recent WZ paths to beidou-wz-last.log (no hooks required).
+// Returns false if all write attempts failed; optional outGle is last Win32 error.
+bool CrashDiag_DumpRecentWzPaths(const char* reason, DWORD* outGle = nullptr);
 
 // Record IErrorInfo / com_error description for the next wz-last dump
 // (fail_desc= / suspect_fail=). Call before DumpRecentWzPaths on throw.

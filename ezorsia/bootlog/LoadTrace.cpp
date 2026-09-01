@@ -3,6 +3,8 @@
 #include "LoadTraceApi.h"
 #include "CrashDiag.h"
 #include "../Memory.h"
+#include "../Client.h"
+#include "../gamedata/MapEnterNullGuardApi.h"
 
 #include <cstring>
 #include <oleauto.h>
@@ -54,7 +56,6 @@ static bool Attach(Fn** target, Fn* detour, const char* name) {
 typedef int(__fastcall* CWvsAppInit_t)(void* pThis, void* edx);
 static auto g_CWvsAppInit = reinterpret_cast<CWvsAppInit_t>(0x009F5239);
 static void AttachGetObjectAPathSpy(const char* why);
-static void InstallEnterNullGuardFromDoc();
 
 // Runs at __except FILTER time (stack still at the throw site) — captures the
 // actual throwing frame before unwinding, for the 0xE06D7363 C++/COM throw
@@ -180,10 +181,7 @@ static int __fastcall Hook_CWvsAppInit(void* pThis, void* edx) {
         // Soft-fail inside spy is gated OFF — VT_EMPTY Growth tip → login 0x80004003
         // (client_boot 2026-08-13 13:45: SOFTFAIL then throw_hr E_POINTER).
         AttachGetObjectAPathSpy("post-CWvsApp::Init");
-        // EnterNullGuard DISABLED: runtime patch @A292F9→9F6921 correlated with
-        // login 0x80004003 after B2542924 deploy; re-enable only after IDA verify.
-        // InstallEnterNullGuardFromDoc();
-        BootLog("EnterNullGuard DISABLED (login E_POINTER triage; IDA gate)");
+        AttachMapEnterNullGuard();
         // ComRaise diag also deferred: historical early ComRaise → 0x80004003 at
         // logo/login; path-spy + throw_hr hooks already capture enter 0x8007000D.
         // CrashDiag_AttachComRaiseDiag();
@@ -431,79 +429,6 @@ static void AttachGetObjectAPathSpy(const char* why) {
     // also reproduced 0xC00000FD stack overflow before logo (2026-08-13).
 }
 
-// Runtime nullguard for select→enter AV @ BeiDou.exe+0x6292F9 (EA 0xA292F9).
-// Doc (IDA-verified 2026-08-11): ADDON_EXE_NULLGUARD_20260811.md
-// edi==0 → push [edi+3Dh] AV @0x3D. S8 live EXE still has unpatched bytes; IDA MCP
-// is down this session so we apply the same ExpectBytes trampoline via plugin
-// (no on-disk EXE rewrite; Level300/MaxHpMp untouched).
-static bool ExpectBytesVa(uintptr_t va, const unsigned char* expect, size_t n) {
-    __try {
-        const auto* p = reinterpret_cast<const unsigned char*>(va);
-        for (size_t i = 0; i < n; ++i) {
-            if (p[i] != expect[i]) {
-                return false;
-            }
-        }
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
-static void InstallEnterNullGuardFromDoc() {
-    // HARD OFF until IDA re-verify: login 0x80004003 after runtime patch OK
-    // (client_boot 13:45 session). Do not write A292F9 / 9F6921 from plugin.
-    BootLog("EnterNullGuard SKIP: hard-disabled (login E_POINTER)");
-    return;
-    constexpr uintptr_t kSite = 0x00A292F9;
-    constexpr uintptr_t kTramp = 0x009F6921;
-    static const unsigned char kExpectSite[12] = {
-        0xFF, 0x77, 0x3D, 0x8D, 0x47, 0x39, 0x50, 0xE8, 0xD8, 0xB3, 0xA4, 0xFF};
-    static const unsigned char kExpectNop[27] = {
-        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-        0x90, 0x90, 0x90};
-    // Already patched? (disk 2404D5F5 or prior runtime)
-    static const unsigned char kPatchedHead[5] = {0xE9, 0x23, 0xD6, 0xFC, 0xFF};
-    if (ExpectBytesVa(kSite, kPatchedHead, sizeof(kPatchedHead))) {
-        BootLog("EnterNullGuard already present @A292F9");
-        return;
-    }
-    if (!ExpectBytesVa(kSite, kExpectSite, sizeof(kExpectSite))) {
-        BootLog("EnterNullGuard SKIP: ExpectBytes fail @A292F9");
-        return;
-    }
-    if (!ExpectBytesVa(kTramp, kExpectNop, sizeof(kExpectNop))) {
-        BootLog("EnterNullGuard SKIP: NOP hole dirty @9F6921");
-        return;
-    }
-
-    unsigned char tramp[27] = {
-        0x85, 0xFF,                         // test edi,edi
-        0x75, 0x0B,                         // jnz +0x0B → decode
-        0x59,                               // pop ecx (balance)
-        0xE9, 0x1E, 0x2B, 0x03, 0x00,       // jmp loc_A29449
-        0x90, 0x90, 0x90, 0x90, 0x90,       // pad
-        0xFF, 0x77, 0x3D,                   // push [edi+3Dh]
-        0x8D, 0x47, 0x39,                   // lea eax,[edi+39h]
-        0x50,                               // push eax
-        0xE9, 0xC4, 0x29, 0x03, 0x00        // jmp 0xA29300
-    };
-    unsigned char site[12] = {
-        0xE9, 0x23, 0xD6, 0xFC, 0xFF,       // jmp tramp
-        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
-
-    Memory::WriteByteArray(static_cast<DWORD>(kTramp), tramp, sizeof(tramp));
-    Memory::WriteByteArray(static_cast<DWORD>(kSite), site, sizeof(site));
-
-    if (ExpectBytesVa(kSite, kPatchedHead, sizeof(kPatchedHead)) &&
-        ExpectBytesVa(kTramp, tramp, 5)) {
-        BootLog("EnterNullGuard OK runtime @A292F9→9F6921 (ADDON_EXE_NULLGUARD)");
-    } else {
-        BootLog("EnterNullGuard VERIFY FAIL after write");
-    }
-}
-
 static int __cdecl Hook_InitResMan() {
     BootLogStage("InitializeResMan BEGIN");
     const int r = g_InitResMan();
@@ -533,6 +458,14 @@ static int __fastcall Hook_InitGr2D(void* pThis, void* edx) {
     BootLog("Gr2D post BF14EC=%p BEC33C=%p rc=%d",
             *reinterpret_cast<void**>(0x00BF14EC),
             *reinterpret_cast<void**>(0x00BEC33C), r);
+    if (r == 0) {
+        // IWzGr2D* is valid only after InitializeGr2D; DllMain RefreshRate caused E_FAIL.
+        static bool refreshRateInstalled = false;
+        if (!refreshRateInstalled) {
+            refreshRateInstalled = true;
+            Client::RefreshRate();
+        }
+    }
     BootLogStage("InitializeGr2D END");
     return r;
 }
@@ -577,11 +510,19 @@ static void LogThrowHrStack(const char* tag, int hr, void* obj) {
             tag, static_cast<unsigned>(hr), obj, BootLog_LastStage());
     // 0x8007000D = ERROR_INVALID_DATA (bad PNG/UOL) — same need for RecentWZ
     // as STG_E_FILENOTFOUND; enter-map crashes often surface as this HR.
+    // 0x80070026 = ERROR_HANDLE_EOF ("38 已到文件尾") — truncated/missing
+    // canvas inside an existing .img (e.g. Android heart without icon).
     if (static_cast<unsigned>(hr) == 0x80030002u ||
         static_cast<unsigned>(hr) == 0x80004003u ||
-        static_cast<unsigned>(hr) == 0x8007000Du) {
-        CrashDiag_DumpRecentWzPaths(tag);
-        BootLog("***   dumped beidou-wz-last.log (RecentWZ ring)");
+        static_cast<unsigned>(hr) == 0x8007000Du ||
+        static_cast<unsigned>(hr) == 0x80070026u) {
+        DWORD gle = 0;
+        if (CrashDiag_DumpRecentWzPaths(tag, &gle)) {
+            BootLog("***   dumped beidou-wz-last.log (RecentWZ ring) OK");
+        } else {
+            BootLog("***   dumped beidou-wz-last.log FAILED gle=0x%08X",
+                    static_cast<unsigned>(gle));
+        }
     }
     void* frames[12]{};
     const USHORT n = CaptureStackBackTrace(1, 12, frames, nullptr);
@@ -655,9 +596,15 @@ static void LogThrowHrStack(const char* tag, int hr, void* obj) {
     // Re-dump so beidou-wz-last gets fail_desc=/suspect_fail=/getobj_* fields.
     if (static_cast<unsigned>(hr) == 0x80030002u ||
         static_cast<unsigned>(hr) == 0x80004003u ||
-        static_cast<unsigned>(hr) == 0x8007000Du) {
-        CrashDiag_DumpRecentWzPaths(tag);
-        BootLog("***   re-dumped beidou-wz-last with fail_desc/getobj spy");
+        static_cast<unsigned>(hr) == 0x8007000Du ||
+        static_cast<unsigned>(hr) == 0x80070026u) {
+        DWORD gle = 0;
+        if (CrashDiag_DumpRecentWzPaths(tag, &gle)) {
+            BootLog("***   re-dumped beidou-wz-last with fail_desc/getobj spy OK");
+        } else {
+            BootLog("***   re-dumped beidou-wz-last FAILED gle=0x%08X",
+                    static_cast<unsigned>(gle));
+        }
     }
     if (obj) {
         __try {
@@ -749,7 +696,22 @@ HOOK_LOADER_CDECL(0x009FA025, "GameData/Post_9FA025", g_Post2, Hook_Post2)
 HOOK_LOADER_THIS(0x009F7034, "PostGD/9F7034", g_PostGd1, Hook_PostGd1)
 HOOK_LOADER_THIS(0x00636F4E, "PostGD/StringPool_636F4E", g_PostGd2, Hook_PostGd2)
 HOOK_LOADER_THIS(0x0071D8DF, "PostGD/QuestCategory", g_QuestCat, Hook_QuestCat)
-HOOK_LOADER_THIS(0x0068487C, "PostGD/MorphPack", g_MorphPack, Hook_MorphPack)
+// MorphPack can COM-throw 0x800401F8 mid-load (GameDataGuard only softens false return).
+// Soft-skip so CWvsApp::Init can reach login; morph skills may be incomplete until data fixed.
+static auto g_MorphPack = reinterpret_cast<LoaderThis_t>(0x0068487C);
+static int __fastcall Hook_MorphPack(void* pThis, void* edx) {
+    BootLogStage("PostGD/MorphPack BEGIN");
+    int r = 0;
+    __try {
+        r = g_MorphPack(pThis, edx);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        BootLog("*** MorphPack SEH 0x%08X — soft skip (continue boot)", GetExceptionCode());
+        r = 1;
+    }
+    BootLog("PostGD/MorphPack END ok=%d", r);
+    BootLogStage("PostGD/MorphPack END");
+    return r;
+}
 
 HOOK_LOADER_CDECL(0x009FA078, "PostGD/9FA078", g_PostGd3, Hook_PostGd3)
 
