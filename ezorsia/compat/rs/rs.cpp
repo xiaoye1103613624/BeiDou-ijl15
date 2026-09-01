@@ -15,6 +15,7 @@
 #include "../wvs/util.h"
 #include "../wvs/wvsapp.h"
 #include "../ztl/ztl.h"
+#include "../../weather/WeatherApi.h"
 #include <windows.h>
 #include <intrin.h>
 #include <psapi.h>
@@ -85,6 +86,8 @@ static void RsDestroyOrigins();
 static void RsApplyOriginStatusBarMetrics();
 static void RsReanchorExistingHud();
 static void rs_installLayoutHooks();
+static void RsApplyToolTipRelMoveDimPatches();
+static void rs_callUpdateResolution();
 static IWzVector2DPtr& RsGetOrgWindow();
 static void RsLogFlush(const char* line);
 
@@ -137,80 +140,483 @@ static void* FindPattern(const char* dll, const char* pat) {
 
 // ===== CWzGr2D: D3D resolution switch (kaentake-style FindScreenMode) =====
 // Offsets are absolute from `this` (MEMBER_AT) — do NOT use C++ padded fields after
-// IWzGr2D vptr; that shifted m_screenMode/m_bInitialized by +4 and broke switches.
+// IWzGr2D vptr; that shifted m_screenMode/m_pD3DDevice by +4 and broke switches.
 class RsGr2D : public IWzGr2D {
 public:
     struct SCREENMODE {
         unsigned char pad0[0x5C];
         MEMBER_AT(int, 0x0, nWidth)
         MEMBER_AT(int, 0x4, nHeight)
+        // Gr2D Reset uses D3DPRESENT_PARAMETERS at this+0x30 = SCREENMODE+0x10.
+        MEMBER_AT(int, 0x10, nBackBufferWidth)
+        MEMBER_AT(int, 0x14, nBackBufferHeight)
+        MEMBER_AT(int, 0x2C, nWindowed)
+        MEMBER_AT(int, 0x3C, nRefreshHz)
         MEMBER_AT(int, 0x58, bFullScreen)
     };
 
     MEMBER_AT(SCREENMODE, 0x20, m_screenMode)
-    MEMBER_AT(int, 0x90, m_bInitialized)
+    // +0x90 is IDirect3DDevice8* (not a 0/1 init flag).
+    MEMBER_AT(void*, 0x90, m_pD3DDevice)
     MEMBER_AT(int, 0x94, m_hrErrorCode)
 
     typedef int(__thiscall* FindScreenMode_t)(RsGr2D*, SCREENMODE*, int bFullScreen, int w, int h, int unused);
     static FindScreenMode_t FindScreenMode;
 
+    void ApplyPresentSize(int nWidth, int nHeight) {
+        m_screenMode.nWidth = nWidth;
+        m_screenMode.nHeight = nHeight;
+        m_screenMode.nBackBufferWidth = nWidth;
+        m_screenMode.nBackBufferHeight = nHeight;
+        if (Client::WindowedMode) {
+            m_screenMode.nWindowed = 1;
+            m_screenMode.nRefreshHz = 0;
+            m_screenMode.bFullScreen = 0;
+        }
+    }
+
+    void ForceWindowedFlag() {
+        m_screenMode.bFullScreen = 0;
+        m_screenMode.nWindowed = 1;
+        m_screenMode.nRefreshHz = 0;
+        try {
+            PutfullScreen(0);
+        } catch (...) {
+            RsLogFlush("[RS] PutfullScreen(0) threw");
+        }
+    }
+
     HRESULT ScreenResolution(int nWidth, int nHeight) {
         if (!nWidth || !nHeight) return E_INVALIDARG;
         if (m_screenMode.nWidth == nWidth && m_screenMode.nHeight == nHeight) {
-            std::cout << "[RS] ScreenResolution already " << nWidth << "x" << nHeight << std::endl;
+            if (Client::WindowedMode)
+                ForceWindowedFlag();
+            RsLogFlush("[RS] ScreenResolution already matched on Gr2D object");
             return S_OK;
         }
         if (!FindScreenMode) {
             FindScreenMode = reinterpret_cast<FindScreenMode_t>(
                 FindPattern("GR2D_DX8.DLL", "B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 EC 68"));
+            if (FindScreenMode) {
+                RsLogFlush("[RS] FindScreenMode resolved in GR2D_DX8.DLL");
+            } else {
+                FindScreenMode = reinterpret_cast<FindScreenMode_t>(
+                    FindPattern("GR2D_DX9.DLL", "B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 EC 68"));
+                if (FindScreenMode)
+                    RsLogFlush("[RS] FindScreenMode resolved in GR2D_DX9.DLL");
+            }
         }
-        if (!m_bInitialized || !FindScreenMode) {
-            std::cout << "[RS] FindScreenMode unavailable init=" << m_bInitialized
-                      << " fn=" << (void*)FindScreenMode << std::endl;
+        if (!FindScreenMode) {
+            size_t dx8sz = 0, dx9sz = 0;
+            g_ModuleBase("GR2D_DX8.DLL", &dx8sz);
+            g_ModuleBase("GR2D_DX9.DLL", &dx9sz);
+            char buf[192];
+            sprintf_s(buf,
+                      "[RS] FindScreenMode pattern miss dev=%p dx8_img=%zu dx9_img=%zu",
+                      m_pD3DDevice, dx8sz, dx9sz);
+            RsLogFlush(buf);
             return E_FAIL;
         }
+        // bFullScreen at +0x58 is unreliable after FindScreenMode (-1). Use config.
+        const int fs = Client::WindowedMode ? 0 : 1;
+        if (Client::WindowedMode)
+            ForceWindowedFlag();
         SCREENMODE mode{};
-        if (!FindScreenMode(this, &mode, m_screenMode.bFullScreen, nWidth, nHeight, 0)) {
-            std::cout << "[RS] FindScreenMode failed for " << nWidth << "x" << nHeight
-                      << " fs=" << m_screenMode.bFullScreen << std::endl;
-            return E_FAIL;
+        if (FindScreenMode(this, &mode, fs, nWidth, nHeight, 0)) {
+            m_screenMode = mode;
+            ApplyPresentSize(nWidth, nHeight);
+            if (Client::WindowedMode)
+                ForceWindowedFlag();
+            m_hrErrorCode = 0x88760869; // D3DERR_DEVICENOTRESET
+            {
+                char buf[192];
+                sprintf_s(buf, "[RS] FindScreenMode ok -> DEVICENOTRESET %dx%d pp=%dx%d win=%d",
+                          nWidth, nHeight, m_screenMode.nBackBufferWidth,
+                          m_screenMode.nBackBufferHeight, m_screenMode.nWindowed);
+                RsLogFlush(buf);
+            }
+            return S_OK;
         }
-        m_screenMode = mode;
-        m_hrErrorCode = 0x88760869; // D3DERR_DEVICENOTRESET
-        std::cout << "[RS] FindScreenMode ok -> queued DEVICENOTRESET "
-                  << nWidth << "x" << nHeight << std::endl;
-        return S_OK;
+        // Windowed: EnumAdapterModes often omits 1366x768 / ultrawide — patch PP.
+        if (Client::WindowedMode) {
+            ApplyPresentSize(nWidth, nHeight);
+            ForceWindowedFlag();
+            m_hrErrorCode = 0x88760869;
+            {
+                char buf[224];
+                sprintf_s(buf,
+                    "[RS] FindScreenMode miss %dx%d — windowed custom pp=%dx%d win=%d",
+                    nWidth, nHeight, m_screenMode.nBackBufferWidth,
+                    m_screenMode.nBackBufferHeight, m_screenMode.nWindowed);
+                RsLogFlush(buf);
+            }
+            return S_OK;
+        }
+        {
+            char buf[160];
+            sprintf_s(buf, "[RS] FindScreenMode failed %dx%d fs=%d dev=%p",
+                      nWidth, nHeight, fs, m_pD3DDevice);
+            RsLogFlush(buf);
+        }
+        return E_FAIL;
     }
 };
 RsGr2D::FindScreenMode_t RsGr2D::FindScreenMode = nullptr;
 
-// Persist field tier into config.ini so next boot leaves follow-login mode.
-static std::string rs_config_ini_path() {
-    char path[MAX_PATH] = {};
+// Persist field tier beside ijl15.dll (never CWD / %WINDIR%).
+//
+// Crash-reset root cause: WritePrivateProfile* caches locally and may not hit disk
+// before process kill → next boot misses soScreenResolution → follow_login → login size.
+// Fix: Unicode paths + atomic CreateFileW/WriteFile/FlushFileBuffers/ReplaceFile, plus a
+// tiny sidecar that survives even if config.ini rewrite races. Read prefers ini, then
+// sidecar, and heals whichever side is missing.
+static std::wstring rs_dir_from_module_w(HMODULE mod) {
+    wchar_t path[MAX_PATH] = {};
+    if (!mod || !GetModuleFileNameW(mod, path, MAX_PATH))
+        return {};
+    std::wstring p(path);
+    const size_t slash = p.find_last_of(L"\\/");
+    if (slash == std::string::npos)
+        return {};
+    return p.substr(0, slash + 1);
+}
+
+static HMODULE rs_self_module() {
     HMODULE self = nullptr;
-    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           reinterpret_cast<LPCSTR>(&rs_config_ini_path), &self) && self) {
-        if (GetModuleFileNameA(self, path, MAX_PATH)) {
-            std::string p(path);
-            const size_t slash = p.find_last_of("\\/");
-            if (slash != std::string::npos)
-                return p.substr(0, slash + 1) + "config.ini";
-        }
+                           reinterpret_cast<LPCWSTR>(&rs_self_module), &self) && self)
+        return self;
+    return nullptr;
+}
+
+static std::wstring rs_client_dir_w() {
+    if (HMODULE self = rs_self_module()) {
+        std::wstring d = rs_dir_from_module_w(self);
+        if (!d.empty())
+            return d;
     }
-    return "config.ini";
+    return rs_dir_from_module_w(GetModuleHandleW(nullptr));
+}
+
+static std::wstring rs_config_ini_path_w() {
+    std::wstring d = rs_client_dir_w();
+    if (d.empty())
+        return L"config.ini";
+    return d + L"config.ini";
+}
+
+static std::wstring rs_tier_sidecar_path_w() {
+    std::wstring d = rs_client_dir_w();
+    if (d.empty())
+        return L"rs_soScreenResolution.txt";
+    return d + L"rs_soScreenResolution.txt";
+}
+
+static std::string rs_w_to_utf8_log(const std::wstring& w) {
+    if (w.empty())
+        return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 1)
+        return {};
+    std::string s(static_cast<size_t>(n - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+static std::string rs_config_ini_path() {
+    return rs_w_to_utf8_log(rs_config_ini_path_w());
+}
+
+static bool rs_write_bytes_atomic_w(const std::wstring& path, const void* data, DWORD size) {
+    if (path.empty() || !data)
+        return false;
+    const std::wstring tmp = path + L".tmp";
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+    DWORD written = 0;
+    BOOL ok = WriteFile(h, data, size, &written, nullptr);
+    if (ok)
+        ok = FlushFileBuffers(h);
+    CloseHandle(h);
+    if (!ok || written != size) {
+        DeleteFileW(tmp.c_str());
+        return false;
+    }
+    if (MoveFileExW(tmp.c_str(), path.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        return true;
+    if (ReplaceFileW(path.c_str(), tmp.c_str(), nullptr, REPLACEFILE_IGNORE_MERGE_ERRORS,
+                     nullptr, nullptr))
+        return true;
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES &&
+        MoveFileW(tmp.c_str(), path.c_str()))
+        return true;
+    DeleteFileW(tmp.c_str());
+    return false;
+}
+
+static bool rs_read_file_bytes_w(const std::wstring& path, std::string& out) {
+    out.clear();
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+    LARGE_INTEGER li{};
+    if (!GetFileSizeEx(h, &li) || li.QuadPart < 0 || li.QuadPart > 8 * 1024 * 1024) {
+        CloseHandle(h);
+        return false;
+    }
+    const DWORD size = static_cast<DWORD>(li.QuadPart);
+    out.resize(size);
+    DWORD got = 0;
+    const BOOL ok = size == 0 || ReadFile(h, out.data(), size, &got, nullptr);
+    CloseHandle(h);
+    if (!ok || got != size) {
+        out.clear();
+        return false;
+    }
+    return true;
+}
+
+static int rs_parse_so_screen_tier(const std::string& text) {
+    // Scan for soScreenResolution=<int> outside comments. Accept first valid hit.
+    const char* key = "soScreenResolution";
+    const size_t keyLen = 17;
+    for (size_t i = 0; i + keyLen < text.size(); ++i) {
+        if (_strnicmp(text.c_str() + i, key, keyLen) != 0)
+            continue;
+        // Line must not start with ';' (comment). Walk back to BOL.
+        size_t bol = i;
+        while (bol > 0 && text[bol - 1] != '\n' && text[bol - 1] != '\r')
+            --bol;
+        size_t p = bol;
+        while (p < i && (text[p] == ' ' || text[p] == '\t'))
+            ++p;
+        if (p < i && text[p] == ';')
+            continue;
+        size_t eq = i + keyLen;
+        while (eq < text.size() && (text[eq] == ' ' || text[eq] == '\t'))
+            ++eq;
+        if (eq >= text.size() || text[eq] != '=')
+            continue;
+        ++eq;
+        while (eq < text.size() && (text[eq] == ' ' || text[eq] == '\t'))
+            ++eq;
+        if (eq >= text.size() || text[eq] < '0' || text[eq] > '9')
+            continue;
+        int v = 0;
+        while (eq < text.size() && text[eq] >= '0' && text[eq] <= '9') {
+            v = v * 10 + (text[eq] - '0');
+            ++eq;
+            if (v > RS_TIER_MAX)
+                break;
+        }
+        if (v >= 0 && v <= RS_TIER_MAX)
+            return v;
+    }
+    return -1;
+}
+
+static int rs_read_tier_sidecar() {
+    std::string body;
+    if (!rs_read_file_bytes_w(rs_tier_sidecar_path_w(), body) || body.empty())
+        return -1;
+    size_t i = 0;
+    while (i < body.size() && (body[i] == ' ' || body[i] == '\t' || body[i] == '\r' || body[i] == '\n'))
+        ++i;
+    if (i >= body.size() || body[i] < '0' || body[i] > '9')
+        return -1;
+    int v = 0;
+    while (i < body.size() && body[i] >= '0' && body[i] <= '9') {
+        v = v * 10 + (body[i] - '0');
+        ++i;
+        if (v > RS_TIER_MAX)
+            return -1;
+    }
+    return (v >= 0 && v <= RS_TIER_MAX) ? v : -1;
+}
+
+static bool rs_write_tier_sidecar(int tier) {
+    char line[32];
+    sprintf_s(line, "%d\r\n", tier);
+    return rs_write_bytes_atomic_w(rs_tier_sidecar_path_w(), line,
+                                  static_cast<DWORD>(strlen(line)));
+}
+
+static bool rs_upsert_so_screen_in_ini_text(std::string& text, int tier) {
+    char replacement[64];
+    sprintf_s(replacement, "soScreenResolution=%d", tier);
+    const char* key = "soScreenResolution";
+    const size_t keyLen = 17;
+
+    for (size_t i = 0; i + keyLen < text.size(); ++i) {
+        if (_strnicmp(text.c_str() + i, key, keyLen) != 0)
+            continue;
+        size_t bol = i;
+        while (bol > 0 && text[bol - 1] != '\n' && text[bol - 1] != '\r')
+            --bol;
+        size_t p = bol;
+        while (p < i && (text[p] == ' ' || text[p] == '\t'))
+            ++p;
+        if (p < i && text[p] == ';')
+            continue;
+        size_t eol = i;
+        while (eol < text.size() && text[eol] != '\n' && text[eol] != '\r')
+            ++eol;
+        text.replace(bol, eol - bol, replacement);
+        return true;
+    }
+
+    // Insert after [general] header (case-insensitive).
+    const char* sec = "[general]";
+    for (size_t i = 0; i + 9 <= text.size(); ++i) {
+        if (_strnicmp(text.c_str() + i, sec, 9) != 0)
+            continue;
+        size_t bol = i;
+        while (bol > 0 && text[bol - 1] != '\n' && text[bol - 1] != '\r')
+            --bol;
+        size_t p = bol;
+        while (p < i && (text[p] == ' ' || text[p] == '\t'))
+            ++p;
+        if (p != i)
+            continue;
+        size_t after = i + 9;
+        if (after < text.size() && text[after] == '\r')
+            ++after;
+        if (after < text.size() && text[after] == '\n')
+            ++after;
+        std::string insert = std::string(replacement) + "\r\n";
+        text.insert(after, insert);
+        return true;
+    }
+
+    // No [general] — prepend a minimal section.
+    text = std::string("[general]\r\n") + replacement + "\r\n" + text;
+    return true;
+}
+
+static int rs_read_tier_from_ini_file() {
+    const std::wstring iniW = rs_config_ini_path_w();
+    // Prefer Win32 profile API (handles ACP/path quirks); fall back to raw scan.
+    const int profileTier = GetPrivateProfileIntW(L"general", L"soScreenResolution", -1, iniW.c_str());
+    if (profileTier >= 0 && profileTier <= RS_TIER_MAX)
+        return profileTier;
+    std::string text;
+    if (!rs_read_file_bytes_w(iniW, text))
+        return -1;
+    return rs_parse_so_screen_tier(text);
 }
 
 static void rs_persist_tier_to_ini(int tier) {
-    char buf[16];
-    sprintf_s(buf, "%d", tier);
-    const std::string ini = rs_config_ini_path();
-    if (WritePrivateProfileStringA("general", "soScreenResolution", buf, ini.c_str())) {
-        std::cout << "[RS] wrote soScreenResolution=" << tier << " to " << ini << std::endl;
+    if (tier < 0 || tier > RS_TIER_MAX)
+        return;
+
+    const std::wstring iniW = rs_config_ini_path_w();
+    const std::string iniLog = rs_w_to_utf8_log(iniW);
+    bool iniOk = false;
+    std::string text;
+    if (!rs_read_file_bytes_w(iniW, text)) {
+        // Fresh file if missing.
+        char seed[64];
+        sprintf_s(seed, "[general]\r\nsoScreenResolution=%d\r\n", tier);
+        iniOk = rs_write_bytes_atomic_w(iniW, seed, static_cast<DWORD>(strlen(seed)));
     } else {
-        std::cout << "[RS] failed writing soScreenResolution to " << ini
-                  << " err=" << GetLastError() << std::endl;
+        rs_upsert_so_screen_in_ini_text(text, tier);
+        iniOk = rs_write_bytes_atomic_w(iniW, text.data(), static_cast<DWORD>(text.size()));
     }
+
+    // Sidecar is the crash-durable source of truth if ini rewrite fails mid-flight.
+    const bool sideOk = rs_write_tier_sidecar(tier);
+
+    // Also poke the Win32 profile cache so any in-process GetPrivateProfile* sees it,
+    // then force a flush (NULL,NULL,NULL). Not relied on for crash survival.
+    {
+        wchar_t wbuf[16];
+        _snwprintf_s(wbuf, _TRUNCATE, L"%d", tier);
+        WritePrivateProfileStringW(L"general", L"soScreenResolution", wbuf, iniW.c_str());
+        WritePrivateProfileStringW(nullptr, nullptr, nullptr, iniW.c_str());
+    }
+
+    char log[320];
+    sprintf_s(log, "[RS] persist soScreenResolution=%d iniOk=%d sideOk=%d path=%s",
+              tier, iniOk ? 1 : 0, sideOk ? 1 : 0, iniLog.c_str());
+    RsLogFlush(log);
+    std::cout << log << std::endl;
+
+    // Verify durable readback; heal whichever side is still wrong.
+    const int iniTier = rs_read_tier_from_ini_file();
+    const int sideTier = rs_read_tier_sidecar();
+    if (iniTier != tier) {
+        std::string heal;
+        if (!rs_read_file_bytes_w(iniW, heal)) {
+            char seed[64];
+            sprintf_s(seed, "[general]\r\nsoScreenResolution=%d\r\n", tier);
+            rs_write_bytes_atomic_w(iniW, seed, static_cast<DWORD>(strlen(seed)));
+        } else {
+            rs_upsert_so_screen_in_ini_text(heal, tier);
+            rs_write_bytes_atomic_w(iniW, heal.data(), static_cast<DWORD>(heal.size()));
+        }
+    }
+    if (sideTier != tier)
+        rs_write_tier_sidecar(tier);
+    const int ini2 = rs_read_tier_from_ini_file();
+    const int side2 = rs_read_tier_sidecar();
+    if (ini2 != tier && side2 != tier) {
+        sprintf_s(log, "[RS] persist VERIFY FAIL want=%d ini=%d side=%d", tier, ini2, side2);
+        RsLogFlush(log);
+    } else if (ini2 != tier || side2 != tier) {
+        sprintf_s(log, "[RS] persist partial ok want=%d ini=%d side=%d", tier, ini2, side2);
+        RsLogFlush(log);
+    }
+}
+
+bool rs_sync_tier_from_ini() {
+    int iniTier = rs_read_tier_from_ini_file();
+    int sideTier = rs_read_tier_sidecar();
+    // Prefer ini when valid; else sidecar (crash may have left only sidecar).
+    int resolved = (iniTier >= 0 && iniTier <= RS_TIER_MAX) ? iniTier : sideTier;
+    if (resolved < 0 || resolved > RS_TIER_MAX) {
+        // Last-resort: Win32 profile API (same absolute path).
+        resolved = GetPrivateProfileIntW(L"general", L"soScreenResolution", -1,
+                                         rs_config_ini_path_w().c_str());
+    }
+
+    const std::string iniLog = rs_config_ini_path();
+    if (resolved >= 0 && resolved <= RS_TIER_MAX) {
+        rs_tier = resolved;
+        rs_field_follow_login = false;
+        // Heal only the missing/stale store (avoid rewriting config.ini on every enter).
+        if (iniTier != resolved) {
+            std::wstring iniW = rs_config_ini_path_w();
+            std::string heal;
+            if (!rs_read_file_bytes_w(iniW, heal)) {
+                char seed[64];
+                sprintf_s(seed, "[general]\r\nsoScreenResolution=%d\r\n", resolved);
+                rs_write_bytes_atomic_w(iniW, seed, static_cast<DWORD>(strlen(seed)));
+            } else {
+                rs_upsert_so_screen_in_ini_text(heal, resolved);
+                rs_write_bytes_atomic_w(iniW, heal.data(), static_cast<DWORD>(heal.size()));
+            }
+        }
+        if (sideTier != resolved)
+            rs_write_tier_sidecar(resolved);
+        char buf[256];
+        sprintf_s(buf,
+                  "[RS] sync tier=%d follow_login=0 ini=%d side=%d path=%s",
+                  rs_tier, iniTier, sideTier, iniLog.c_str());
+        RsLogFlush(buf);
+        return true;
+    }
+    char buf[256];
+    sprintf_s(buf,
+              "[RS] sync tier: no soScreenResolution (ini=%d side=%d keep follow_login=%d tier=%d) path=%s",
+              iniTier, sideTier, rs_field_follow_login ? 1 : 0, rs_tier, iniLog.c_str());
+    RsLogFlush(buf);
+    return !rs_field_follow_login;
 }
 
 // WindowedMode: D3D backbuffer can change while HWND client area stays old size.
@@ -800,6 +1206,20 @@ static void RsInstallCursorDlgPatches() {
     rs_cursorDlgPatchesInstalled = true;
 }
 
+static void RsApplyToolTipRelMoveDimPatches() {
+    Patch1(0x008EBC3C, 0xA1);
+    Patch4(0x008EBC3C + 1, reinterpret_cast<uintptr_t>(&rs_width));
+    Patch1(0x008EBC58, 0xA1);
+    Patch4(0x008EBC58 + 1, reinterpret_cast<uintptr_t>(&rs_height));
+}
+
+static void rs_callUpdateResolution() {
+    Client::UpdateResolution();
+    if (rs_layoutHooksInstalled) {
+        RsApplyToolTipRelMoveDimPatches();
+    }
+}
+
 // ===== Resolution switch helper (arbitrary size) =====
 // loginUi=true  → leave Origin, UpdateResolution center (char-select / login only).
 // loginUi=false → keep Origin field layout even when dims == login size.
@@ -828,7 +1248,7 @@ static void rs_afterSuccessfulSwitch(int nw, int nh, bool grChanged, bool loginU
         rs_originActive = false;
         rs_adjust_cy = 0; // UpdateResolution login uses plain -H/2 (no letterbox adj)
         RsLogFlush("[RS] login UI — UpdateResolution layout (Origin inactive)");
-        Client::UpdateResolution();
+        rs_callUpdateResolution();
         rs_syncClientDims(nw, nh);
         // Re-assert CursorDlg call sites after UpdateResolution nearby immediates.
         if (rs_cursorDlgPatchesInstalled) {
@@ -855,20 +1275,28 @@ static void rs_afterSuccessfulSwitch(int nw, int nh, bool grChanged, bool loginU
         // rematch origins/metrics. Destroying StatusBar + ReloadBack while SysOpt was still
         // open / D3D DEVICENOTRESET pending caused 2nd-switch black-screen hang.
         //
-        // follow-login (login dims == field dims) OR Gr2D did not actually resize:
-        // installing Origin on UpdateResolution dims misplaces HUD (minimap/stat/hotkey).
-        // Especially true with DX9 Gr2D proxy (grChanged=0). Keep UpdateResolution layout.
-        if (rs_field_follow_login || !grChanged) {
+        // follow-login only when live field dims still equal login dims → UpdateResolution
+        // (no Origin). Explicit SysOpt tier picks clear follow_login before switch; still
+        // gate on dims here so a stale follow_login flag cannot skip Origin after HD
+        // ScreenResolution (first-switch UI stuck / unclickable hitboxes).
+        // Do NOT treat !grChanged as skip-Origin: soft-fail / SysOpt same-size heal used to
+        // leave Origin off forever on HD (info bar / hotkeys / minimap misplaced).
+        if (rs_field_follow_login && nw == rs_login_w && nh == rs_login_h) {
             rs_originActive = false;
             rs_adjust_cy = 0;
-            RsLogFlush("[RS] follow/no-grChange field — skip Origin (UpdateResolution layout)");
-            Client::UpdateResolution();
+            RsLogFlush("[RS] follow-login field — skip Origin (UpdateResolution layout)");
+            rs_callUpdateResolution();
             rs_syncClientDims(nw, nh);
             if (rs_cursorDlgPatchesInstalled) {
                 RsInstallCursorDlgPatches();
             }
             rs_refreshWorldMapCenter();
         } else {
+            if (rs_field_follow_login) {
+                // HD (or any non-login) size while flag still set — leave follow-login.
+                rs_field_follow_login = false;
+                RsLogFlush("[RS] clear stale follow_login (field dims != login) — apply Origin");
+            }
             rs_originActive = true;
             if (!rs_layoutHooksInstalled) {
                 RsLogFlush("[RS] first field Origin install");
@@ -928,9 +1356,10 @@ static void rs_switchToSize(int nw, int nh, bool loginUi = false) {
     if (!sameSize) {
         hr = gr->ScreenResolution(nw, nh);
         char buf[192];
-        sprintf_s(buf, "[RS] ScreenResolution(%dx%d)=0x%08X prev=%dx%d now=%dx%d init=%d",
+        sprintf_s(buf, "[RS] ScreenResolution(%dx%d)=0x%08X prev=%dx%d now=%dx%d pp=%dx%d",
                   nw, nh, (unsigned)hr, prevW, prevH,
-                  gr->m_screenMode.nWidth, gr->m_screenMode.nHeight, gr->m_bInitialized);
+                  gr->m_screenMode.nWidth, gr->m_screenMode.nHeight,
+                  gr->m_screenMode.nBackBufferWidth, gr->m_screenMode.nBackBufferHeight);
         RsLogFlush(buf);
         if (FAILED(hr)) {
             RsLogFlush("[RS] ScreenResolution FAILED — leave layout alone");
@@ -953,18 +1382,52 @@ static void rs_switchToTier(int tier) {
     char buf[96];
     sprintf_s(buf, "[RS] switchToTier %d -> %dx%d (field Origin)", tier, nw, nh);
     RsLogFlush(buf);
+    // Explicit tier pick leaves follow-login BEFORE layout apply. Clearing only after
+    // rs_switchToSize left the first HD SysOpt switch on UpdateResolution (Origin off)
+    // while D3D already changed — UI stuck / clicks miss until a second switch.
+    rs_field_follow_login = false;
     rs_switchToSize(nw, nh, false);
+    // Persist only after live dims match — failed ScreenResolution must not rewrite ini.
+    if (rs_width == nw && rs_height == nh) {
+        rs_tier = tier;
+        if (CConfig::IsInstantiated())
+            CConfig::GetInstance()->SetOpt_Int(CConfig::GLOBAL_OPT, "soScreenResolution", rs_tier);
+        rs_persist_tier_to_ini(rs_tier);
+    } else {
+        char fail[160];
+        sprintf_s(fail, "[RS] switchToTier %d aborted — live remains %dx%d (saved tier=%d)",
+                  tier, rs_width, rs_height, rs_tier);
+        RsLogFlush(fail);
+    }
 }
 
 static void rs_restoreLoginResolution() {
-    char buf[160];
-    sprintf_s(buf, "[RS] restore login %dx%d (was %dx%d originActive=%d)",
-              rs_login_w, rs_login_h, rs_width, rs_height, rs_originActive ? 1 : 0);
+    // Display-only restore. Flush any SysOpt deferred tier so next field enter
+    // uses the chosen soScreenResolution (logout mid-dialog used to drop it).
+    if (rs_deferredTier >= 0) {
+        const int t = rs_deferredTier;
+        rs_deferredTier = -1;
+        rs_tier = t;
+        rs_field_follow_login = false;
+        if (CConfig::IsInstantiated())
+            CConfig::GetInstance()->SetOpt_Int(CConfig::GLOBAL_OPT, "soScreenResolution", rs_tier);
+        rs_persist_tier_to_ini(rs_tier);
+        char deferBuf[96];
+        sprintf_s(deferBuf, "[RS] restore login — flushed deferred tier %d to config", t);
+        RsLogFlush(deferBuf);
+    }
+    char buf[192];
+    sprintf_s(buf, "[RS] restore login %dx%d (was %dx%d originActive=%d keep field tier=%d)",
+              rs_login_w, rs_login_h, rs_width, rs_height, rs_originActive ? 1 : 0, rs_tier);
     RsLogFlush(buf);
     rs_switchToSize(rs_login_w, rs_login_h, true);
 }
 
 void rs_on_enter_field() {
+    // LazyCompat calls this BEFORE rs_attach / LoadGlobal_hook. Re-sync from the
+    // DLL-dir ini so a CWD-relative boot miss cannot force follow-login forever.
+    rs_sync_tier_from_ini();
+
     // First field enter: set_stage already running when CField ctor fires ModRegistry,
     // so the set_stage hook misses this transition — apply here instead.
     if (rs_field_follow_login) {
@@ -1099,17 +1562,20 @@ void CConfig::LoadCharacter_hook(int nWorldID, unsigned int dwCharacterId) {
 
 void CConfig::LoadGlobal_hook() {
     CConfig::LoadGlobal(this);
-    // Only adopt Global.opt when user has an explicit field tier (not follow-login).
+    // config.ini soScreenResolution is the field-tier source of truth. A stale or
+    // missing Global.opt default (often 0 = 800x600) must not clobber it on relogin.
+    rs_sync_tier_from_ini();
     if (!rs_field_follow_login) {
-        rs_tier = GetOpt_Int(GLOBAL_OPT, "soScreenResolution", rs_tier, 0, RS_TIER_MAX);
+        SetOpt_Int(GLOBAL_OPT, "soScreenResolution", rs_tier);
     }
 }
 
 void CConfig::SaveGlobal_hook() {
-    CConfig::SaveGlobal(this);
     if (!rs_field_follow_login) {
         SetOpt_Int(GLOBAL_OPT, "soScreenResolution", rs_tier);
+        rs_persist_tier_to_ini(rs_tier);
     }
+    CConfig::SaveGlobal(this);
 }
 
 // ===== CUISysOpt: resolution combo =====
@@ -1147,12 +1613,21 @@ void CUISysOpt::OnCreate_hook(void* pData) {
         "2560 x 1440",
     };
     for (int i = 0; i < RS_TIER_COUNT; i++) rs_cb->AddItem(items[i], (unsigned int)i);
-    if (rs_tier < 0 || rs_tier > RS_TIER_MAX) rs_tier = 0;
-    rs_cb->SetSelect(rs_tier);
-    rs_cb_last_select = rs_tier;
-    char buf[128];
-    sprintf_s(buf, "[RS] SysOpt combo created select=%d follow_login=%d",
-              rs_tier, rs_field_follow_login ? 1 : 0);
+    // Show what is actually on screen. Stale rs_tier=0 (Global.opt default) used to
+    // report "800 x 600" while login width×height was already 1280×720.
+    int showTier = rs_tier_from_dims(rs_width, rs_height);
+    if (!rs_field_follow_login && rs_tier >= 0 && rs_tier <= RS_TIER_MAX) {
+        int tw = 800, th = 600;
+        rs_tier_dims(rs_tier, tw, th);
+        if (rs_width == tw && rs_height == th)
+            showTier = rs_tier;
+    }
+    if (showTier < 0 || showTier > RS_TIER_MAX) showTier = 0;
+    rs_cb->SetSelect(showTier);
+    rs_cb_last_select = showTier;
+    char buf[160];
+    sprintf_s(buf, "[RS] SysOpt combo created select=%d (rs_tier=%d) follow_login=%d live=%dx%d",
+              showTier, rs_tier, rs_field_follow_login ? 1 : 0, rs_width, rs_height);
     RsLogFlush(buf);
 }
 
@@ -1194,6 +1669,23 @@ static void rs_flushPendingFieldRefresh() {
 }
 
 void CWvsApp::CallUpdate_hook(int tCurTime) {
+    // Weather frame drivers (ported from MXD_dev). Without these, Web/GM sky changes
+    // still update CMapLoadable::Update tint/FX targets, but splash/puddle/accum/sway
+    // never run and Weather_Tick never releases field state on logout — which reads as
+    // "天气切换没有反应" on outdoor maps like Lith Harbor.
+    Weather_Tick();
+    if (Weather_IsFieldActive()) {
+        if (Weather_HasFallingSky()) {
+            WeatherSplash_Frame();
+            WeatherPuddle_Frame();
+            WeatherAccum_Frame();
+            WeatherMove_Frame();
+        } else {
+            WeatherMove_Restore();
+        }
+        WeatherSway_Frame();
+    }
+
     CWvsApp::CallUpdate(this, tCurTime);
     rs_flushPendingFieldRefresh();
 }
@@ -1219,20 +1711,33 @@ void CConfig::ApplySysOpt_hook(void* pSysOpt, int bApplyVideo) {
         RsLogFlush(buf);
         return;
     }
-    if (sel == rs_tier && !rs_field_follow_login) {
-        char buf[80];
-        sprintf_s(buf, "[RS] ApplySysOpt no-op (tier already %d)", sel);
+    int wantW = 800, wantH = 600;
+    rs_tier_dims(sel, wantW, wantH);
+    // Prefer re-apply when live dims still mismatch (prior ScreenResolution soft/hard fail).
+    // Also require Origin live — a prior follow_login race could leave HD dims with
+    // Origin inactive; no-op would permanently skip the heal (second-switch "works").
+    if (sel == rs_tier && !rs_field_follow_login && rs_originActive
+        && rs_width == wantW && rs_height == wantH) {
+        rs_persist_tier_to_ini(sel);
+        char buf[96];
+        sprintf_s(buf, "[RS] ApplySysOpt no-op (tier %d already live %dx%d)", sel, rs_width, rs_height);
         RsLogFlush(buf);
         return;
     }
+    // Persist IMMEDIATELY on OK — before deferred D3D switch / SysOpt dtor. Crash between
+    // ApplySysOpt and switchToTier used to lose WritePrivateProfile cache and reboot at
+    // login size. Intent is recorded first; switchToTier persists again after success.
     rs_tier = sel;
-    rs_field_follow_login = false; // user explicitly chose a field tier
-    SetOpt_Int(GLOBAL_OPT, "soScreenResolution", rs_tier);
-    rs_persist_tier_to_ini(rs_tier);
+    rs_field_follow_login = false;
+    if (CConfig::IsInstantiated())
+        CConfig::GetInstance()->SetOpt_Int(CConfig::GLOBAL_OPT, "soScreenResolution", sel);
+    rs_persist_tier_to_ini(sel);
     rs_deferredTier = sel;
     {
-        char buf[96];
-        sprintf_s(buf, "[RS] ApplySysOpt queue tier %d (apply on SysOpt close)", sel);
+        char buf[160];
+        sprintf_s(buf,
+                  "[RS] ApplySysOpt queue tier %d (%dx%d, live=%dx%d) persisted+deferred",
+                  sel, wantW, wantH, rs_width, rs_height);
         RsLogFlush(buf);
     }
 }
@@ -1997,13 +2502,18 @@ void __fastcall rs_OnMoveWnd_hook(CWnd* pThis, void* /*edx*/, int l, int t) {
         RsMoveWndToAbsPos(pThis, rs_width - nWidth, nTop);
     if (nHeight > 0 && abs(nTop + nHeight - rs_height) <= 10)
         RsMoveWndToAbsPos(pThis, nLeft, rs_height - nHeight);
-    if (abs(pThis->m_ptCursorRel.x - ptRel.x) > 15)
-        RsMoveWndToAbsPos(pThis, pt.x - pThis->m_ptCursorRel.x, nTop);
-    if (abs(pThis->m_ptCursorRel.y - ptRel.y) > 15)
-        RsMoveWndToAbsPos(pThis, nLeft, pt.y - pThis->m_ptCursorRel.y);
+    // Refresh after snap — next cursor correction must use live abs.
     nLeft = RsWndAbsLeft(pThis);
     nTop = RsWndAbsTop(pThis);
-    rs_OrigOnMoveWnd(pThis, nLeft, nTop);
+    if (abs(pThis->m_ptCursorRel.x - ptRel.x) > 15)
+        RsMoveWndToAbsPos(pThis, pt.x - pThis->m_ptCursorRel.x, nTop);
+    nLeft = RsWndAbsLeft(pThis);
+    nTop = RsWndAbsTop(pThis);
+    if (abs(pThis->m_ptCursorRel.y - ptRel.y) > 15)
+        RsMoveWndToAbsPos(pThis, nLeft, pt.y - pThis->m_ptCursorRel.y);
+    // Do NOT call vanilla OnMoveWnd: it hardcodes snap to 800×600 and RelMove
+    // assuming LT org — with CC/HD origins that makes windows "run away".
+    // kaentake CWnd__OnMoveWnd_hook likewise never calls the original.
 }
 
 // CUIMenu vtable (sub_999320: *this = &off_B3DD98). CreateDlg→CreateWnd ret @0x4EDAB3.
@@ -2187,9 +2697,37 @@ void __fastcall rs_CreateWnd_hook(CWnd* pThis, void* edx, int l, int t, int w, i
             RsLogFlush(buf);
             return;
         }
-        // Other CreateDlg / centered dialogs → CC (CUIMenu already returned above).
-        pThis->m_pLayer->origin = static_cast<IUnknown*>(rs_orgEx[4]); // CC: dialogs
-        return;
+        // CreateDlg (shop / Notice / YesNo / etc.):
+        // Vanilla + kaentake put these on CC so RelMove uses 800×600 island coords.
+        // BeiDou also saves GetUIWndPos as HD screen-abs — pairing that with CC
+        // shifts UI by +(W-800)/2 and makes drag/Notice look off-center.
+        // Fix: always LT + screen-abs. 800-space seeds (fit in 800×600) are
+        // lifted into the centered island; already-HD seeds pass through.
+        {
+            int nl = l;
+            int nt = t;
+            if (rs_width > 800 || rs_height > 600) {
+                const bool looks800 =
+                    l >= -5 && l < 800 && t >= -5 && t < 600;
+                if (looks800) {
+                    nl = l + (rs_width - 800) / 2;
+                    nt = t + (rs_height - 600) / 2;
+                }
+            }
+            if (nl + w > rs_width) nl = rs_width - w;
+            if (nt + h > rs_height) nt = rs_height - h;
+            if (nl < 0) nl = 0;
+            if (nt < 0) nt = 0;
+            const bool ok = RsForceLtAbs(pThis, nl, nt);
+            char buf[256];
+            sprintf_s(buf,
+                "[RS] CreateDlg LT place=%d,%d seed=%d,%d size=%dx%d abs=%d,%d "
+                "force=%d screen=%dx%d (no CC skew)",
+                nl, nt, l, t, w, h, RsWndAbsLeft(pThis), RsWndAbsTop(pThis),
+                ok ? 1 : 0, rs_width, rs_height);
+            RsLogFlush(buf);
+            return;
+        }
     // Kaentake: CFadeWnd::CreateFadeWnd + CUIStatusBar → ms_pOrgStatusBar.
     // Covers GameMenu(界面)/ShortCut(目录) and other FadeWnd popups.
     // Do NOT add (H-600) to RelMove — org already embeds it.
@@ -2302,10 +2840,7 @@ static void rs_installLayoutHooks() {
     ATTACH_HOOK(RsInput::SetCursorVectorPos, RsInput::SetCursorVectorPos_hook);
     ATTACH_HOOK(RsInput::SetCursorPos, RsInput::SetCursorPos_hook);
     ATTACH_HOOK(CUIToolTip::MakeLayer, CUIToolTip::MakeLayer_hook);
-    Patch1(0x008EBC3C, 0xA1);
-    Patch4(0x008EBC3C + 1, reinterpret_cast<uintptr_t>(&rs_width));
-    Patch1(0x008EBC58, 0xA1);
-    Patch4(0x008EBC58 + 1, reinterpret_cast<uintptr_t>(&rs_height));
+    RsApplyToolTipRelMoveDimPatches();
 
     ATTACH_HOOK(CTemporaryStatView::AdjustPosition, CTemporaryStatView::AdjustPosition_hook);
     ATTACH_HOOK(CTemporaryStatView::ShowToolTip, CTemporaryStatView::ShowToolTip_hook);
@@ -2343,7 +2878,11 @@ void rs_attach() {
     if (rs_done) return;
     rs_done = true;
 
+    // Heal boot state if dllmain read a CWD-relative config without soScreenResolution.
+    rs_sync_tier_from_ini();
+
     // Backbuffer capacity only — do NOT widen StatusBar here (that broke login layout).
+    // Login dims are synced in dllmain via rs_set_login_dims + rs_width/height.
     Patch4(0x009F7078 + 1, RS_SCREEN_HEIGHT_MAX);
     Patch4(0x009F707D + 1, RS_SCREEN_WIDTH_MAX);
 
@@ -2363,8 +2902,9 @@ void rs_attach() {
     Patch4(0x007FDF30 + 2, 0x5B4);
 
     char boot[192];
-    sprintf_s(boot, "[RS] attached tier=%d (%dx%d) follow_login=%d (layout/Origin deferred until successful HD switch)",
-              rs_tier, rs_width, rs_height, rs_field_follow_login ? 1 : 0);
+    sprintf_s(boot, "[RS] attached tier=%d (%dx%d) follow_login=%d ini=%s",
+              rs_tier, rs_width, rs_height, rs_field_follow_login ? 1 : 0,
+              rs_config_ini_path().c_str());
     RsLogFlush(boot);
 }
 

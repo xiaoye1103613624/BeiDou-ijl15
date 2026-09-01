@@ -1687,6 +1687,10 @@ const DWORD itemSlotLimitExpandedFAddress = 0x00470912;
 const DWORD itemSlotLimitExpandedGAddress = 0x0081D346;
 const DWORD itemSlotLimitExpandedHAddress = 0x00470912;
 const DWORD itemSlotLimitExpandedIAddress = 0x0046C2DA;
+// IDA-verified BeiDou.exe: sub_4BA419 cash-shop coupon expand gate.
+// 0x4BA58C: 83 F9 60 7E 0C = cmp ecx,0x60 / jle (reject when curSlots+qty > 96).
+// Patch imm at +2 only (0x4BA58E): 0x60 -> 0xC0. Existing ExpandItem caves A–I unchanged.
+const DWORD itemSlotLimitExpandedJImmAddress = 0x004BA58E;
 const DWORD CUIItemCoinPosYAddress = 0x0081DD5F;
 const DWORD CUIItemBtCoinPosYAddress = 0x0081CD67;
 // BeiDou.exe verified (IDA): decode call at 0xA1EC22 = E8 CC 79 9E FF, movzx at +5 = 0F B6 C0.

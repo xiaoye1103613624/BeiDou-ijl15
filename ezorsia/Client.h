@@ -58,6 +58,8 @@ public:
 	static bool allowCashTrade;
 	/** 装备成长属性旁挂 tip；默认 true，仅悬停时懒创建，启动路径零 tip。 */
 	static bool enableGrowthCompanionTip;
+	/** 冒险家创建角色投骰子（封包末尾追加 STR/DEX/INT/LUK）；默认 true */
+	static bool enableNativeAdventurerDice;
 	static bool expandItem;
 	static bool expandItemUI;
 	static bool expandItemSlotLimits;

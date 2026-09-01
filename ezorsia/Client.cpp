@@ -35,7 +35,8 @@ bool Client::allowCashTrade = true; // 允许现金道具进入交易栏（客�
 bool Client::disablePacketHook = false;
 bool Client::disableBossHP = false;
 bool Client::disableWorldMap = false;
-bool Client::enableGrowthCompanionTip = false; // 成长旁挂 tip；config optional.enableGrowthCompanion（默认关，进图红规避）
+bool Client::enableGrowthCompanionTip = true; // growth companion tip; config optional.enableGrowthCompanion (hover-lazy)
+bool Client::enableNativeAdventurerDice = true; // config optional.enableNativeAdventurerDice
 bool Client::expandItem = false;
 bool Client::expandItemUI = false;
 bool Client::expandItemSlotLimits = false;
@@ -235,8 +236,12 @@ void Client::UpdateResolution() {
 	Memory::WriteInt(0x004D599D + 1, m_nGameWidth);	//mov eax,800 ; CreateWnd
 	Memory::WriteInt(0x0085F36C + 2, m_nGameWidth);	//cmp edx,800
 	Memory::WriteInt(0x0085F374 + 1, m_nGameWidth - 80);	//mov ecx,720 ; CreateDlg
-	Memory::WriteInt(0x008EBC58 + 1, m_nGameHeight);//mov eax,600
-	Memory::WriteInt(0x008EBC3C + 1, m_nGameWidth);	//mov eax,800 ; RelMove?
+	// CUIToolTip::RelMove bounds — RS Origin replaces these with mov eax,[rs_width/height].
+	// Writing imm32 width here after RS patches → A1 00 05 00 00 → AV @0x500 on tooltip RelMove.
+	if (*reinterpret_cast<const unsigned char*>(0x008EBC3C) != 0xA1) {
+		Memory::WriteInt(0x008EBC58 + 1, m_nGameHeight);//mov eax,600
+		Memory::WriteInt(0x008EBC3C + 1, m_nGameWidth);	//mov eax,800 ; RelMove?
+	}
 	Memory::WriteInt(0x009966B5 + 1, m_nGameHeight);//mov ecx,600
 	Memory::WriteInt(0x009966CA + 2, m_nGameWidth);	//cmp edi,800
 	Memory::WriteInt(0x009966D2 + 1, m_nGameWidth - 100);	//mov edx,700 ; CreateDlg
@@ -964,6 +969,10 @@ void Client::ExpandItemSlotLimits() {
 	Memory::CodeCave(itemSlotLimitExpandedG, itemSlotLimitExpandedGAddress, 5);
 	// F and H share 0x470912 in reference; patch once only.
 	Memory::CodeCave(itemSlotLimitExpandedI, itemSlotLimitExpandedIAddress, 6);
+	// IDA sub_4BA419 @ 0x4BA58C: cmp ecx, 0x60 (cash-shop coupon expand reject when cur+qty > 96).
+	// Sibling of F/I; ExpandItem previously missed this site. Immediate only — no existing hook moved.
+	// Expect bytes 83 F9 60 7E; write imm 0x60 -> 0xC0.
+	Memory::WriteByte(itemSlotLimitExpandedJImmAddress, 0xC0);
 }
 
 // Verified BeiDou.exe bytes at 0xA1EC22: E8 CC 79 9E FF | 0F B6 C0 | 3B C3 ...
@@ -990,18 +999,19 @@ void Client::MoreHook() {
 	}
 	Memory::WriteInt(0x0049064B + 2, talkTime);
 
-	if (setAtkOutCap > 999999)
-	{
-		Memory::WriteInt(0x008C485A + 1, 192); // 面板关闭按钮x
-		Memory::WriteInt(0x008C4AB3 + 1, 210); // 面板宽度
-		Memory::WriteInt(0x008C510A + 1, 218); // 详情面板宽度
-		Memory::WriteInt(0x008C4EA2 + 1, 210); // 详情面板初始x
-		Memory::WriteInt(0x008C5760 + 1, 210); // 详情面板切换x
-		Memory::WriteInt(0x008C7AD9 + 1, 185); // 加属性按钮x
-		Memory::WriteInt(0x008C2754 + 1, 195); // 详情面板关闭按钮x
-		Memory::WriteInt(0x008C6C72 + 1, 210); // 移动时详情面板x
-		Memory::CodeCave(apDetailBtn, 0x008C4E1B, 7); // 详情按钮
-	}
+	// 角色能力/能力详情：始终对齐 live UIWindow.img Stat 画布（不再仅 high-cap 路径）。
+	// orange-wz 实测：Stat/backgrnd=213x347，Stat/backgrnd2=218x203。
+	// 原 CreateWnd 宽 176 / 详情宽 177 / 详情 x 170，会裁切加宽后的 WZ。
+	// IDA 已核对仅改 immediate / 既有 apDetailBtn cave；未改 hook 地址。
+	Memory::WriteInt(0x008C485A + 1, 192); // 面板关闭按钮x（原 156）
+	Memory::WriteInt(0x008C4AB3 + 1, 213); // 左侧 CreateWnd 宽（原 176 → backgrnd 213）
+	Memory::WriteInt(0x008C510A + 1, 218); // 详情面板宽（原 177 → backgrnd2 218）
+	Memory::WriteInt(0x008C4EA2 + 1, 213); // 详情面板初始x（原 170）
+	Memory::WriteInt(0x008C5760 + 1, 213); // 详情面板切换x（原 170）
+	Memory::WriteInt(0x008C7AD9 + 1, 185); // 加属性按钮x（原 153）
+	Memory::WriteInt(0x008C2754 + 1, 195); // 详情面板关闭按钮x（原 155）
+	Memory::WriteInt(0x008C6C72 + 1, 213); // 移动时详情面板x（原 170）
+	Memory::CodeCave(apDetailBtn, 0x008C4E1B, 7); // 详情按钮 x 124→153
 	// 喇叭
 	Memory::WriteInt(0x0045A5BE + 1, 9999);
 
