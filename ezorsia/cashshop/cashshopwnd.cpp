@@ -49,6 +49,7 @@
 
 #include "wvs/iteminfo.h"
 #include "wvs/packet_legacy.h"
+#include "wvs/tooltip.h"
 #include "wvs/util.h"
 #include "wvs/wnd.h"
 #include "wvs/wndman.h"
@@ -62,6 +63,8 @@ static void LogMessage(const char*, ...) {}
 #endif
 
 #include <windows.h>
+#include <imm.h>
+#pragma comment(lib, "imm32.lib")
 #include <atomic>
 #include <cstdio>
 #include <cwchar>
@@ -93,13 +96,13 @@ constexpr unsigned char kResp_Index   = 5;   // + count, count * (tab, cat, int 
 // grows a new code degrades to "Purchase failed." on an un-updated DLL rather than
 // reading past the end.
 const char* const kBuyMsg[] = {
-    "Purchased.",
-    "Not enough NX.",
-    "Unknown item.",
-    "Your inventory is full.",
-    "That item is not on sale.",
-    "Another purchase is already in progress.",
-    "That cart is not valid.",
+    "\xB9\xBA\xC2\xF2\xB3\xC9\xB9\xA6\xA1\xA3",                 // 购买成功。
+    "\xB5\xE3\xC8\xAF\xB2\xBB\xD7\xE3\xA1\xA3",                 // 点券不足。
+    "\xCE\xB4\xD6\xAA\xB5\xC0\xBE\xDF\xA1\xA3",                 // 未知道具。
+    "\xB1\xB3\xB0\xFC\xD2\xD1\xC2\xFA\xA1\xA3",                 // 背包已满。
+    "\xB8\xC3\xCE\xEF\xC6\xB7\xCE\xB4\xD4\xDA\xCA\xDB\xA1\xA3", // 该物品未在售。
+    "\xC1\xED\xD2\xBB\xB9\xBA\xC2\xF2\xBD\xF8\xD0\xD0\xD6\xD0\xA1\xA3", // 另一购买进行中。
+    "\xB9\xBA\xCE\xEF\xB3\xB5\xCE\xDE\xD0\xA7\xA1\xA3",         // 购物车无效。
 };
 
 // Sanity ceilings. A truncated or hostile packet must be rejected whole, the way
@@ -126,6 +129,13 @@ constexpr uintptr_t kAddr_CWvsContext             = 0x00BE7918;  // a sibling wi
 constexpr uintptr_t kAddr_CurrentStage            = 0x00BEDED4;  // a sibling window
 constexpr uintptr_t kAddr_InputSystem             = 0x00BEC33C;  // a sibling window
 constexpr uintptr_t kAddr_GetCursorPos            = 0x0059A388;  // a sibling window
+
+// Item tooltip — same addresses as storagebag / LazyCompat (PE-verified, shared).
+constexpr uintptr_t kAddr_TT_Ctor                 = 0x008E49B5;  // storagebag
+constexpr uintptr_t kAddr_TT_Dtor                 = 0x008E6BA3;  // storagebag
+constexpr uintptr_t kAddr_TT_Clear                = 0x008E6E23;  // storagebag
+constexpr uintptr_t kAddr_ShowItemToolTip         = 0x008F5B20;  // storagebag / ClientAddresses
+constexpr uintptr_t kAddr_GetItemSlot             = 0x005D5D95;  // userinfodetail
 
 // The avatar-preview quartet, all byte-verified.
 constexpr uintptr_t kAddr_ZRefCAvatar_Alloc = 0x00428967;
@@ -546,18 +556,23 @@ const CatDef kCats[] = {
     // Tab 1 ("Special": New / Event) is gone. It was never a home category -- v83 used it
     // as a promotional CROSS-LISTING, so everything in it also sits in its real category,
     // which made it a second copy of the shop rather than a section of it.
-    { 2, 0,  "Hat"        }, { 2, 1,  "Face"       }, { 2, 2,  "Eye"     },
-    { 2, 3,  "Overall"    }, { 2, 4,  "Top"        }, { 2, 5,  "Bottom"  },
-    { 2, 6,  "Shoes"      }, { 2, 7,  "Glove"      }, { 2, 8,  "Weapon"  },
-    { 2, 9,  "Ring"       }, { 2, 11, "Cape"       },
+    // Labels: GBK (ACP) for live Dotum draw — match zh-CN cash-shop UX.
+    { 2, 0,  "\xC3\xB1\xD7\xD3" }, { 2, 1,  "\xC1\xB3\xCA\xCE" }, { 2, 2,  "\xD1\xDB\xCA\xCE" }, // 帽子/脸饰/眼饰
+    { 2, 3,  "\xCC\xD7\xB7\xFE" }, { 2, 4,  "\xC9\xCF\xD2\xC2" }, { 2, 5,  "\xBF\xE3\xC8\xB9" }, // 套服/上衣/裤裙 (was BF F3 C8 A8=矿权)
+    { 2, 6,  "\xD0\xAC\xD7\xD3" }, { 2, 7,  "\xCA\xD6\xCC\xD7" }, { 2, 8,  "\xCE\xE4\xC6\xF7" }, // 鞋子/手套/武器
+    { 2, 9,  "\xBD\xE4\xD6\xB8" }, { 2, 11, "\xC5\xFB\xB7\xE7" }, // 戒指/披风
     // (2,10) "Premium" removed: zero rows in v83 AND zero in the modern catalogue -- it has
     // never had merchandise in either source.
-    { 3, 1,  "Messenger"  }, { 3, 2,  "Weather"    },   // (3,0) "Scroll" removed
-    { 5, 0,  "Beauty Parlor" }, { 5, 1, "Store"    }, { 5, 2,  "Game"    },
-    { 5, 3,  "Facial Expression" }, { 5, 4, "Wedding" }, { 5, 5, "Effect" },
-    { 5, 6,  "Character"  },
-    { 6, 0,  "Pet"        }, { 6, 1,  "Pet Equip." }, { 6, 2,  "Pet Use" },
-    { 7, 0,  "Package"    },
+    { 3, 1,  "\xB4\xAB\xCB\xCD" }, { 3, 2,  "\xC6\xF8\xCF\xF3" },   // 传送/气象 (3,0) Scroll removed
+    { 5, 0,  "\xC3\xC0\xC8\xDD" }, { 5, 1, "\xC9\xCC\xB5\xEA" }, { 5, 2,  "\xD3\xCE\xCF\xB7" }, // 美容/商店/游戏
+    { 5, 3,  "\xB1\xED\xC7\xE9" }, { 5, 4, "\xBB\xE9\xC0\xF1" }, { 5, 5, "\xD0\xA7\xB9\xFB" }, // 表情/婚礼/效果
+    { 5, 6,  "\xBD\xC7\xC9\xAB" }, // 角色
+    { 6, 0,  "\xB3\xE8\xCE\xEF" }, { 6, 1,  "\xB3\xE8\xD7\xB0" }, { 6, 2,  "\xB3\xE8\xD3\xC3" }, // 宠物/宠装/宠用
+    { 7, 0,  "\xC0\xF1\xB0\xFC" }, // 礼包
+    // Custom BeiDou tabs (DB legacy_tab 9/10). Names: 皮肤 / XY玩法
+    // GBK: 肤=B7F4 (was wrongly B7B4=反 →「皮反」); 玩=\xCD\xE6 法=\xB7\xA8
+    { 9, 0,  "\xC6\xA4\xB7\xF4" },
+    { 10, 0, "XY\xCD\xE6\xB7\xA8" },
     // Tab 8 ("Guide": How to Use / How to Gift) is deliberately absent. It sold nothing --
     // in v83 its only members are four 403xxxx manual items -- and a tab of instructions
     // has no place in a window that is already the instructions.
@@ -567,7 +582,9 @@ constexpr int kCatCount = static_cast<int>(_countof(kCats));
 // Tab ids in display order, with the labels the stock shop uses for each group.
 struct TabDef { int id; const char* name; };
 const TabDef kTabs[] = {
-    { 2, "Equip" }, { 3, "Use" }, { 5, "Setup" }, { 6, "Pet" }, { 7, "Package" },
+    { 2, "\xD7\xB0\xB1\xB8" }, { 3, "\xCF\xFB\xBA\xC4" }, { 5, "\xC9\xE8\xD6\xC3" }, // 装备/消耗/设置
+    { 6, "\xB3\xE8\xCE\xEF" }, { 7, "\xC0\xF1\xB0\xFC" }, // 宠物/礼包
+    { 9, "\xC6\xA4\xB7\xF4" }, { 10, "XY\xCD\xE6\xB7\xA8" }, // 皮肤 / XY玩法
 };
 constexpr int kTabCount = static_cast<int>(_countof(kTabs));
 
@@ -645,8 +662,9 @@ constexpr int kRedH     = 3;
 constexpr int kTabY     = kBandY + 1;          // inset from the top so it reads as sunk
 constexpr int kTabH     = kBandH - 1;
 constexpr int kTabX0    = 8;
-constexpr int kTabW     = 132;
-constexpr int kTabPitch = 134;
+// 7 tabs must fit 760px: was 132/134 for 5 tabs; shrink so 皮肤/XY玩法 fit.
+constexpr int kTabW     = 100;
+constexpr int kTabPitch = 102;
 
 // TIER 2: THE CATEGORY STRIP.
 //
@@ -1409,9 +1427,51 @@ int SehReadActionCode(void* pAvatar) {
 // nID is UNALIGNED (offset 4 + 5n), so it must be memcpy'd rather than dereferenced.
 constexpr uintptr_t kAddr_FuncKeyMappedMan = 0x00BED5A0;
 constexpr int kFuncKeyCount        = 89;      // 0x59, the stock loop bound at 0x0074ABE7
+constexpr int kFKType_Skill        = 1;
+constexpr int kFKType_Item         = 2;
+constexpr int kFKType_Emotion      = 3;
 constexpr int kFKType_BasicAction  = 5;
 constexpr int kFKAction_Attack     = 52;
 constexpr int kFKAction_Jump       = 53;
+
+// Minimal GW_ItemSlotBase for GetItemSlot → ShowItemToolTip (same shape as userinfodetail).
+struct GW_ItemSlotBase : public ZRefCounted {
+    virtual ~GW_ItemSlotBase() {}
+};
+
+using t_TT = void(__thiscall*)(void*);
+using t_ShowItemToolTip =
+    void(__thiscall*)(void*, int, int, void*, void*, void*, int, int, int);
+using t_GetItemSlot = void*(__thiscall*)(CItemInfo*, void*, int);
+
+auto TT_Ctor        = reinterpret_cast<t_TT>(kAddr_TT_Ctor);
+auto TT_Dtor        = reinterpret_cast<t_TT>(kAddr_TT_Dtor);
+auto TT_Clear       = reinterpret_cast<t_TT>(kAddr_TT_Clear);
+auto ShowItemToolTip = reinterpret_cast<t_ShowItemToolTip>(kAddr_ShowItemToolTip);
+auto CItemInfoGetItemSlot = reinterpret_cast<t_GetItemSlot>(kAddr_GetItemSlot);
+
+// SEH helpers must stay free of C++ objects with destructors (C2712).
+void SehTTClear(void* buf) {
+    __try { TT_Clear(buf); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+void SehTTDtor(void* buf) {
+    __try { TT_Dtor(buf); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+GW_ItemSlotBase* SehGetItemSlot(int itemId) {
+    unsigned char zrefBuf[8]{};
+    GW_ItemSlotBase* slot = nullptr;
+    __try {
+        CItemInfoGetItemSlot(CItemInfo::GetInstance(), zrefBuf, itemId);
+        slot = *reinterpret_cast<GW_ItemSlotBase**>(zrefBuf + 4);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { slot = nullptr; }
+    return slot;
+}
+bool SehShowItemToolTip(void* tipBuf, int sx, int sy, void* slot) {
+    __try {
+        ShowItemToolTip(tipBuf, sx, sy, slot, nullptr, nullptr, 0, 0, 0);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
 
 bool FuncKeyIsAction(int scan, int wantId) {
     if (scan == 0x36) scan = 0x2A;                       // right shift aliases left
@@ -1424,6 +1484,21 @@ bool FuncKeyIsAction(int scan, int wantId) {
         int id = 0;
         memcpy(&id, e + 1, sizeof(id));
         return id == wantId;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// Skill / consumable / emotion bindings must NOT reach ProcessBasicUIKey while the
+// playground holds focus — that path still tries to fire them on the field character
+// and crashes (preview attack/jump are handled above; skills are not).
+bool FuncKeyIsBlockedInPreview(int scan) {
+    if (scan == 0x36) scan = 0x2A;
+    if (scan < 0 || scan >= kFuncKeyCount) return false;
+    __try {
+        void* pMan = *reinterpret_cast<void**>(kAddr_FuncKeyMappedMan);
+        if (!pMan) return false;
+        const char* e = reinterpret_cast<const char*>(pMan) + 4 + scan * 5;
+        const int t = static_cast<unsigned char>(*e);
+        return t == kFKType_Skill || t == kFKType_Item || t == kFKType_Emotion;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
@@ -1547,6 +1622,12 @@ public:
     IWzCanvasPtr m_pSubTab[2];
     int m_nPrevBg;                      // which one is showing
 
+    // Hover item tip (CUIToolTip buffer — same pattern as storagebag).
+    alignas(8) unsigned char m_ttBuf[0x600];
+    bool m_bTtInit;
+    int  m_nTtKey;                      // itemId currently shown, 0 = none
+    ZRef<GW_ItemSlotBase> m_tipSlot;    // keeps GetItemSlot result alive while tip is up
+
     explicit CUICashShop(int nLeft, int nTop);
     virtual ~CUICashShop() override {
         ReleaseEffect();                   // BEFORE the avatar: it holds the avatar's vectors
@@ -1558,7 +1639,9 @@ public:
     virtual void OnMouseButton(unsigned int msg, unsigned int wParam, int rx, int ry) override;
     virtual int  OnMouseMove(int rx, int ry) override;
     virtual int  OnMouseWheel(int, int, int nWheel) override {
-        m_nScroll += (nWheel > 0) ? -1 : 1;      // wheel up -> earlier rows
+        // Engine nWheel: positive = wheel-away (content should move down / later rows).
+        // Previous sign was inverted vs player expectation.
+        m_nScroll += (nWheel > 0) ? 1 : -1;
         ClampScroll();
         InvalidateRect(nullptr);
         return 1;
@@ -1568,6 +1651,7 @@ public:
         if (!bEnter) {
             m_nCloseHover = 0; m_nBuyHover = 0; m_nBuyCartHover = 0;
             m_nHoverCell = -1; m_nCartHover = -1;
+            HideTip();
         }
     }
     virtual void OnDestroy() override;
@@ -1589,9 +1673,39 @@ public:
     // literally `push 1; pop eax; ret 4`.
     virtual int OnSetFocus(int bFocus) override {
         m_bFocused = bFocus;
-        if (!bFocus) { m_keyL = m_keyR = m_keyU = m_keyD = false; }
+        if (!bFocus) {
+            m_keyL = m_keyR = m_keyU = m_keyD = false;
+            m_bSearchActive = false;
+        } else if (m_bSearchActive) {
+            // Re-associate IME when search box holds focus (FixIme may have cleared it).
+            HWND hwnd = GetForegroundWindow();
+            if (hwnd) {
+                HIMC himc = ImmGetContext(hwnd);
+                if (himc) {
+                    ImmAssociateContext(hwnd, himc);
+                    ImmReleaseContext(hwnd, himc);
+                }
+            }
+        }
         InvalidateRect(nullptr);
         return 1;
+    }
+
+    // IME result (committed GBK/ACP bytes) — required for Chinese search input.
+    // OnKey+ToAscii only yields Latin; CWndMan delivers composition via these vfuncs.
+    virtual void OnIMEResult(const char* sComp) override {
+        if (!m_bSearchActive || !sComp || !*sComp) return;
+        for (const char* p = sComp; *p; ++p) {
+            if (m_nSearchLen >= kSearchMax) break;
+            m_szSearch[m_nSearchLen++] = *p;
+        }
+        m_szSearch[m_nSearchLen] = 0;
+        SearchChanged();
+    }
+    virtual void OnIMEComp(const char* /*sComp*/, void* /*adwCls*/, unsigned int /*nClsIdx*/,
+                           int /*nCursor*/, void* /*lCand*/, int /*nBegin*/, int /*nPage*/,
+                           int /*nCur*/) override {
+        // Composition preview optional; commit arrives in OnIMEResult.
     }
 
     // Key DOWN vs UP is lParam bit 31 (a sibling window uses the same test).
@@ -1644,6 +1758,10 @@ public:
             return;                                    // consume both edges
         }
 
+        // Skills / pots / emotions: consume. Forwarding them into ProcessBasicUIKey
+        // while we hold focus crashes (preview is not a field character).
+        if (FuncKeyIsBlockedInPreview(scan)) return;
+
         // The stock defaults, kept as a FALLBACK rather than as the rule. Space is the
         // interesting one: it jumps in every other MapleStory context but the v83 keymap
         // ships it bound to NPC Chat (action 54), so a pure keymap read would silently
@@ -1693,6 +1811,16 @@ public:
     void SearchSetActive(bool on) {
         if (on == m_bSearchActive) return;
         m_bSearchActive = on;
+        if (on) {
+            HWND hwnd = GetForegroundWindow();
+            if (hwnd) {
+                HIMC himc = ImmGetContext(hwnd);
+                if (himc) {
+                    ImmAssociateContext(hwnd, himc);
+                    ImmReleaseContext(hwnd, himc);
+                }
+            }
+        }
         InvalidateRect(nullptr);
     }
     void SearchChanged() {
@@ -1707,6 +1835,116 @@ public:
         m_szSearch[0] = 0;
         m_nSearchLen = 0;
         SearchChanged();
+    }
+
+    void EnsureTip() {
+        if (!m_bTtInit) {
+            try { TT_Ctor(m_ttBuf); m_bTtInit = true; }
+            catch (...) { m_bTtInit = false; }
+        }
+    }
+    void HideTip() {
+        if (m_bTtInit) SehTTClear(m_ttBuf);
+        m_tipSlot = nullptr;
+        m_nTtKey = 0;
+    }
+    // Resolve grid / cart hover into a catalogue item. Returns 0 when empty.
+    int ResolveHoverItem(std::string* outName) const {
+        if (outName) outName->clear();
+        if (m_nCartHover >= 0 && m_nCartHover < m_nCartCount) {
+            const int id = m_cart[m_nCartHover].itemId;
+            if (outName && id) {
+                std::lock_guard<std::mutex> lk(g_mtx);
+                for (const auto& kv : g_buckets) {
+                    for (const auto& e : kv.second) {
+                        if (e.itemId == id) { *outName = e.name; return id; }
+                    }
+                }
+            }
+            return id;
+        }
+        if (m_nHoverCell < 0) return 0;
+        std::vector<Entry> vis;
+        {
+            std::lock_guard<std::mutex> lk(g_mtx);
+            CollectLocked(vis);
+        }
+        const int r = m_nHoverCell / kCols;
+        const int c = m_nHoverCell % kCols;
+        const int idx = (m_nScroll + r) * kCols + c;
+        if (idx < 0 || idx >= static_cast<int>(vis.size())) return 0;
+        if (outName) *outName = vis[idx].name;
+        return vis[idx].itemId;
+    }
+    void ShowTipForItem(int sx, int sy, int itemId, const std::string& name) {
+        if (!itemId) { HideTip(); return; }
+        EnsureTip();
+        if (!m_bTtInit) return;
+
+        // Custom BeiDou cash items: client String.wz may still be EN — force GBK tip.
+        if (itemId == 5782000) {
+            m_tipSlot = nullptr;
+            try {
+                auto* tip = reinterpret_cast<CUIToolTip*>(m_ttBuf);
+                ZXString<char> title("\xC6\xDF\xB2\xCA\xC0\xE2\xBE\xB5"); // 七彩棱镜
+                ZXString<char> body(
+                    "\xCB\xAB\xBB\xF7\xB4\xF2\xBF\xAA\xC6\xDF\xB2\xCA\xC0\xE2\xBE\xB5\xB4\xB0\xBF\xDA\xA1\xA3\r\n\r\n"
+                    "\xCE\xEF\xC6\xB7\xA3\xBA\xCD\xCF\xC8\xEB\xB5\xE3\xD7\xB0\x2F\xCC\xD8\xD0\xA7\xC8\xBE\xC9\xAB\xA3\xBB"
+                    "\xB7\xA2\xD0\xCD\x2F\xCD\xAB\xC9\xAB\x2F\xB7\xF4\xC9\xAB\xBF\xC9\xD6\xB1\xBD\xD3\xC8\xBE\xC9\xAB\xA1\xA3\r\n"
+                    "\xC8\xB7\xC8\xCF\xCF\xFB\xBA\xC4\x20\x31\x20\xB8\xF6\xC0\xE2\xBE\xB5\xA1\xA3");
+                tip->SetToolTip_String2(sx, sy, title, body, 0, 0, 0, 220, 1, 0);
+                m_nTtKey = itemId;
+            } catch (...) {
+                HideTip();
+            }
+            return;
+        }
+
+        // Virtual damage-skin cash SKUs (5920000+) have no Item.wz node — string tip only.
+        const bool virtualSkin = (itemId > kDamageSkinCashBase && itemId <= kDamageSkinCashMax);
+        if (!virtualSkin) {
+            if (itemId != m_nTtKey || !m_tipSlot) {
+                GW_ItemSlotBase* slot = SehGetItemSlot(itemId);
+                if (slot) {
+                    // Take ownership without extra AddRef (GetItemSlot already ref'd).
+                    m_tipSlot = ZRef<GW_ItemSlotBase>(slot, false);
+                } else {
+                    m_tipSlot = nullptr;
+                }
+            }
+            if (m_tipSlot) {
+                if (!SehShowItemToolTip(m_ttBuf, sx, sy, static_cast<GW_ItemSlotBase*>(m_tipSlot))) {
+                    HideTip();
+                    return;
+                }
+                m_nTtKey = itemId;
+                return;
+            }
+        }
+
+        // Fallback: catalogue name (or bare id) via SetToolTip_String2.
+        m_tipSlot = nullptr;
+        try {
+            auto* tip = reinterpret_cast<CUIToolTip*>(m_ttBuf);
+            ZXString<char> title;
+            ZXString<char> body;
+            if (!name.empty()) title = name.c_str();
+            else {
+                char buf[32];
+                _snprintf(buf, sizeof(buf), "#%d", itemId);
+                title = buf;
+            }
+            tip->SetToolTip_String2(sx, sy, title, body, 0, 0, 0, 220, 1, 0);
+            m_nTtKey = itemId;
+        } catch (...) {
+            HideTip();
+        }
+    }
+    void UpdateItemTip(int rx, int ry) {
+        std::string name;
+        const int itemId = ResolveHoverItem(&name);
+        if (!itemId) { HideTip(); return; }
+        ShowTipForItem(m_screenX + rx + 12, m_screenY + ry, itemId, name);
     }
 
     // Returns true when the key was consumed. Translation goes through the ACTIVE keyboard
@@ -1834,16 +2072,27 @@ public:
             if (NameContains(e.name, m_szSearch)) out.push_back(e);
     }
 
-    // Case-insensitive substring, ASCII. Item names in this catalogue are ASCII by
-    // construction -- the server writes them with a US-ASCII charset.
+    // Case-insensitive substring. Catalogue names are often GBK (zh-CN); do not
+    // tolower lead bytes of DBCS pairs — compare raw bytes after ASCII fold only.
     static bool NameContains(const std::string& hay, const char* needle) {
         if (!needle || !*needle) return true;
         const size_t n = strlen(needle);
         if (hay.size() < n) return false;
+        auto fold = [](unsigned char c) -> unsigned char {
+            return (c >= 'A' && c <= 'Z') ? static_cast<unsigned char>(c - 'A' + 'a') : c;
+        };
         for (size_t i = 0; i + n <= hay.size(); ++i) {
             size_t j = 0;
-            while (j < n && tolower(static_cast<unsigned char>(hay[i + j]))
-                          == tolower(static_cast<unsigned char>(needle[j]))) ++j;
+            while (j < n) {
+                const unsigned char a = static_cast<unsigned char>(hay[i + j]);
+                const unsigned char b = static_cast<unsigned char>(needle[j]);
+                if (a < 0x80 && b < 0x80) {
+                    if (fold(a) != fold(b)) break;
+                } else if (a != b) {
+                    break;
+                }
+                ++j;
+            }
             if (j == n) return true;
         }
         return false;
@@ -1901,6 +2150,8 @@ public:
         return -1;
     }
     void CartToggle(int itemId, int price);
+    void CartAdd(int itemId, int price);
+    void CartRemoveAt(int index);
     void BuildLook(LookOverride& out) const;
     int  CartTotalPrice() const;
 
@@ -2022,15 +2273,37 @@ public:
     // (0x005D6458) reaches GetEquipItem (0x005CA785) and raises _com_error E_FAIL for an
     // id whose icon node is missing. Unguarded that unwinds out of Draw and abandons every
     // later step, so one bad icon would blank the rest of the window
+    // Virtual damage-skin cash SKUs use 5920000+skinId (no Item.wz node). Draw the
+    // reusable opener icon 5910000 so the grid does not throw / blank the pane.
+    // Inventory expand coupons: Special/0911 has empty icons; +4 SKUs (911x004) are virtual.
+    // Remap to Cash 5050xxx scrolls that have real art.
+    static constexpr int kDamageSkinCashBase = 5920000;
+    static constexpr int kDamageSkinCashMax  = 5929999;
+    static constexpr int kDamageSkinIconId   = 5910000;
+
+    static int ResolveDrawIconId(int itemId) {
+        if (itemId > kDamageSkinCashBase && itemId <= kDamageSkinCashMax) {
+            return kDamageSkinIconId;
+        }
+        switch (itemId) {
+            case 9110000: case 9110004: return 5050000; // 装备栏
+            case 9111000: case 9111004: return 5050001; // 消耗栏
+            case 9112000: case 9112004: return 5050002; // 设置栏
+            case 9113000: case 9113004: return 5050003; // 其他栏
+            default:                    return itemId;
+        }
+    }
+
     void IconInBox(IWzCanvasPtr c, int itemId, int boxX, int boxY, int size) {
         auto* pII = CItemInfo::GetInstance();
         if (!pII || !c) return;
+        const int drawId = ResolveDrawIconId(itemId);
         const int off = (size - 32) / 2;
         try {
-            pII->DrawItemIconForSlot(c, itemId, boxX + off + 1, boxY + off + kIconBaseline,
+            pII->DrawItemIconForSlot(c, drawId, boxX + off + 1, boxY + off + kIconBaseline,
                                      0, 0, 0, 0, 0, 0);
         } catch (...) {
-            LOG_ONCE("cashshopwnd: icon draw threw for item %d", itemId);
+            LOG_ONCE("cashshopwnd: icon draw threw for item %d (draw %d)", itemId, drawId);
         }
     }
 
@@ -2062,11 +2335,12 @@ public:
 // top of each pane is what ties the panes to the chrome above them.
 void CUICashShop::DrawSectionHead(IWzCanvasPtr c, int x, int y, int w,
                                   const char* left, const char* right) {
-    // The strip and its closing red rule are painted into the plate; only the labels are drawn.
-    // The LEFT label is not drawn. "PREVIEW" is baked into the plate, and the grid's was the
-    // current category's name -- which the selected tab in the strip directly above already
-    // says, so printing it again was saying the same word twice in two rows.
-    (void)left;
+    // Plate may bake EN "PREVIEW"; when left is set, cover ~EN width then letter GBK.
+    if (left && *left) {
+        const int ly = y + (kHeadH - 12) / 2;
+        Fill(c, x + 6, ly - 1, 56, 14, kColFiller);
+        Str(c, kF_HeadR, x + 8, ly, left);
+    }
     if (right && *right) StrRight(c, kF_HeadR, x + w - 7, y + (kHeadH - 12) / 2, right);
 }
 
@@ -2132,11 +2406,15 @@ void CUICashShop::DrawVanillaButton(IWzCanvasPtr c, int x, int y, int w, const c
         DrawButton(c, x, y, w, kBtnArtH, label, enabled, pressed, hover);
         return;
     }
-    // The art is already kBtnW wide with its label baked in, so this is a straight blit --
-    // no 3-slice, and nothing lettered on top. `label` is kept in the signature for the
-    // fallback above and for callers to stay self-documenting at the call site.
+    // Blit plate art (often EN "BUY"), then re-letter runtime GBK over the baked text band.
     BlitA(c, src, x, y);
-    (void)w;
+    if (label && *label) {
+        const int bw = (w > 0 ? w : kBtnW);
+        const DWORD face = enabled ? (pressed ? kColBtnFace : kColBtnFace2) : kColBtnDis;
+        Fill(c, x + 4, y + 2, bw - 8, kBtnArtH - 4, face);
+        StrCenter(c, enabled ? kF_Text : kF_Dis, x + bw / 2,
+                  y + (kBtnArtH - 12) / 2 + (pressed ? 1 : 0), label);
+    }
 }
 
 void CUICashShop::LoadSprites() {
@@ -2239,7 +2517,8 @@ CUICashShop::CUICashShop(int nLeft, int nTop)
       m_nLastMA(-1), m_nLastCode(kNoActionCode), m_nPendingEmotion(kNoEmotion),
       m_nSearchLen(0), m_bSearchActive(false),
       m_nPrevBg(s_nPrevBg), m_pEffectLayer(nullptr), m_nEffectItem(0),
-      m_nEffectMA(-1), m_nEffectCode(kNoActionCode) {
+      m_nEffectMA(-1), m_nEffectCode(kNoActionCode),
+      m_bTtInit(false), m_nTtKey(0) {
     m_avatarRef[0] = m_avatarRef[1] = 0;
     for (auto& e : m_cart) { e.itemId = 0; e.price = 0; }
     for (auto& s : m_sentIds) s = 0;
@@ -2465,28 +2744,38 @@ unsigned int LookHash(const LookOverride& lk) {
     return h;
 }
 
-void CUICashShop::CartToggle(int itemId, int price) {
+void CUICashShop::CartAdd(int itemId, int price) {
     if (itemId == 0) return;
-    const int at = CartIndexOfItem(itemId);
-    if (at >= 0) {
-        for (int i = at; i + 1 < m_nCartCount; ++i) m_cart[i] = m_cart[i + 1];
-        --m_nCartCount;
-    } else {
-        if (m_nCartCount >= kCartMax) {
-            _snprintf(g_szStatus, sizeof(g_szStatus),
-                      "The cart holds %d items.", kCartMax);
-            g_szStatus[sizeof(g_szStatus) - 1] = 0;
-            play_ui_sound(L"BtMouseClick");
-            InvalidateRect(nullptr);
-            return;
-        }
-        m_cart[m_nCartCount].itemId = itemId;
-        m_cart[m_nCartCount].price = price;
-        ++m_nCartCount;
+    if (m_nCartCount >= kCartMax) {
+        // 购物车已满（最多 N 件）
+        _snprintf(g_szStatus, sizeof(g_szStatus),
+                  "\xB9\xBA\xCE\xEF\xB3\xB5\xD2\xD1\xC2\xFA\xA3\xA8\xD7\xEE\xB6\xE0 %d \xBC\xFE\xA3\xA9",
+                  kCartMax);
+        g_szStatus[sizeof(g_szStatus) - 1] = 0;
+        play_ui_sound(L"BtMouseClick");
+        InvalidateRect(nullptr);
+        return;
     }
+    m_cart[m_nCartCount].itemId = itemId;
+    m_cart[m_nCartCount].price = price;
+    ++m_nCartCount;
     play_ui_sound(L"DragEnd");
     m_bAvatarDirty = true;
     InvalidateRect(nullptr);
+}
+
+void CUICashShop::CartRemoveAt(int index) {
+    if (index < 0 || index >= m_nCartCount) return;
+    for (int i = index; i + 1 < m_nCartCount; ++i) m_cart[i] = m_cart[i + 1];
+    --m_nCartCount;
+    play_ui_sound(L"DragEnd");
+    m_bAvatarDirty = true;
+    InvalidateRect(nullptr);
+}
+
+void CUICashShop::CartToggle(int itemId, int price) {
+    // 保留：兼容旧调用；网格改为 CartAdd（可重复同 ID）
+    CartAdd(itemId, price);
 }
 
 // The selected item's effect animation, (re)built when the item or the pose changes.
@@ -2647,6 +2936,11 @@ void CUICashShop::Update() {
 }
 
 void CUICashShop::OnDestroy() {
+    HideTip();
+    if (m_bTtInit) {
+        SehTTDtor(m_ttBuf);
+        m_bTtInit = false;
+    }
     ReleaseEffect();                       // BEFORE the avatar: it holds the avatar's vectors
     SehReleaseAvatar(m_avatarRef);
     m_avatarRef[0] = m_avatarRef[1] = 0;
@@ -2801,7 +3095,7 @@ void CUICashShop::DrawGrid(IWzCanvasPtr c, const std::vector<Entry>& vis) {
         Str(c, kF_Text, kSearchX + 5, kSearchY + (kSearchH - 12) / 2, shown);
     } else {
         Str(c, kF_Dim, kSearchX + 5, kSearchY + (kSearchH - 12) / 2,
-            m_bSearchActive ? "_" : "Search this category...");
+            m_bSearchActive ? "_" : "\xCB\xD1\xCB\xF7\xB1\xBE\xB7\xD6\xC0\xE0..."); // 搜索本分类...
     }
 
     const int first = m_nScroll * kCols;
@@ -2898,8 +3192,8 @@ void CUICashShop::DrawGrid(IWzCanvasPtr c, const std::vector<Entry>& vis) {
     }
     if (vis.empty()) {
         StrCenter(c, kF_Dim, kGridX + kGridW / 2, kPaneTop + paneH / 2 - 6,
-                  CurrentCategoryLoaded() ? "There are no items in this category."
-                                          : "Loading...");
+                  CurrentCategoryLoaded() ? "\xB1\xBE\xB7\xD6\xC0\xE0\xD4\xDD\xCE\xDE\xC9\xCC\xC6\xB7\xA1\xA3" // 本分类暂无商品。
+                                          : "\xD5\xFD\xD4\xDA\xBC\xD3\xD4\xD8..."); // 正在加载...
     }
 }
 
@@ -2958,7 +3252,8 @@ void CUICashShop::DrawScrollbar(IWzCanvasPtr c, int total) {
 }
 
 void CUICashShop::DrawPreview(IWzCanvasPtr c, const std::vector<Entry>& vis) {
-    DrawSectionHead(c, kPrevX, kPaneTop, kPrevW, "PREVIEW", "");
+    // GBK 预览 — overlays plate-baked EN "PREVIEW"
+    DrawSectionHead(c, kPrevX, kPaneTop, kPrevW, "\xD4\xA4\xC0\xC0", "");
     // The backdrop picker, parked in the header. Three tiny tabs rather than a cycle button
     // so the current one is visible at rest -- and because the ladder sits in a different
     // column in each, which matters the moment you want the back view.
@@ -3021,7 +3316,9 @@ void CUICashShop::DrawPreview(IWzCanvasPtr c, const std::vector<Entry>& vis) {
     // A SHORT head: this labels a strip inside the column rather than opening a pane, so it
     // takes a plain 18px #CCCCCC band and a hairline. A full pane head would put a second
     // red rule halfway down the column, which reads as the window starting over.
-    // "CART" is baked into the plate; only the fill count is drawn.
+    // GBK 购物车 overlays plate EN "CART"; fill count stays right-aligned.
+    Fill(c, kPrevX + 6, kCartHeadY + (kCartHeadH - 12) / 2 - 1, 52, 14, kColFiller);
+    Str(c, kF_HeadR, kPrevX + 8, kCartHeadY + (kCartHeadH - 12) / 2, "\xB9\xBA\xCE\xEF\xB3\xB5");
     StrRight(c, kF_HeadR, kPrevX + kPrevW - 7, kCartHeadY + (kCartHeadH - 12) / 2, head);
     for (int i = 0; i < kCartMax; ++i) {
         const int bx = kCartX0 + (i % kCartCols) * (kCartBox + kCartGap);
@@ -3063,9 +3360,10 @@ void CUICashShop::DrawBuyBar(IWzCanvasPtr c) {
         Str(c, kF_Sel, kFrameX + 11, kStatusY, st);
     }
 
-    DrawVanillaButton(c, kBuyX, kBtnY, kBtnW, "BUY",
+    // GBK: 购买 / 批量购买 — plate may bake EN; runtime label used when slicing Shop/BtBuy.
+    DrawVanillaButton(c, kBuyX, kBtnY, kBtnW, "\xB9\xBA\xC2\xF2",
                       m_nSelItemId != 0, m_nBuyPressed != 0, m_nBuyHover != 0, m_pBtBuy);
-    DrawVanillaButton(c, kCartBuyX, kBtnY, kBtnW, "BUY CART",
+    DrawVanillaButton(c, kCartBuyX, kBtnY, kBtnW, "\xC5\xFA\xC1\xBF\xB9\xBA\xC2\xF2",
                       m_nCartCount > 0, m_nBuyCartPressed != 0, m_nBuyCartHover != 0, m_pBtCart);
 }
 
@@ -3140,6 +3438,7 @@ int CUICashShop::OnMouseMove(int rx, int ry) {
                 hover = r * kCols + col; break;
             }
     m_nHoverCell = hover;
+    UpdateItemTip(rx, ry);
     InvalidateRect(nullptr);
     return 1;
 }
@@ -3160,11 +3459,11 @@ void CUICashShop::OnMouseButton(unsigned int msg, unsigned int /*wParam*/, int r
             const int bx = kCartX0 + (i % kCartCols) * (kCartBox + kCartGap);
             const int by = kCartY + 2 + (i / kCartCols) * (kCartBox + kCartGap);
             if (In(rx, ry, bx, by, kCartBox, kCartBox)) {
-                CartToggle(m_cart[i].itemId, m_cart[i].price);
+                CartRemoveAt(i);
                 return;
             }
         }
-        // A grid cell: pin it.
+        // A grid cell: pin it (allow same item multiple times).
         std::vector<Entry> vis;
         {
             std::lock_guard<std::mutex> lk(g_mtx);
@@ -3176,7 +3475,7 @@ void CUICashShop::OnMouseButton(unsigned int msg, unsigned int /*wParam*/, int r
                        kCellW - 1, kCellH - 1)) {
                     const int idx = (m_nScroll + r) * kCols + col;
                     if (idx >= 0 && idx < static_cast<int>(vis.size()))
-                        CartToggle(vis[idx].itemId, vis[idx].price);
+                        CartAdd(vis[idx].itemId, vis[idx].price);
                     return;
                 }
         return;
@@ -3279,7 +3578,7 @@ void CUICashShop::OnMouseButton(unsigned int msg, unsigned int /*wParam*/, int r
                 m_nSentCount = m_nCartCount;
                 for (int i = 0; i < m_nSentCount; ++i) m_sentIds[i] = m_cart[i].itemId;
                 _snprintf(g_szStatus, sizeof(g_szStatus),
-                          "Buying %d item%s...", m_nSentCount, m_nSentCount == 1 ? "" : "s");
+                          "\xD5\xFD\xD4\xDA\xB9\xBA\xC2\xF2 %d \xBC\xFE...", m_nSentCount); // 正在购买 N 件...
                 g_szStatus[sizeof(g_szStatus) - 1] = 0;
                 SendBuyCart(m_sentIds, m_nSentCount);
             }
@@ -3418,7 +3717,7 @@ void CashShopWnd_HandleSync(CInPacket* pPacket) {
             const unsigned char code = r.Decode1();
             const int itemId = r.Decode4();
             if (r.bad) return;
-            const char* m = (code < _countof(kBuyMsg)) ? kBuyMsg[code] : "Purchase failed.";
+            const char* m = (code < _countof(kBuyMsg)) ? kBuyMsg[code] : "\xB9\xBA\xC2\xF2\xCA\xA7\xB0\xDC\xA1\xA3"; // 购买失败。
             _snprintf(g_szStatus, sizeof(g_szStatus), "%s (item %d)", m, itemId);
             g_szStatus[sizeof(g_szStatus) - 1] = 0;
             g_bCatalogDirty.store(true);
@@ -3431,25 +3730,23 @@ void CashShopWnd_HandleSync(CInPacket* pPacket) {
             const int spent = r.Decode4();
             if (r.bad) return;
             if (code == 0) {
-                _snprintf(g_szStatus, sizeof(g_szStatus), "Bought %d item%s for %d NX.",
-                          delivered, (delivered == 1) ? "" : "s", spent);
+                _snprintf(g_szStatus, sizeof(g_szStatus),
+                          "\xB9\xBA\xC2\xF2 %d \xBC\xFE\xA3\xAC\xBB\xA8\xB7\xD1 %d NX\xA1\xA3", // 购买 N 件，花费 N NX。
+                          delivered, spent);
                 g_bCartBought.store(true);
             } else {
-                const char* m = (code < _countof(kBuyMsg)) ? kBuyMsg[code] : "Purchase failed.";
-                // The cart is left intact for the player to fix rather than silently
-                // emptied. `delivered` is normally 0 -- the server validates the whole cart
-                // before it touches anything -- but it is reported rather than asserted
-                // away, because the one path that can deliver-then-fail charges nothing,
-                // and a player who is told "nothing was bought" while holding a free item
-                // has no way to notice.
+                const char* m = (code < _countof(kBuyMsg)) ? kBuyMsg[code] : "\xB9\xBA\xC2\xF2\xCA\xA7\xB0\xDC\xA1\xA3";
                 if (delivered) {
                     _snprintf(g_szStatus, sizeof(g_szStatus),
-                              "%s (item %d) %d item(s) arrived free; you were not charged.",
+                              "%s (item %d) \xD2\xD1\xCB\xCD\xB4\xEF %d \xBC\xFE\xA3\xAC\xCE\xB4\xBF\xDB\xB7\xD1\xA1\xA3",
                               m, itemId, delivered);
                 } else if (itemId) {
-                    _snprintf(g_szStatus, sizeof(g_szStatus), "%s (item %d) Nothing was bought.", m, itemId);
+                    _snprintf(g_szStatus, sizeof(g_szStatus),
+                              "%s (item %d) \xCE\xB4\xB9\xBA\xC2\xF2\xC8\xCE\xBA\xCE\xCE\xEF\xC6\xB7\xA1\xA3",
+                              m, itemId);
                 } else {
-                    _snprintf(g_szStatus, sizeof(g_szStatus), "%s Nothing was bought.", m);
+                    _snprintf(g_szStatus, sizeof(g_szStatus),
+                              "%s \xCE\xB4\xB9\xBA\xC2\xF2\xC8\xCE\xBA\xCE\xCE\xEF\xC6\xB7\xA1\xA3", m);
                 }
             }
             g_szStatus[sizeof(g_szStatus) - 1] = 0;
