@@ -711,11 +711,43 @@ int __cdecl GW_ItemSlotBase__Decode_hook(void* pOutZRef, CInPacket* pPacket) {
 
 // ===========================================================================
 // Hook 2: AvatarLook::Load — post-hook overwrites anHairEquip[i-1] when the
-// equipped item carries a non-zero nAnvilItemID.
+// equipped item carries a non-zero nAnvilItemID; then strip Addon-only IDs
+// (118/119/120/166/167) so info-only .img never enter body compose.
 // ===========================================================================
 
 static auto AvatarLook__Load =
     reinterpret_cast<void(__thiscall*)(AvatarLook*, int, int, int)>(kAddr_AvatarLook_Load);
+
+// Addon dock (118/119/120/166/167): inventory icon + tip only — never body-compose.
+// CD64 AvatarLook may carry anHairEquip[60]; info-only .img (no stand/walk) EOF/38
+// if left in the look array. Offsets match compat/wvs/avatar.h / cashshopwnd.
+static void SanitizeAddonOnlyLooks(void* pLook) {
+    if (!pLook) {
+        return;
+    }
+    auto* hair = reinterpret_cast<int32_t*>(reinterpret_cast<char*>(pLook) + 0x19);
+    auto* unseen = reinterpret_cast<int32_t*>(reinterpret_cast<char*>(pLook) + 0x109);
+    for (int i = 0; i < 60; ++i) {
+        int32_t id = 0;
+        __try {
+            id = hair[i];
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            break;
+        }
+        const int pfx = id / 10000;
+        if (pfx == 118 || pfx == 119 || pfx == 120 || pfx == 166 || pfx == 167) {
+            hair[i] = 0;
+        }
+        __try {
+            id = unseen[i];
+            const int pfx2 = id / 10000;
+            if (pfx2 == 118 || pfx2 == 119 || pfx2 == 120 || pfx2 == 166 || pfx2 == 167) {
+                unseen[i] = 0;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+}
 
 void __fastcall AvatarLook__Load_hook(AvatarLook* pThis, void* /*edx*/,
                                        int cs, int apEquipped, int apEquipped2)
@@ -742,6 +774,8 @@ void __fastcall AvatarLook__Load_hook(AvatarLook* pThis, void* /*edx*/,
             pThis->anHairEquip[i - 1] = nAnvilItemID;
         }
     }
+
+    SanitizeAddonOnlyLooks(pThis);
 }
 
 

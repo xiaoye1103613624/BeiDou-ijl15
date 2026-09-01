@@ -1290,6 +1290,8 @@ static TipColorStrip g_tipStrips[48];
 static int g_tipStripCount = 0;
 static int g_tipStripExtraH = 0;
 static constexpr int kTipStripLineH = 14;
+// Extra air under the last vanilla line (金锤子 / 剪刀 / 描述) before strip band.
+static constexpr int kTipStripBottomPad = 6;
 
 #if !GREEN_ENTER_BASELINE
 // Survives /OPT:REF — tip-only builds must not rely on fusionanvil.obj stamps.
@@ -1429,7 +1431,10 @@ static void EmitStatBreakdownLine(
         PushTipSeg(strip, "+%d", soulBonus, kArgbSoul);
         PushTipSeg(strip, "+%d", socketBonus, kArgbSocket);
         if (strip.nSeg > 1) {
-            tip->m_nHeight += kTipStripLineH;
+            // Do NOT bump tip->m_nHeight here: AddInfoEx places the next line at the
+            // current height, so mid-build bumps open gaps between vanilla lines and
+            // the reserved strip band at the bottom then overlaps 金锤子/剪刀/描述.
+            // Accumulate only; apply once at end of SetToolTip_Equip_Basic_hook.
             g_tipStripExtraH += kTipStripLineH;
         } else {
             --g_tipStripCount;
@@ -1540,7 +1545,7 @@ static void DrawTipColorStrips(CUIToolTip* tip) {
         if (!canvas) {
             return;
         }
-        int y = tip->m_nHeight - g_spiritTipExtraH - g_tipStripExtraH + 2;
+        int y = tip->m_nHeight - g_spiritTipExtraH - g_tipStripExtraH - kTipStripBottomPad + 2;
         for (int i = 0; i < g_tipStripCount; ++i) {
             TipColorStrip& strip = g_tipStrips[i];
             if (strip.tip != tip || strip.nSeg <= 0) {
@@ -1704,6 +1709,12 @@ void __fastcall CUIToolTip__SetToolTip_Equip_Basic_hook(
 
     // Potential → bottom companion tip (旁挂底条), not AddInfoEx in main tip.
     // Hyper ★ → top companion. Main tip paints Hyper/Potential color split from packet total.
+
+    // Color-strip band + bottom pad: apply AFTER all vanilla AddInfoEx lines so the
+    // reserve sits under 金锤子/剪刀/描述 instead of inserting gaps between stats.
+    if (g_tipStripExtraH > 0) {
+        pThis->m_nHeight += g_tipStripExtraH + kTipStripBottomPad;
+    }
 
     // 灵韵：抬高 tip，留给 Draw 阶段画「图标+说明」区块（对齐参考装备加技能）
     g_spiritTipExtraH = 0;
@@ -2157,13 +2168,25 @@ static bool ReadMainTipScreenPos(CUIToolTip* mainTip, int& outX, int& outY, int&
     if (!mainTip) {
         return false;
     }
+    EquipTooltipStyle_GetHoverPos(mainTip, outX, outY);
     __try {
         outW = mainTip->m_nWidth;
-        if (!mainTip->m_pLayer || outW <= 0) {
+        if (outW <= 0) {
             return false;
         }
-        outX = mainTip->m_pLayer->rx;
-        outY = mainTip->m_pLayer->ry;
+        const int storedX = mainTip->m_nLayerLeft;
+        const int storedY = mainTip->m_nLayerTop;
+        if (storedX != 0 || storedY != 0) {
+            outX = storedX;
+            outY = storedY;
+        } else if (mainTip->m_pLayer) {
+            const int rx = mainTip->m_pLayer->rx;
+            const int ry = mainTip->m_pLayer->ry;
+            if (rx != 0 || ry != 0) {
+                outX = rx;
+                outY = ry;
+            }
+        }
         return outW > 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         outX = 0;
@@ -2525,14 +2548,26 @@ static bool ReadMainTipScreenRect(
     if (!mainTip) {
         return false;
     }
+    EquipTooltipStyle_GetHoverPos(mainTip, outX, outY);
     __try {
         outW = mainTip->m_nWidth;
         outH = mainTip->m_nHeight;
-        if (!mainTip->m_pLayer || outW <= 0 || outH <= 0) {
+        if (outW <= 0 || outH <= 0) {
             return false;
         }
-        outX = mainTip->m_pLayer->rx;
-        outY = mainTip->m_pLayer->ry;
+        const int storedX = mainTip->m_nLayerLeft;
+        const int storedY = mainTip->m_nLayerTop;
+        if (storedX != 0 || storedY != 0) {
+            outX = storedX;
+            outY = storedY;
+        } else if (mainTip->m_pLayer) {
+            const int rx = mainTip->m_pLayer->rx;
+            const int ry = mainTip->m_pLayer->ry;
+            if (rx != 0 || ry != 0) {
+                outX = rx;
+                outY = ry;
+            }
+        }
         return outW > 0 && outH > 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
