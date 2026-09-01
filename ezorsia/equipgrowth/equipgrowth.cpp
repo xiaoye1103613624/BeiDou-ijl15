@@ -2,14 +2,17 @@
 #include "EquipGrowthApi.h"
 #include "../Client.h"
 #include "../setitem/SetItemApi.h"
+#include "../setitem/equiptooltip_style.h"
 #include "../equipcompare/EquipCompareApi.h"
 #include "compat/ClientAddresses.h"
 #include "compat/wvs/secure.h"
 #include "compat/wvs/tooltip.h"
 #include "compat/wvs/util.h"
+#include <comdef.h>
 #include <algorithm>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace {
 constexpr int kGrowthTooltipBufSize = 0xB00;
@@ -21,12 +24,68 @@ constexpr size_t kOffset_nCUC = 0x2E;
 constexpr size_t kOffset_nItemLevel = 0xBA;
 constexpr size_t kOffset_nEnhance = 0x10D;
 
+// Match SetItem companion tip metrics (pad / indent / line height).
+constexpr int kGrowthTipPadX = 8;
+constexpr int kGrowthTipPadY = 6;
+constexpr int kGrowthTipLineH = 16;
+constexpr int kGrowthTipTitleExtraH = 2;
+constexpr int kGrowthTipSepGapY = 3;
+constexpr int kGrowthTipTierGapY = 3;
+constexpr int kGrowthTipIndentChars = 1;
+constexpr int kGrowthTipHeightSlack = 3;
+constexpr unsigned int kGrowthTipSepColor = 0x80FFFFFF;
+constexpr unsigned long kColTitleLime = 0xFFCCFF00;
+constexpr unsigned long kColWhite = 0xFFFFFFFF;
+constexpr unsigned long kColGrey = 0xFFBBBBBB;
+constexpr char kGrowthTipColonSep[] = "\x20\x3A\x20"; // " : "
+// GBK「级效果」
+constexpr char kLevelEffectSuffix[] = "\xBC\xB6\xD0\xA7\xB9\xFB";
+
+enum class GrowthTipStyle { Title, Header, White, Grey };
+enum class GrowthTipLayout { Left, Center, IndentLeft };
+
+struct GrowthTipSegment {
+    std::string text;
+    GrowthTipStyle style = GrowthTipStyle::White;
+};
+
+struct GrowthTipLine {
+    std::vector<GrowthTipSegment> segments;
+    bool separatorBefore = false;
+    bool tierGapAfter = false;
+    GrowthTipLayout layout = GrowthTipLayout::Left;
+};
+
+struct GrowthTipFonts {
+    IWzFontPtr title;
+    IWzFontPtr header;
+    IWzFontPtr white;
+    IWzFontPtr grey;
+    bool ready = false;
+};
+
+typedef void(__cdecl* GetBasicFont_t)(IWzFontPtr*, int);
+typedef HRESULT(__thiscall* WzFontCreate_t)(
+        IWzFont*, Ztl_bstr_t, unsigned long, unsigned long, const Ztl_variant_t&);
+static auto get_basic_font = reinterpret_cast<GetBasicFont_t>(0x0098A707);
+static auto WzFontCreate = reinterpret_cast<WzFontCreate_t>(0x0046341A);
+
+GrowthTipFonts g_growthTipFonts;
+
 alignas(8) char g_growthTooltipBuf[kGrowthTooltipBufSize];
 bool g_growthTooltipInited = false;
+// Second buffer: growth tip for equipped item in the compare column.
+alignas(8) char g_cmpGrowthTooltipBuf[kGrowthTooltipBufSize];
+bool g_cmpGrowthTooltipInited = false;
 bool g_inGrowthUpdate = false;
 CUIToolTip* g_activeMainTip = nullptr;
 int g_lastHoverItemId = 0;
 int g_lastShownItemId = 0;
+int g_lastDockX = 0;
+int g_lastDockY = 0;
+int g_cmpLastShownItemId = 0;
+int g_cmpLastDockX = 0;
+int g_cmpLastDockY = 0;
 
 typedef int(__thiscall* TSecTypeGetData_t)(const void*);
 static auto TSecTypeGetData = reinterpret_cast<TSecTypeGetData_t>(kAddr_TSecTypeGetData);
@@ -107,9 +166,15 @@ static bool SehHasTipLayer() {
 
 static void SafeRelMoveTip(CUIToolTip* tip, int x, int y) {
     __try {
-        if (tip && tip->m_pLayer) {
-            tip->m_pLayer->RelMove(x, y);
+        if (!tip || !tip->m_pLayer) {
+            return;
         }
+        // RelMove + force rx/ry/stored (same as set companion). MakeLayer clamp can leave (0,0).
+        tip->m_pLayer->RelMove(x, y);
+        tip->m_pLayer->rx = x;
+        tip->m_pLayer->ry = y;
+        tip->m_nLayerLeft = x;
+        tip->m_nLayerTop = y;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
 }
@@ -150,8 +215,18 @@ static bool SehReadTipRect(int& outX, int& outY, int& outW, int& outH) {
         }
         outW = tip->m_nWidth;
         outH = tip->m_nHeight;
-        outX = tip->m_pLayer->rx;
-        outY = tip->m_pLayer->ry;
+        const int storedX = tip->m_nLayerLeft;
+        const int storedY = tip->m_nLayerTop;
+        if (storedX != 0 || storedY != 0) {
+            outX = storedX;
+            outY = storedY;
+        } else if (g_lastDockX != 0 || g_lastDockY != 0) {
+            outX = g_lastDockX;
+            outY = g_lastDockY;
+        } else {
+            outX = tip->m_pLayer->rx;
+            outY = tip->m_pLayer->ry;
+        }
         return outW > 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -163,15 +238,26 @@ static void SehReadMainOrigin(CUIToolTip* mainTip, int& mainX, int& mainY, int& 
     if (!mainTip) {
         return;
     }
+    // ShowItemToolTip / MakeLayer screen anchor — shop/storage often leave rx/ry=0.
+    EquipTooltipStyle_GetHoverPos(mainTip, mainX, mainY);
     __try {
         mainW = mainTip->m_nWidth;
         mainH = mainTip->m_nHeight;
-        if (mainTip->m_pLayer) {
-            mainX = mainTip->m_pLayer->rx;
-            mainY = mainTip->m_pLayer->ry;
+        const int storedX = mainTip->m_nLayerLeft;
+        const int storedY = mainTip->m_nLayerTop;
+        if (storedX != 0 || storedY != 0) {
+            mainX = storedX;
+            mainY = storedY;
+        } else if (mainTip->m_pLayer) {
+            const int rx = mainTip->m_pLayer->rx;
+            const int ry = mainTip->m_pLayer->ry;
+            if (rx != 0 || ry != 0) {
+                mainX = rx;
+                mainY = ry;
+            }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        mainX = mainY = mainW = mainH = 0;
+        mainW = mainH = 0;
     }
 }
 
@@ -222,6 +308,416 @@ static CUIToolTip* EnsureGrowthTooltip() {
     return reinterpret_cast<CUIToolTip*>(g_growthTooltipBuf);
 }
 
+static CUIToolTip* EnsureCmpGrowthTooltip() {
+    if (!g_cmpGrowthTooltipInited) {
+        reinterpret_cast<void(__thiscall*)(void*)>(ClientAddresses::kToolTipCtor)(
+                g_cmpGrowthTooltipBuf);
+        g_cmpGrowthTooltipInited = true;
+    }
+    return reinterpret_cast<CUIToolTip*>(g_cmpGrowthTooltipBuf);
+}
+
+static void HideCmpGrowthTooltipInternal() {
+    if (g_cmpGrowthTooltipInited) {
+        try {
+            reinterpret_cast<CUIToolTip*>(g_cmpGrowthTooltipBuf)->ClearToolTip();
+        } catch (...) {
+        }
+    }
+    g_cmpLastShownItemId = 0;
+    g_cmpLastDockX = 0;
+    g_cmpLastDockY = 0;
+}
+
+static bool SehHasCmpTipLayer() {
+    if (!g_cmpGrowthTooltipInited) {
+        return false;
+    }
+    __try {
+        CUIToolTip* tip = reinterpret_cast<CUIToolTip*>(g_cmpGrowthTooltipBuf);
+        return tip->m_pLayer != nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static void ComputeCmpGrowthDock(CUIToolTip* compareTip, int tipW, int& outX, int& outY) {
+    if (tipW <= 0) {
+        tipW = 180;
+    }
+    int setX = 0, setY = 0, setW = 0, setH = 0;
+    if (SetItem::TryGetActiveCompareSetTooltipRect(setX, setY, setW, setH) && setW > 0) {
+        outX = setX + setW + kGrowthTipGap;
+        outY = setY;
+    } else {
+        int cx = 0, cy = 0, cw = 0, ch = 0;
+        SehReadMainOrigin(compareTip, cx, cy, cw, ch);
+        if (cw <= 0) {
+            cw = 180;
+        }
+        outX = cx + cw + kGrowthTipGap;
+        outY = cy;
+    }
+    if (outY < 0) {
+        outY = 0;
+    }
+    if (outX < 0) {
+        outX = 0;
+    }
+}
+
+static bool SehReadCmpTipRect(int& outX, int& outY, int& outW, int& outH) {
+    outX = outY = outW = outH = 0;
+    if (!g_cmpGrowthTooltipInited || g_cmpLastShownItemId <= 0) {
+        return false;
+    }
+    __try {
+        CUIToolTip* tip = reinterpret_cast<CUIToolTip*>(g_cmpGrowthTooltipBuf);
+        if (!tip || !tip->m_pLayer) {
+            return false;
+        }
+        outW = tip->m_nWidth;
+        outH = tip->m_nHeight;
+        const int storedX = tip->m_nLayerLeft;
+        const int storedY = tip->m_nLayerTop;
+        if (storedX != 0 || storedY != 0) {
+            outX = storedX;
+            outY = storedY;
+        } else if (g_cmpLastDockX != 0 || g_cmpLastDockY != 0) {
+            outX = g_cmpLastDockX;
+            outY = g_cmpLastDockY;
+        } else {
+            outX = tip->m_pLayer->rx;
+            outY = tip->m_pLayer->ry;
+        }
+        return outW > 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static Ztl_bstr_t GbkToBstr(const char* sGbk) {
+    wchar_t wbuf[256] = {};
+    if (!sGbk || MultiByteToWideChar(CP_ACP, 0, sGbk, -1, wbuf, _countof(wbuf)) <= 0) {
+        return Ztl_bstr_t(L"");
+    }
+    return Ztl_bstr_t(wbuf);
+}
+
+static bool CreateGrowthFont(IWzFontPtr& out, unsigned long color, int size, bool bold) {
+    if (out) {
+        return true;
+    }
+    try {
+        PcCreateObject<IWzFontPtr>(L"Canvas#Font", out, nullptr);
+        if (!out) {
+            return false;
+        }
+        const Ztl_variant_t style(bold ? L"B" : L"");
+        return SUCCEEDED(WzFontCreate(out, L"Dotum", size, color, style));
+    } catch (...) {
+        out = nullptr;
+        return false;
+    }
+}
+
+static void EnsureGrowthTipFonts() {
+    if (g_growthTipFonts.ready) {
+        return;
+    }
+    CreateGrowthFont(g_growthTipFonts.title, kColTitleLime, 12, true);
+    CreateGrowthFont(g_growthTipFonts.header, kColTitleLime, 12, true);
+    CreateGrowthFont(g_growthTipFonts.white, kColWhite, 12, false);
+    CreateGrowthFont(g_growthTipFonts.grey, kColGrey, 12, false);
+    if (!g_growthTipFonts.white) {
+        try {
+            get_basic_font(std::addressof(g_growthTipFonts.white), 0);
+            g_growthTipFonts.title = g_growthTipFonts.white;
+            g_growthTipFonts.header = g_growthTipFonts.white;
+            g_growthTipFonts.grey = g_growthTipFonts.white;
+        } catch (...) {
+        }
+    }
+    if (!g_growthTipFonts.grey) {
+        g_growthTipFonts.grey = g_growthTipFonts.white;
+    }
+    g_growthTipFonts.ready = g_growthTipFonts.white != nullptr;
+}
+
+static IWzFontPtr GetGrowthTipFont(GrowthTipStyle style) {
+    switch (style) {
+    case GrowthTipStyle::Title:
+        return g_growthTipFonts.title ? g_growthTipFonts.title : g_growthTipFonts.white;
+    case GrowthTipStyle::Header:
+        return g_growthTipFonts.header ? g_growthTipFonts.header : g_growthTipFonts.white;
+    case GrowthTipStyle::Grey:
+        return g_growthTipFonts.grey ? g_growthTipFonts.grey : g_growthTipFonts.white;
+    case GrowthTipStyle::White:
+    default:
+        return g_growthTipFonts.white;
+    }
+}
+
+static int MeasureGbkTextWidth(const char* text) {
+    if (!text) {
+        return 0;
+    }
+    int w = 0;
+    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(text); *p; ++p) {
+        w += (*p & 0x80) ? 12 : 7;
+    }
+    return w;
+}
+
+static int MeasureFontTextWidth(IWzFontPtr font, const char* gbk) {
+    if (!gbk || !gbk[0]) {
+        return 0;
+    }
+    if (font) {
+        try {
+            return static_cast<int>(font->CalcTextWidth(GbkToBstr(gbk), Ztl_variant_t()));
+        } catch (...) {
+        }
+    }
+    return MeasureGbkTextWidth(gbk);
+}
+
+static int MeasureLineWidth(const GrowthTipLine& line) {
+    int w = 0;
+    if (line.layout == GrowthTipLayout::IndentLeft) {
+        w += MeasureFontTextWidth(GetGrowthTipFont(GrowthTipStyle::White), "\xA1\xA1")
+                * kGrowthTipIndentChars;
+    }
+    for (const GrowthTipSegment& seg : line.segments) {
+        w += MeasureFontTextWidth(GetGrowthTipFont(seg.style), seg.text.c_str());
+    }
+    return w;
+}
+
+static void DrawGrowthTipText(IWzCanvasPtr canvas, int x, int y, const char* text, IWzFontPtr font) {
+    if (!canvas || !text || !text[0] || !font) {
+        return;
+    }
+    try {
+        canvas->DrawTextA(x, y, GbkToBstr(text), font, Ztl_variant_t(), Ztl_variant_t());
+    } catch (...) {
+    }
+}
+
+static void DrawGrowthTipLine(IWzCanvasPtr canvas, int width, int y, const GrowthTipLine& line) {
+    const int lineW = MeasureLineWidth(line);
+    int x = kGrowthTipPadX;
+    if (line.layout == GrowthTipLayout::Center) {
+        x = (std::max)(kGrowthTipPadX, (width - lineW) / 2);
+    } else if (line.layout == GrowthTipLayout::IndentLeft) {
+        const int indent = MeasureFontTextWidth(GetGrowthTipFont(GrowthTipStyle::White), "\xA1\xA1")
+                * kGrowthTipIndentChars;
+        x = kGrowthTipPadX + indent;
+    }
+    for (const GrowthTipSegment& seg : line.segments) {
+        if (seg.text.empty()) {
+            continue;
+        }
+        IWzFontPtr font = GetGrowthTipFont(seg.style);
+        DrawGrowthTipText(canvas, x, y, seg.text.c_str(), font);
+        x += MeasureFontTextWidth(font, seg.text.c_str());
+    }
+}
+
+static void DrawGrowthTipSeparator(IWzCanvasPtr canvas, int width, int y) {
+    if (!canvas || width <= 2 * kGrowthTipPadX + 1) {
+        return;
+    }
+    try {
+        canvas->DrawRectangle(kGrowthTipPadX, y, width - 2 * kGrowthTipPadX, 1, kGrowthTipSepColor);
+    } catch (...) {
+    }
+}
+
+static int ComputeGrowthTipContentHeight(const std::vector<GrowthTipLine>& lines) {
+    int y = kGrowthTipPadY;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const GrowthTipLine& line = lines[i];
+        if (line.separatorBefore) {
+            y += kGrowthTipSepGapY;
+        }
+        y += kGrowthTipLineH;
+        if (i == 0 && line.layout == GrowthTipLayout::Center) {
+            y += kGrowthTipTitleExtraH;
+        }
+        if (line.tierGapAfter) {
+            y += kGrowthTipTierGapY;
+        }
+    }
+    return y + kGrowthTipPadY;
+}
+
+static int ResolveGrowthTipWidth(const std::vector<GrowthTipLine>& lines, int preferred) {
+    int maxLine = 0;
+    for (const GrowthTipLine& line : lines) {
+        maxLine = (std::max)(maxLine, MeasureLineWidth(line));
+    }
+    const int contentW = (std::max)(180, (std::min)(320, maxLine + 2 * kGrowthTipPadX));
+    if (preferred > 40) {
+        // Match set tip width exactly so indent/columns line up.
+        return preferred;
+    }
+    return contentW;
+}
+
+static int CreateGrowthTipLayerAtHeight(CUIToolTip* tip, int tipX, int tipY, int tipW, int targetH) {
+    if (!tip || tipW <= 0 || targetH <= 0) {
+        return 0;
+    }
+    ZXString<char> zTitle("");
+    auto setLines = [&](int n) -> int {
+        std::string s((std::max)(0, n), '\n');
+        ZXString<char> zDesc(s.c_str());
+        tip->ClearToolTip();
+        tip->SetToolTip_String2(tipX, tipY, zTitle, zDesc, 0, 0, 0, tipW, 1, 0);
+        return tip->m_nHeight;
+    };
+    const int h2 = setLines(2);
+    const int h12 = setLines(12);
+    const int perLine = (h12 > h2) ? (std::max)(1, (h12 - h2) / 10) : 14;
+    const int base = h2 - 2 * perLine;
+    int need = (std::max)(1, (targetH - base + perLine - 1) / perLine);
+    setLines(need);
+    for (int i = 0; i < 6 && tip->m_nHeight < targetH; ++i) {
+        setLines(++need);
+    }
+    for (int i = 0; i < 8 && need > 1 && tip->m_nHeight > targetH + kGrowthTipHeightSlack; ++i) {
+        const int prevH = tip->m_nHeight;
+        setLines(--need);
+        if (tip->m_nHeight < targetH) {
+            setLines(++need);
+            break;
+        }
+        if (tip->m_nHeight >= prevH) {
+            break;
+        }
+    }
+    return tip->m_nHeight > 0 ? tip->m_nHeight : targetH;
+}
+
+static IWzCanvasPtr GetTooltipCanvas(CUIToolTip* tip) {
+    if (!tip || !tip->m_pLayer) {
+        return nullptr;
+    }
+    try {
+        Ztl_variant_t vIdx;
+        V_VT(&vIdx) = VT_I4;
+        V_I4(&vIdx) = 0;
+        return tip->m_pLayer->Getcanvas(vIdx);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+static void RenderGrowthTooltipCanvas(IWzCanvasPtr canvas, const std::vector<GrowthTipLine>& lines,
+        int width) {
+    if (!canvas || lines.empty()) {
+        return;
+    }
+    int y = kGrowthTipPadY;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const GrowthTipLine& line = lines[i];
+        if (line.separatorBefore) {
+            DrawGrowthTipSeparator(canvas, width, y - 2);
+            y += kGrowthTipSepGapY;
+        }
+        DrawGrowthTipLine(canvas, width, y, line);
+        y += kGrowthTipLineH;
+        if (i == 0 && line.layout == GrowthTipLayout::Center) {
+            y += kGrowthTipTitleExtraH;
+        }
+        if (line.tierGapAfter) {
+            y += kGrowthTipTierGapY;
+        }
+    }
+}
+
+static bool EndsWithLevelEffect(const std::string& line) {
+    const size_t n = sizeof(kLevelEffectSuffix) - 1;
+    return line.size() >= n && line.compare(line.size() - n, n, kLevelEffectSuffix) == 0;
+}
+
+static bool StartsWithAsciiDigit(const std::string& line) {
+    return !line.empty() && line[0] >= '0' && line[0] <= '9';
+}
+
+static std::vector<GrowthTipLine> BuildGrowthTipLayout(const char* text, int itemLevel) {
+    std::vector<GrowthTipLine> lines;
+    if (!text || !text[0]) {
+        return lines;
+    }
+    std::string raw(text);
+    for (char& c : raw) {
+        if (c == '\r') {
+            c = '\n';
+        }
+    }
+    size_t pos = 0;
+    bool first = true;
+    bool sawLevelHeader = false;
+    // Match FillBonusFromWz: node N is applied when itemLevel > N.
+    bool tierActive = true;
+    while (pos < raw.size()) {
+        size_t end = raw.find('\n', pos);
+        if (end == std::string::npos) {
+            end = raw.size();
+        }
+        std::string row = raw.substr(pos, end - pos);
+        pos = end + 1;
+        while (!row.empty() && (row.back() == ' ' || row.back() == '\t')) {
+            row.pop_back();
+        }
+        if (row.empty()) {
+            continue;
+        }
+        if (first) {
+            GrowthTipLine title;
+            title.layout = GrowthTipLayout::Center;
+            title.segments.push_back({row, GrowthTipStyle::Title});
+            lines.push_back(std::move(title));
+            first = false;
+            continue;
+        }
+        if (StartsWithAsciiDigit(row) && EndsWithLevelEffect(row)) {
+            if (sawLevelHeader && !lines.empty()) {
+                lines.back().tierGapAfter = true;
+            }
+            int node = 0;
+            for (size_t i = 0; i < row.size() && row[i] >= '0' && row[i] <= '9'; ++i) {
+                node = node * 10 + (row[i] - '0');
+            }
+            // Unmet growth steps are grey (same as inactive set tiers).
+            tierActive = itemLevel > node;
+            GrowthTipLine header;
+            header.separatorBefore = true;
+            header.layout = GrowthTipLayout::Left;
+            header.segments.push_back(
+                    {row, tierActive ? GrowthTipStyle::Header : GrowthTipStyle::Grey});
+            lines.push_back(std::move(header));
+            sawLevelHeader = true;
+            continue;
+        }
+        GrowthTipLine attr;
+        attr.layout = GrowthTipLayout::IndentLeft;
+        const GrowthTipStyle bodyStyle =
+                tierActive ? GrowthTipStyle::White : GrowthTipStyle::Grey;
+        const size_t colon = row.find(kGrowthTipColonSep);
+        if (colon != std::string::npos) {
+            attr.segments.push_back({row.substr(0, colon) + kGrowthTipColonSep, bodyStyle});
+            attr.segments.push_back({row.substr(colon + 3), bodyStyle});
+        } else {
+            attr.segments.push_back({row, bodyStyle});
+        }
+        lines.push_back(std::move(attr));
+    }
+    return lines;
+}
+
 static void DiagUi(const char* fmt, ...);
 
 static void HideGrowthTooltipInternal(const char* reason) {
@@ -237,34 +733,7 @@ static void HideGrowthTooltipInternal(const char* reason) {
     g_lastShownItemId = 0;
 }
 
-static void SplitTitleBody(const std::string& text, std::string& title, std::string& body) {
-    title.clear();
-    body.clear();
-    if (text.empty()) {
-        return;
-    }
-    size_t pos = 0;
-    while (pos < text.size() && text[pos] != '\r' && text[pos] != '\n') {
-        ++pos;
-    }
-    title.assign(text, 0, pos);
-    while (pos < text.size() && (text[pos] == '\r' || text[pos] == '\n')) {
-        ++pos;
-    }
-    body.assign(text, pos, std::string::npos);
-    for (char& c : body) {
-        if (c == '\r') {
-            c = '\n';
-        }
-    }
-}
-
-static bool RectsOverlap(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh) {
-    return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
-}
-
-// Right-chain adsorb like set tip: [equip] → [set?] → [growth] → [compare]
-// Match SetItem::ComputeSetTooltipRightOfMain — only clamp X to screen, keep Y.
+// Right-chain: [equip] → [set?] → [growth] → [compare]. Always stay to the right.
 static void ComputeGrowthDock(CUIToolTip* mainTip, int tipW, int tipH, int& outX, int& outY) {
     if (tipW <= 0) {
         tipW = 180;
@@ -291,21 +760,8 @@ static void ComputeGrowthDock(CUIToolTip* mainTip, int tipW, int tipH, int& outX
     if (outY < 0) {
         outY = 0;
     }
-    const int screenW = get_screen_width();
-    if (screenW > 0 && outX + tipW > screenW) {
-        outX = (std::max)(0, screenW - tipW);
-    }
     if (outX < 0) {
         outX = 0;
-    }
-    // If screen clamp pulled us over the set tip, sit just under set instead of left-dock.
-    if (hasSet && RectsOverlap(outX, outY, tipW, tipH > 0 ? tipH : 80, setX, setY, setW,
-                               setH > 0 ? setH : 120)) {
-        outX = setX + setW + kGrowthTipGap;
-        outY = setY + (setH > 0 ? setH : 120) + kGrowthTipGap;
-        if (outY < 0) {
-            outY = 0;
-        }
     }
 }
 
@@ -330,63 +786,152 @@ static void ShowGrowthTooltipAt(CUIToolTip* mainTip, int itemId, const char* tex
         HideGrowthTooltipInternal("emptyText");
         return;
     }
-    std::string title;
-    std::string body;
-    SplitTitleBody(text, title, body);
-    if (title.empty()) {
-        HideGrowthTooltipInternal("emptyTitle");
-        DiagUi("show abort emptyTitle itemId=%d", itemId);
+    std::vector<GrowthTipLine> lines =
+            BuildGrowthTipLayout(text, EquipGrowth::GetGrowthTipItemLevel(itemId));
+    if (lines.empty()) {
+        HideGrowthTooltipInternal("emptyLayout");
+        DiagUi("show abort emptyLayout itemId=%d", itemId);
         return;
     }
-    // Segmented "N级效果" bodies are longer than Hyper summary — allow up to tip buf.
-    if (body.size() > 2400) {
-        body.resize(2400);
-        while (!body.empty() && (body.back() == '\n' || body.back() == '\r')) {
-            body.pop_back();
-        }
+
+    EnsureGrowthTipFonts();
+    if (!g_growthTipFonts.ready || !g_growthTipFonts.white) {
+        HideGrowthTooltipInternal("noFont");
+        DiagUi("show abort noFont itemId=%d", itemId);
+        return;
     }
 
     int mainW = 0, mainH = 0, mainX = 0, mainY = 0;
     SehReadMainOrigin(mainTip, mainX, mainY, mainW, mainH);
-    const int preferredW = mainW > 40 ? mainW : 180;
 
     int setX = 0, setY = 0, setW = 0, setH = 0;
     const int hasSet =
             SetItem::TryGetActiveSetTooltipRect(setX, setY, setW, setH) && setW > 0 ? 1 : 0;
+    // Prefer set tip width so attribute indent / columns line up visually.
+    const int preferredW = hasSet && setW > 40 ? setW : (mainW > 40 ? mainW : 0);
+    const int width = ResolveGrowthTipWidth(lines, preferredW);
+    const int targetH = ComputeGrowthTipContentHeight(lines);
 
     int dockX = 0, dockY = 0;
-    ComputeGrowthDock(mainTip, preferredW, 80, dockX, dockY);
+    ComputeGrowthDock(mainTip, width, targetH, dockX, dockY);
 
     CUIToolTip* tip = EnsureGrowthTooltip();
     try {
         tip->ClearToolTip();
-        ZXString<char> zTitle(title.c_str());
-        ZXString<char> zBody(body.c_str());
-        tip->SetToolTip_String2(dockX, dockY, zTitle, zBody, 0, 0, 0, preferredW, 1, 0);
+        CreateGrowthTipLayerAtHeight(tip, dockX, dockY, width, targetH);
     } catch (...) {
         HideGrowthTooltipInternal("showException");
         DiagUi("show exception itemId=%d", itemId);
         return;
     }
 
+    IWzCanvasPtr canvas = GetTooltipCanvas(tip);
+    if (!canvas) {
+        HideGrowthTooltipInternal("noCanvas");
+        DiagUi("show abort noCanvas itemId=%d", itemId);
+        return;
+    }
+    int drawW = SafeGetTipWidth(tip);
+    if (drawW <= 0) {
+        drawW = width;
+    }
+    try {
+        const int cw = static_cast<int>(canvas->width);
+        if (cw > 0) {
+            drawW = cw;
+        }
+    } catch (...) {
+    }
+    RenderGrowthTooltipCanvas(canvas, lines, drawW);
+
     const int renderedW = SafeGetTipWidth(tip);
     const int renderedH = SafeGetTipHeight(tip);
     if (renderedW > 0) {
-        ComputeGrowthDock(mainTip, renderedW, renderedH > 0 ? renderedH : 80, dockX, dockY);
+        ComputeGrowthDock(mainTip, renderedW, renderedH > 0 ? renderedH : targetH, dockX, dockY);
         SafeRelMoveTip(tip, dockX, dockY);
     }
+    g_lastDockX = dockX;
+    g_lastDockY = dockY;
     SehBoostLayerAboveSet(tip);
     g_lastShownItemId = itemId;
 
     int lrx = 0, lry = 0, lw = 0, lh = 0, lz = 0, lvis = 0;
     SehReadLayerState(tip, lrx, lry, lw, lh, lz, lvis);
-    DiagUi("show OK VERSION GROWTH_TIP_REEN_20260803 itemId=%d dock=%d,%d wh=%d,%d "
-           "titleLen=%zu set=%d,%d,%d,%d hasSet=%d layer=%d,%d,%d,%d z=%d vis=%d "
+    DiagUi("show OK VERSION GROWTH_TIP_SETSTYLE_20260831 itemId=%d dock=%d,%d wh=%d,%d "
+           "lines=%zu set=%d,%d,%d,%d hasSet=%d layer=%d,%d,%d,%d z=%d vis=%d "
            "main=%d,%d,%d,%d dockChain=%s",
-           itemId, dockX, dockY, renderedW, renderedH, title.size(), setX, setY, setW, setH,
+           itemId, dockX, dockY, renderedW, renderedH, lines.size(), setX, setY, setW, setH,
            hasSet, lrx, lry, lw, lh, lz, lvis, mainX, mainY, mainW, mainH,
            hasSet ? "main->set->growth" : "main->growth");
     EquipCompare::RelayoutActiveCompareTip();
+}
+
+static void ShowCmpGrowthTooltipAt(CUIToolTip* compareTip, int itemId, const char* text) {
+    if (!compareTip || !text || text[0] == '\0') {
+        HideCmpGrowthTooltipInternal();
+        return;
+    }
+    std::vector<GrowthTipLine> lines =
+            BuildGrowthTipLayout(text, EquipGrowth::GetGrowthTipItemLevel(itemId));
+    if (lines.empty()) {
+        HideCmpGrowthTooltipInternal();
+        return;
+    }
+    EnsureGrowthTipFonts();
+    if (!g_growthTipFonts.ready || !g_growthTipFonts.white) {
+        HideCmpGrowthTooltipInternal();
+        return;
+    }
+
+    int cx = 0, cy = 0, cw = 0, ch = 0;
+    SehReadMainOrigin(compareTip, cx, cy, cw, ch);
+    int setX = 0, setY = 0, setW = 0, setH = 0;
+    const bool hasCmpSet =
+            SetItem::TryGetActiveCompareSetTooltipRect(setX, setY, setW, setH) && setW > 0;
+    const int preferredW = hasCmpSet && setW > 40 ? setW : (cw > 40 ? cw : 0);
+    const int width = ResolveGrowthTipWidth(lines, preferredW);
+    const int targetH = ComputeGrowthTipContentHeight(lines);
+
+    int dockX = 0, dockY = 0;
+    ComputeCmpGrowthDock(compareTip, width, dockX, dockY);
+
+    CUIToolTip* tip = EnsureCmpGrowthTooltip();
+    try {
+        tip->ClearToolTip();
+        CreateGrowthTipLayerAtHeight(tip, dockX, dockY, width, targetH);
+    } catch (...) {
+        HideCmpGrowthTooltipInternal();
+        return;
+    }
+    IWzCanvasPtr canvas = GetTooltipCanvas(tip);
+    if (!canvas) {
+        HideCmpGrowthTooltipInternal();
+        return;
+    }
+    int drawW = SafeGetTipWidth(tip);
+    if (drawW <= 0) {
+        drawW = width;
+    }
+    try {
+        const int cwCanvas = static_cast<int>(canvas->width);
+        if (cwCanvas > 0) {
+            drawW = cwCanvas;
+        }
+    } catch (...) {
+    }
+    RenderGrowthTooltipCanvas(canvas, lines, drawW);
+
+    const int renderedW = SafeGetTipWidth(tip);
+    const int renderedH = SafeGetTipHeight(tip);
+    if (renderedW > 0) {
+        ComputeCmpGrowthDock(compareTip, renderedW, dockX, dockY);
+        SafeRelMoveTip(tip, dockX, dockY);
+    }
+    g_cmpLastDockX = dockX;
+    g_cmpLastDockY = dockY;
+    SehBoostLayerAboveSet(tip);
+    g_cmpLastShownItemId = itemId;
+    (void)renderedH;
 }
 
 static void UpdateGrowthTip(CUIToolTip* mainTip, int itemId, void* pe, bool prepareLocal) {
@@ -463,6 +1008,8 @@ static void UpdateGrowthTip(CUIToolTip* mainTip, int itemId, void* pe, bool prep
             int x = 0, y = 0;
             ComputeGrowthDock(mainTip, tipW, tipH, x, y);
             SafeRelMoveTip(tip, x, y);
+            g_lastDockX = x;
+            g_lastDockY = y;
             SehBoostLayerAboveSet(tip);
             int lrx = 0, lry = 0, lw = 0, lh = 0, lz = 0, lvis = 0;
             SehReadLayerState(tip, lrx, lry, lw, lh, lz, lvis);
@@ -522,6 +1069,11 @@ void OnCacheUpdatedImpl(int itemId) {
         g_lastShownItemId = 0; // force text refresh
         UpdateGrowthTip(g_activeMainTip, g_lastHoverItemId, nullptr, false);
     }
+    // Compare-side growth may share the same itemId cache.
+    if (itemId == g_cmpLastShownItemId && g_cmpLastShownItemId > 0) {
+        // Force recreate on next Relayout/Update from compare tip.
+        g_cmpLastShownItemId = 0;
+    }
 }
 
 bool TryGetRectImpl(int& outX, int& outY, int& outW, int& outH) {
@@ -551,4 +1103,57 @@ void EquipGrowth_OnCacheUpdated(int itemId) {
 
 bool EquipGrowth::TryGetActiveGrowthTooltipRect(int& outX, int& outY, int& outW, int& outH) {
     return TryGetRectImpl(outX, outY, outW, outH);
+}
+
+bool EquipGrowth::TryGetActiveCompareGrowthTooltipRect(int& outX, int& outY, int& outW,
+        int& outH) {
+    return SehReadCmpTipRect(outX, outY, outW, outH);
+}
+
+void EquipGrowth::HideCompareCompanion() {
+    HideCmpGrowthTooltipInternal();
+}
+
+void EquipGrowth::RelayoutCompareCompanion(CUIToolTip* compareTip) {
+    if (!Client::enableGrowthCompanionTip || !compareTip || g_cmpLastShownItemId <= 0
+            || !SehHasCmpTipLayer()) {
+        return;
+    }
+    CUIToolTip* tip = reinterpret_cast<CUIToolTip*>(g_cmpGrowthTooltipBuf);
+    int tipW = SafeGetTipWidth(tip);
+    int x = 0, y = 0;
+    ComputeCmpGrowthDock(compareTip, tipW > 0 ? tipW : 180, x, y);
+    SafeRelMoveTip(tip, x, y);
+    g_cmpLastDockX = x;
+    g_cmpLastDockY = y;
+    SehBoostLayerAboveSet(tip);
+}
+
+void EquipGrowth::UpdateCompareCompanion(CUIToolTip* compareTip, int itemId, void* pe) {
+    if (!Client::enableGrowthCompanionTip || !compareTip || !IsEquipItemId(itemId)) {
+        HideCmpGrowthTooltipInternal();
+        return;
+    }
+    if (pe) {
+        EquipGrowth::OnHoverEquip(itemId, SafeGetEnhance(pe), SafeGetItemLevel(pe),
+                                  SafeGetScrollLevel(pe));
+    } else {
+        EquipGrowth::RequestGrowthTip(itemId);
+    }
+    if (EquipGrowth::IsGrowthTipResolved(itemId) && !EquipGrowth::HasGrowthTip(itemId)) {
+        HideCmpGrowthTooltipInternal();
+        return;
+    }
+    const char* text = EquipGrowth::GetGrowthTipText(itemId);
+    if (!text || text[0] == '\0') {
+        if (g_cmpLastShownItemId != itemId) {
+            HideCmpGrowthTooltipInternal();
+        }
+        return;
+    }
+    if (itemId == g_cmpLastShownItemId && SehHasCmpTipLayer()) {
+        RelayoutCompareCompanion(compareTip);
+        return;
+    }
+    ShowCmpGrowthTooltipAt(compareTip, itemId, text);
 }

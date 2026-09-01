@@ -12,9 +12,14 @@ void RedrawActivePanel() {}
 void InvalidateEmptyCache(int) {}
 void InvalidateCache(int) {}
 const char* GetGrowthTipText(int) { return ""; }
+int GetGrowthTipItemLevel(int) { return 0; }
 bool HasGrowthTip(int) { return false; }
 bool IsGrowthTipResolved(int) { return true; }
 bool TryGetActiveGrowthTooltipRect(int&, int&, int&, int&) { return false; }
+void UpdateCompareCompanion(CUIToolTip*, int, void*) {}
+void HideCompareCompanion() {}
+void RelayoutCompareCompanion(CUIToolTip*) {}
+bool TryGetActiveCompareGrowthTooltipRect(int&, int&, int&, int&) { return false; }
 int GetGrowthBonusForStat(int, int) { return 0; }
 int GetFlameBonusForStat(int, int) { return 0; }
 } // namespace EquipGrowth

@@ -1,6 +1,7 @@
 ﻿#pragma once
 
-
+class CUIToolTip;
+class GW_ItemSlotEquip;
 
 namespace EquipGrowth {
 
@@ -42,6 +43,9 @@ void InvalidateCache(int itemId);
 
 const char* GetGrowthTipText(int itemId);
 
+/** Cached itemLevel for tip greying (0 if unknown). */
+int GetGrowthTipItemLevel(int itemId);
+
 /** True when server replied with non-empty growth tip OR local tip is non-empty. */
 
 bool HasGrowthTip(int itemId);
@@ -51,6 +55,12 @@ bool HasGrowthTip(int itemId);
 bool IsGrowthTipResolved(int itemId);
 
 bool TryGetActiveGrowthTooltipRect(int& outX, int& outY, int& outW, int& outH);
+
+/** Compare-equip growth companion (second buffer), docked right of compare set/tip. */
+void UpdateCompareCompanion(CUIToolTip* compareTip, int itemId, void* pe);
+void HideCompareCompanion();
+void RelayoutCompareCompanion(CUIToolTip* compareTip);
+bool TryGetActiveCompareGrowthTooltipRect(int& outX, int& outY, int& outW, int& outH);
 
 /** Growth flat bonus for tip color (statIdx 0=STR .. 14=Jump). Prefer cache; 0 if unknown. */
 
@@ -62,20 +72,8 @@ int GetFlameBonusForStat(int itemId, int statIdx);
 
 } // namespace EquipGrowth
 
-
-
-class CUIToolTip;
-
-class GW_ItemSlotEquip;
-
-
-
 /** Called only from SetItem AfterEquipTipDrawn / ShowItemToolTip path. */
-
 void EquipGrowth_OnEquipTipDrawn(CUIToolTip* tip, GW_ItemSlotEquip* pe);
-
 void EquipGrowth_OnEquipTipDrawnId(CUIToolTip* tip, int itemId);
-
 void EquipGrowth_Hide();
-
 

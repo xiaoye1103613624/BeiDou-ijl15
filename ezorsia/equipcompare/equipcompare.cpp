@@ -136,6 +136,7 @@ static bool g_compareTooltipActive = false;
 static bool g_inPrimaryToolTipShow = false;
 static bool g_inEquipBasicCompare = false;
 static bool g_labelsReady = false;
+static bool g_pendingCompare = false;
 
 static CUIToolTip* g_activeSourceTooltip = nullptr;
 static CUIToolTip* g_deltaTooltip = nullptr;
@@ -143,6 +144,16 @@ static GW_ItemSlotEquip* g_deltaEquipped = nullptr;
 static GW_ItemSlotEquip* g_deltaHover = nullptr;
 static int g_activeSourceItemId = 0;
 static int g_activeCompareItemId = 0;
+
+// Deferred compare show: wait until hover set/growth companions exist (SetItem outer hook).
+static CUIToolTip* g_pendingSourceTooltip = nullptr;
+static GW_ItemSlotBase* g_pendingSourceItem = nullptr;
+static int g_pendingLeft = 0;
+static int g_pendingTop = 0;
+static int g_pendingA6 = 0;
+static int g_pendingA7 = 0;
+static int g_pendingA8 = 0;
+static unsigned int g_pendingA9 = 0;
 
 static char g_labelBuf[static_cast<int>(EquipStat::Count)][64] = {};
 static size_t g_labelLen[static_cast<int>(EquipStat::Count)] = {};
@@ -332,19 +343,18 @@ static GW_ItemSlotBase* FindEquippedCompareItem(int itemId, GW_ItemSlotBase* sou
     if (!TryGetBodyPartsForItem(itemId, bodyParts, &count)) {
         return nullptr;
     }
+    // Same-category only: cash ↔ cash (−(100+bp)), normal ↔ normal (−bp).
+    // Never fall back across fashion/normal (prior product rule).
     const bool cash = IsCashEquipItem(itemId);
-    for (int pass = 0; pass < 2; ++pass) {
-        for (int i = 0; i < count; ++i) {
-            const int bodyPart = bodyParts[i];
-            if (bodyPart <= 0) {
-                continue;
-            }
-            const bool useCash = (pass == 0) ? cash : !cash;
-            const int slot = useCash ? -(100 + bodyPart) : -bodyPart;
-            GW_ItemSlotBase* equipped = FetchInventoryItem(kEquipInventoryType, slot);
-            if (equipped && equipped != sourceItem) {
-                return equipped;
-            }
+    for (int i = 0; i < count; ++i) {
+        const int bodyPart = bodyParts[i];
+        if (bodyPart <= 0) {
+            continue;
+        }
+        const int slot = cash ? -(100 + bodyPart) : -bodyPart;
+        GW_ItemSlotBase* equipped = FetchInventoryItem(kEquipInventoryType, slot);
+        if (equipped && equipped != sourceItem) {
+            return equipped;
         }
     }
     return nullptr;
@@ -359,17 +369,56 @@ static void EnsureCompareToolTip() {
     g_compareTooltipInit = true;
 }
 
-static void ClearEquippedCompareToolTip() {
-    if (!g_compareTooltipActive) {
+static void ClearPendingCompareInternal() {
+    g_pendingCompare = false;
+    g_pendingSourceTooltip = nullptr;
+    g_pendingSourceItem = nullptr;
+    g_pendingLeft = 0;
+    g_pendingTop = 0;
+    g_pendingA6 = 0;
+    g_pendingA7 = 0;
+    g_pendingA8 = 0;
+    g_pendingA9 = 0;
+}
+
+static void HideCompareSideCompanions() {
+    SetItem::HideCompareCompanion();
+    EquipGrowth::HideCompareCompanion();
+}
+
+static void UpdateCompareSideCompanions(GW_ItemSlotBase* equippedItem) {
+    if (!equippedItem || !g_compareTooltipActive) {
+        HideCompareSideCompanions();
         return;
     }
-    if (g_compareTooltipInit) {
+    CUIToolTip* cmp = CompareToolTip();
+    const int equippedItemId = DecodeItemId(equippedItem);
+    // Set first so growth can dock to the right of compare-set.
+    SetItem::UpdateCompareCompanion(cmp, equippedItemId);
+    EquipGrowth::UpdateCompareCompanion(cmp, equippedItemId, equippedItem);
+}
+
+static void RelayoutCompareSideCompanions() {
+    if (!g_compareTooltipActive || !g_compareTooltipInit) {
+        return;
+    }
+    CUIToolTip* cmp = CompareToolTip();
+    SetItem::RelayoutCompareCompanion(cmp);
+    EquipGrowth::RelayoutCompareCompanion(cmp);
+}
+
+static void ClearEquippedCompareToolTip(bool clearPending) {
+    if (g_compareTooltipActive && g_compareTooltipInit) {
         Original_ClearToolTip(CompareToolTip());
     }
     g_compareTooltipActive = false;
     g_activeSourceTooltip = nullptr;
     g_activeSourceItemId = 0;
     g_activeCompareItemId = 0;
+    HideCompareSideCompanions();
+    if (clearPending) {
+        ClearPendingCompareInternal();
+    }
 }
 
 static bool IsEquippedCompareToolTip(CUIToolTip* tooltip) {
@@ -498,7 +547,7 @@ static void ComputeCompareDockLeft(
     int sourceTop,
     int& outLeft,
     int& outTop) {
-    // Chain: 装备 → 套装 → 成长 → 对比（缺则左吸）
+    // Chain: 装备 → 套装 → 成长 → 对比（始终在右侧，缺则吸到上一环）
     outLeft = sourceLeft;
     outTop = sourceTop;
     if (sourceTooltip && sourceTooltip->m_nWidth > 0) {
@@ -521,13 +570,38 @@ static void ComputeCompareDockLeft(
         outLeft = growthX + growthW + kCompareTooltipGap;
         outTop = growthY;
     }
-    const int screenW = get_screen_width();
-    int cmpW = 0;
-    if (g_compareTooltipInit) {
-        cmpW = CompareToolTip()->m_nWidth;
+    int altX = 0;
+    int altY = 0;
+    int altW = 0;
+    int altH = 0;
+    if (SetItem::TryGetActiveAltSetTooltipRect(altX, altY, altW, altH) && altW > 0) {
+        outLeft = altX + altW + kCompareTooltipGap;
+        outTop = altY;
     }
-    if (screenW > 0 && cmpW > 0 && outLeft + cmpW > screenW) {
-        outLeft = (std::max)(0, screenW - cmpW);
+    if (outLeft < 0) {
+        outLeft = 0;
+    }
+    if (outTop < 0) {
+        outTop = 0;
+    }
+}
+
+// RelMove alone leaves MakeLayer-stored m_nLayerLeft/Top stale; compare-side set/
+// growth dock via those fields and would float at the wrong Y / left of compare.
+static void PlaceCompareTipAt(CUIToolTip* cmp, int left, int top) {
+    if (!cmp) {
+        return;
+    }
+    __try {
+        if (!cmp->m_pLayer) {
+            return;
+        }
+        cmp->m_pLayer->RelMove(left, top);
+        cmp->m_pLayer->rx = left;
+        cmp->m_pLayer->ry = top;
+        cmp->m_nLayerLeft = left;
+        cmp->m_nLayerTop = top;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
 }
 
@@ -541,10 +615,20 @@ static void RelayoutActiveCompareTipImpl() {
     }
     int sourceLeft = 0;
     int sourceTop = 0;
+    EquipTooltipStyle_GetHoverPos(g_activeSourceTooltip, sourceLeft, sourceTop);
     __try {
-        if (g_activeSourceTooltip->m_pLayer) {
-            sourceLeft = g_activeSourceTooltip->m_pLayer->rx;
-            sourceTop = g_activeSourceTooltip->m_pLayer->ry;
+        const int storedX = g_activeSourceTooltip->m_nLayerLeft;
+        const int storedY = g_activeSourceTooltip->m_nLayerTop;
+        if (storedX != 0 || storedY != 0) {
+            sourceLeft = storedX;
+            sourceTop = storedY;
+        } else if (g_activeSourceTooltip->m_pLayer) {
+            const int rx = g_activeSourceTooltip->m_pLayer->rx;
+            const int ry = g_activeSourceTooltip->m_pLayer->ry;
+            if (rx != 0 || ry != 0) {
+                sourceLeft = rx;
+                sourceTop = ry;
+            }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return;
@@ -552,10 +636,8 @@ static void RelayoutActiveCompareTipImpl() {
     int left = 0;
     int top = 0;
     ComputeCompareDockLeft(g_activeSourceTooltip, sourceLeft, sourceTop, left, top);
-    __try {
-        cmp->m_pLayer->RelMove(left, top);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
+    PlaceCompareTipAt(cmp, left, top);
+    RelayoutCompareSideCompanions();
 }
 
 static void ShowEquippedCompareToolTip(
@@ -573,13 +655,13 @@ static void ShowEquippedCompareToolTip(
 
     const int itemId = DecodeItemId(sourceItem);
     if (itemId / 1000000 != 1) {
-        ClearEquippedCompareToolTip();
+        ClearEquippedCompareToolTip(true);
         return;
     }
 
     GW_ItemSlotBase* equippedItem = FindEquippedCompareItem(itemId, sourceItem);
     if (!equippedItem) {
-        ClearEquippedCompareToolTip();
+        ClearEquippedCompareToolTip(true);
         return;
     }
 
@@ -592,19 +674,24 @@ static void ShowEquippedCompareToolTip(
         g_activeSourceItemId == itemId &&
         g_activeCompareItemId == equippedItemId &&
         CompareToolTip()->m_pLayer) {
-        CompareToolTip()->m_pLayer->RelMove(left, top);
+        PlaceCompareTipAt(CompareToolTip(), left, top);
         g_activeSourceTooltip = sourceTooltip;
+        RelayoutCompareSideCompanions();
+        // Refresh content if companions were missing (e.g. first paint raced).
+        UpdateCompareSideCompanions(equippedItem);
         return;
     }
 
     EnsureCompareToolTip();
-    ClearEquippedCompareToolTip();
+    ClearEquippedCompareToolTip(false);
 
     unsigned char paramBuf[0x2C] = {};
     reinterpret_cast<void(__thiscall*)(void*)>(kAddrItemToolTipParamCtor)(paramBuf);
 
     g_showingCompareTooltip = true;
     __try {
+        // Call through the live entry so SetItem can ignore this tip (not steal companions).
+        // Prefer trampoline that skips SetItem companion side-effects via g_showingCompareTooltip.
         Original_ShowItemToolTip(
             CompareToolTip(),
             left,
@@ -619,6 +706,7 @@ static void ShowEquippedCompareToolTip(
         g_activeSourceTooltip = sourceTooltip;
         g_activeSourceItemId = itemId;
         g_activeCompareItemId = equippedItemId;
+        PlaceCompareTipAt(CompareToolTip(), left, top);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         g_compareTooltipActive = false;
         g_activeSourceTooltip = nullptr;
@@ -628,8 +716,81 @@ static void ShowEquippedCompareToolTip(
     g_showingCompareTooltip = false;
     reinterpret_cast<void(__thiscall*)(void*)>(kAddrItemToolTipParamDtor)(paramBuf);
 
-    // Set tip may appear after this call — SetItem will Relayout; also try now.
     RelayoutActiveCompareTipImpl();
+    if (g_compareTooltipActive) {
+        UpdateCompareSideCompanions(equippedItem);
+    }
+}
+
+static void QueuePendingCompare(
+        CUIToolTip* sourceTooltip,
+        int sourceLeft,
+        int sourceTop,
+        GW_ItemSlotBase* sourceItem,
+        int a6,
+        int a7,
+        int a8,
+        unsigned int a9) {
+    g_pendingCompare = true;
+    g_pendingSourceTooltip = sourceTooltip;
+    g_pendingSourceItem = sourceItem;
+    g_pendingLeft = sourceLeft;
+    g_pendingTop = sourceTop;
+    g_pendingA6 = a6;
+    g_pendingA7 = a7;
+    g_pendingA8 = a8;
+    g_pendingA9 = a9;
+}
+
+int __fastcall Hook_ShowItemToolTip(
+    CUIToolTip* tooltip,
+    void* /*edx*/,
+    int nLeft,
+    int nTop,
+    GW_ItemSlotBase* item,
+    void* param,
+    int a6,
+    int a7,
+    int a8,
+    unsigned int a9) {
+    if (IsEquippedCompareToolTip(tooltip) || g_showingCompareTooltip) {
+        return Original_ShowItemToolTip(tooltip, nLeft, nTop, item, param, a6, a7, a8, a9);
+    }
+
+    GW_ItemSlotEquip* equipped = nullptr;
+    if (item && DecodeItemId(item) / 1000000 == 1) {
+        equipped = reinterpret_cast<GW_ItemSlotEquip*>(
+            FindEquippedCompareItem(DecodeItemId(item), item));
+    }
+
+    g_deltaTooltip = tooltip;
+    g_deltaHover = reinterpret_cast<GW_ItemSlotEquip*>(item);
+    g_deltaEquipped = equipped;
+
+    if (item && DecodeItemId(item) / 1000000 == 1) {
+        EquipTooltipStyle_NoteHoverPos(tooltip, nLeft, nTop);
+    }
+
+    g_inPrimaryToolTipShow = true;
+    const int result =
+        Original_ShowItemToolTip(tooltip, nLeft, nTop, item, param, a6, a7, a8, a9);
+    g_inPrimaryToolTipShow = false;
+
+    g_deltaTooltip = nullptr;
+    g_deltaHover = nullptr;
+    g_deltaEquipped = nullptr;
+
+    // Defer compare tip until SetItem has painted hover set/growth companions.
+    // Showing compare here (before companions) parked it on top of set/growth.
+    if (item && equipped) {
+        QueuePendingCompare(tooltip, nLeft, nTop, item, a6, a7, a8, a9);
+        // Fallback: if SetItem UI hooks are not outermost, flush here after a
+        // short companion window — SetItem also flushes; pending gate prevents double show.
+        // When SetItem is outer (normal), it flushes after companions and we no-op.
+    } else {
+        ClearEquippedCompareToolTip(true);
+    }
+    return result;
 }
 
 void __fastcall Hook_PrintValue(
@@ -681,52 +842,6 @@ void __fastcall Hook_SetToolTipEquipBasic(
     }
 }
 
-int __fastcall Hook_ShowItemToolTip(
-    CUIToolTip* tooltip,
-    void* /*edx*/,
-    int nLeft,
-    int nTop,
-    GW_ItemSlotBase* item,
-    void* param,
-    int a6,
-    int a7,
-    int a8,
-    unsigned int a9) {
-    if (IsEquippedCompareToolTip(tooltip) || g_showingCompareTooltip) {
-        return Original_ShowItemToolTip(tooltip, nLeft, nTop, item, param, a6, a7, a8, a9);
-    }
-
-    GW_ItemSlotEquip* equipped = nullptr;
-    if (item && DecodeItemId(item) / 1000000 == 1) {
-        equipped = reinterpret_cast<GW_ItemSlotEquip*>(
-            FindEquippedCompareItem(DecodeItemId(item), item));
-    }
-
-    g_deltaTooltip = tooltip;
-    g_deltaHover = reinterpret_cast<GW_ItemSlotEquip*>(item);
-    g_deltaEquipped = equipped;
-
-    if (item && DecodeItemId(item) / 1000000 == 1) {
-        EquipTooltipStyle_NoteHoverPos(tooltip, nLeft, nTop);
-    }
-
-    g_inPrimaryToolTipShow = true;
-    const int result =
-        Original_ShowItemToolTip(tooltip, nLeft, nTop, item, param, a6, a7, a8, a9);
-    g_inPrimaryToolTipShow = false;
-
-    g_deltaTooltip = nullptr;
-    g_deltaHover = nullptr;
-    g_deltaEquipped = nullptr;
-
-    if (item && equipped) {
-        ShowEquippedCompareToolTip(tooltip, nLeft, nTop, item, a6, a7, a8, a9);
-    } else {
-        ClearEquippedCompareToolTip();
-    }
-    return result;
-}
-
 void __fastcall Hook_ClearToolTip(CUIToolTip* tooltip, void* /*edx*/) {
     if (tooltip == g_greenRemapTip) {
         RestoreGreenFontRemap();
@@ -735,7 +850,7 @@ void __fastcall Hook_ClearToolTip(CUIToolTip* tooltip, void* /*edx*/) {
     if (!g_inPrimaryToolTipShow &&
         !IsEquippedCompareToolTip(tooltip) &&
         ShouldClearEquippedCompareOnToolTipClear(tooltip)) {
-        ClearEquippedCompareToolTip();
+        ClearEquippedCompareToolTip(true);
     }
 }
 
@@ -756,5 +871,46 @@ void RelayoutActiveCompareTip() {
 }
 bool IsDeltaPrintValueActive() {
     return g_inEquipBasicCompare;
+}
+bool IsEquippedCompareTip(CUIToolTip* tip) {
+    return IsEquippedCompareToolTip(tip);
+}
+bool IsShowingCompareTip() {
+    return g_showingCompareTooltip;
+}
+void ClearPendingCompare() {
+    ClearPendingCompareInternal();
+}
+void FlushPendingAfterCompanions(
+        CUIToolTip* sourceTooltip,
+        int sourceLeft,
+        int sourceTop,
+        void* sourceItem,
+        int a6,
+        int a7,
+        int a8,
+        unsigned int a9) {
+    // Only flush when EquipCompare queued a compare.
+    if (!g_pendingCompare) {
+        if (g_compareTooltipActive) {
+            RelayoutActiveCompareTipImpl();
+        }
+        return;
+    }
+    CUIToolTip* tip = g_pendingSourceTooltip ? g_pendingSourceTooltip : sourceTooltip;
+    GW_ItemSlotBase* item = g_pendingSourceItem
+            ? g_pendingSourceItem
+            : reinterpret_cast<GW_ItemSlotBase*>(sourceItem);
+    const int left = g_pendingSourceTooltip ? g_pendingLeft : sourceLeft;
+    const int top = g_pendingSourceTooltip ? g_pendingTop : sourceTop;
+    const int pa6 = g_pendingSourceTooltip ? g_pendingA6 : a6;
+    const int pa7 = g_pendingSourceTooltip ? g_pendingA7 : a7;
+    const int pa8 = g_pendingSourceTooltip ? g_pendingA8 : a8;
+    const unsigned int pa9 = g_pendingSourceTooltip ? g_pendingA9 : a9;
+    ClearPendingCompareInternal();
+    if (!tip || !item) {
+        return;
+    }
+    ShowEquippedCompareToolTip(tip, left, top, item, pa6, pa7, pa8, pa9);
 }
 } // namespace EquipCompare

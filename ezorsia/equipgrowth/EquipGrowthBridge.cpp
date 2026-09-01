@@ -416,8 +416,9 @@ static std::string BuildLocalGrowthText(int itemId, int /*enhance*/, int /*itemL
         _snprintf_s(header, _TRUNCATE, "%d\xBC\xB6\xD0\xA7\xB9\xFB\r\n", node);
         sb += header;
         for (const auto& ln : lines) {
-            char row[64];
-            _snprintf_s(row, _TRUNCATE, "%s +%d\r\n", ln.first, ln.second);
+            char row[80];
+            // Match set tip: "label : +N" (ASCII colon + spaces) for IndentLeft canvas.
+            _snprintf_s(row, _TRUNCATE, "%s : +%d\r\n", ln.first, ln.second);
             sb += row;
         }
     }
@@ -697,9 +698,11 @@ void OnHoverEquip(int itemId, int enhance, int itemLevel, int scrollLevel) {
         it = g_cache.end();
     }
     // Prefer existing resolved segmented text (second hover / cache).
+    // Rebuild if still on legacy "label +N" (no set-style " : ") so indent canvas matches set tip.
     if (it != g_cache.end() && !it->second.text.empty()
             && FingerprintMatch(it->second, enhance, itemLevel, scrollLevel)
-            && it->second.resolved && TextHasLevelSegment(it->second.text)) {
+            && it->second.resolved && TextHasLevelSegment(it->second.text)
+            && it->second.text.find(" : ") != std::string::npos) {
         if (!it->second.hasBonus && itemLevel > 1) {
             short bonus[15] = {};
             bool hasBonus = false;
@@ -816,6 +819,14 @@ const char* GetGrowthTipText(int itemId) {
         return it->second.text.c_str();
     }
     return "";
+}
+
+int GetGrowthTipItemLevel(int itemId) {
+    const auto it = g_cache.find(itemId);
+    if (it != g_cache.end() && it->second.itemLevel >= 0) {
+        return it->second.itemLevel;
+    }
+    return 0;
 }
 
 bool HasGrowthTip(int itemId) {
