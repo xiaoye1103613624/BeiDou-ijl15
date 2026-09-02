@@ -120,6 +120,9 @@ void AttachHigherShopListMod() {
     };
 
     const IntPatch kInts[] = {
+        // CUINumberDlg default max for player shop / hired merchant buy (sub_66B6FC):
+        // mov eax, 1000 @+0x66B826 -> 10000. IDA: b8 E8 03 00 00; cmp uses eax.
+        {0x0066B826, 0x000003E8, 0x00002710, "player_shop_buy_qty_max"},
         // Draw Y limit: 0x15C(348) -> 0x1FC(508)
         {0x0075574B, 0x0000015C, 0x000001FC, "buy_draw_y_limit"},
         // HitTest buy/sell: 0x147(327) -> 0x1E7(487)
