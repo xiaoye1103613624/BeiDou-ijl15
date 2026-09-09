@@ -173,6 +173,19 @@ static int DecodeItemId(GW_ItemSlotBase* item) {
     }
 }
 
+// BP33 is shared: pocket 116 @ −33 vs pet pouch 180–183 @ −133 (tab「2」).
+static bool IsPetEquipItemId(int itemId) {
+    if (itemId <= 0) {
+        return false;
+    }
+    const int prefix = itemId / 10000;
+    return prefix == 180 || prefix == 181 || prefix == 182 || prefix == 183;
+}
+
+static bool IsPocketItemId(int itemId) {
+    return itemId > 0 && itemId / 10000 == 116;
+}
+
 static short SafeShort(ZtlSecure<short>& v) {
     try {
         return static_cast<short>(v);
@@ -350,6 +363,25 @@ static GW_ItemSlotBase* FindEquippedCompareItem(int itemId, GW_ItemSlotBase* sou
         const int bodyPart = bodyParts[i];
         if (bodyPart <= 0) {
             continue;
+        }
+        // Pocket vs pet#2 pouch both map to BP33 — never cross-compare slots.
+        if (bodyPart == 33) {
+            if (IsPetEquipItemId(itemId)) {
+                GW_ItemSlotBase* petEq = FetchInventoryItem(kEquipInventoryType, -133);
+                if (petEq && petEq != sourceItem
+                        && IsPetEquipItemId(DecodeItemId(petEq))) {
+                    return petEq;
+                }
+                return nullptr;
+            }
+            if (IsPocketItemId(itemId)) {
+                GW_ItemSlotBase* pocketEq = FetchInventoryItem(kEquipInventoryType, -33);
+                if (pocketEq && pocketEq != sourceItem
+                        && IsPocketItemId(DecodeItemId(pocketEq))) {
+                    return pocketEq;
+                }
+                return nullptr;
+            }
         }
         const int slot = cash ? -(100 + bodyPart) : -bodyPart;
         GW_ItemSlotBase* equipped = FetchInventoryItem(kEquipInventoryType, slot);

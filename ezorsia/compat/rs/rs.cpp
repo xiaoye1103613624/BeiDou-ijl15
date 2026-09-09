@@ -16,6 +16,7 @@
 #include "../wvs/wvsapp.h"
 #include "../ztl/ztl.h"
 #include "../../weather/WeatherApi.h"
+#include "../../windowtitle/WindowTitleApi.h"
 #include <windows.h>
 #include <intrin.h>
 #include <psapi.h>
@@ -1669,6 +1670,7 @@ static void rs_flushPendingFieldRefresh() {
 }
 
 void CWvsApp::CallUpdate_hook(int tCurTime) {
+    WindowTitle::OnTick();
     // Weather frame drivers (ported from MXD_dev). Without these, Web/GM sky changes
     // still update CMapLoadable::Update tint/FX targets, but splash/puddle/accum/sway
     // never run and Weather_Tick never releases field state on logout — which reads as

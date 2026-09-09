@@ -28,6 +28,7 @@
 #include "compat/hook.h"
 #include "Memory.h"
 #include "bootlog/BootLog.h"
+#include "windowtitle/WindowTitleApi.h"
 #include "bootlog/LoadTraceApi.h"
 #include "bootlog/CrashDiag.h"
 #pragma comment(lib, "ws2_32.lib")
@@ -192,6 +193,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		HookIWzNameSpace__Mount(true);
 		HookCWvsApp__InitializeResMan(false); //experimental //ty to all the contributors of the ragezone release: Client load .img instead of .wz v62~v92
 		Hook_StringPool__GetString(true); //hook stringpool modification //ty !! popcorn //ty darter
+		WindowTitle::InstallEarlyUpdate();
 		Hook_lpfn_NextLevel(true);
 		HookSaveGlobal(true);
 		HookSelectCharMacFix(true);
@@ -242,7 +244,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		AttachLevel300ModSafe();
 		AttachMesoUncapMod();
 		AttachGameDataGuard();
-		AttachSkillTipCrashGuards();
+		// SkillTipCrashGuards OFF 2026-09-02: same commit as broken MapEnterNullGuard;
+		// keep vanilla until enter-game is stable again.
+		// AttachSkillTipCrashGuards();
 		AttachPersonalShopMod();
 		if (Client::quickLogin) {
 			AttachQuickLoginMod();

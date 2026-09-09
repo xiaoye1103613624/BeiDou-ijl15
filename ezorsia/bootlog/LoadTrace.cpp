@@ -181,7 +181,11 @@ static int __fastcall Hook_CWvsAppInit(void* pThis, void* edx) {
         // Soft-fail inside spy is gated OFF — VT_EMPTY Growth tip → login 0x80004003
         // (client_boot 2026-08-13 13:45: SOFTFAIL then throw_hr E_POINTER).
         AttachGetObjectAPathSpy("post-CWvsApp::Init");
-        AttachMapEnterNullGuard();
+        // MapEnterNullGuard DISABLED 2026-09-02: today's DLL tramp @A292F9 caused
+        // enter-game AV / illegal-insn / privileged-insn (19:07 / 20:17 / 22:02).
+        // Pre-today state was EnterNullGuard DISABLED (login E_POINTER triage).
+        // AttachMapEnterNullGuard();
+        BootLog("MapEnterNullGuard DISABLED (enter-game tramp regressions)");
         // ComRaise diag also deferred: historical early ComRaise → 0x80004003 at
         // logo/login; path-spy + throw_hr hooks already capture enter 0x8007000D.
         // CrashDiag_AttachComRaiseDiag();

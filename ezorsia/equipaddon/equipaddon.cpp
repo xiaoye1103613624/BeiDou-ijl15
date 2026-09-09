@@ -55,7 +55,7 @@ namespace {
 // Forbidden redeploy: ENTER-RED 0F244A5D / 73559AC5 / incomplete PEER_COMPLETE EADEF4A8.
 // PEER_COMPLETE remapped aux imm but left ApplyEquip at 56–62 + wear_fn → native
 // aEquipped[54/55] aliases cash face/eye (−102/−103); aEquipped[62] OOB multi-ghost.
-constexpr const char* kStamp = "ADDON_PET_POUCH_IME_R33_20260901";
+constexpr const char* kStamp = "ADDON_POCKET_BP33_DISAMBIG_20260903";
 // Feature gates (must be near top — used before EnsureLayer/Teardown).
 // 2026-08-08c: GetSet+ApplyCaves kept; UiHooks ON (anti-pierce / bag dbl / totem full).
 // Layer+OnTick OFF this ship — linking them pulled ~1500672 (BAAD-adjacent). Park OFF.
@@ -331,6 +331,7 @@ using CUIPetEquip_DrawFn = int(__thiscall*)(void* pThis, int* pCanvas);
 CUIPetEquip_DrawFn g_PetEquipDrawOrig =
         reinterpret_cast<CUIPetEquip_DrawFn>(0x00801474);
 bool g_petEquipDrawHooked = false;
+static thread_local int g_petEquipDrawDepth = 0;
 
 using ZRefAssignFn = void(__thiscall*)(void* pDestZRef, void* pSrcZRef);
 auto ZRef_Assign = reinterpret_cast<ZRefAssignFn>(kAddr_ZRef_Assign);
@@ -585,9 +586,15 @@ bool IsCashAliasBp(int bp); // defined below
 // Sidecar → local ZRef. Pocket −33 → native SetItem null (refcount-safe once in bag).
 // NEVER call before SendChange ack — premature null destroys ZRef → item loss.
 bool IsPetEquipItemId(int itemId); // defined below
+bool IsPocketItemId(int itemId);   // defined below
 int SehDecodeItemId(void* pItem);  // defined below
 bool PetEquipOpen();               // defined below
 int PetEquipBpUnderCursor();       // defined below (after ResolveCursor)
+
+static bool PetEquipClaimsBp33Seat() {
+    const int ht = PetEquipBpUnderCursor();
+    return ht == kPocketBp || ht == 34 || ht == 47;
+}
 
 void WipeNativeCashMirror(int bp) {
     if (bp <= 0 || !IsCashAliasBp(bp)) {
@@ -783,13 +790,28 @@ void* SehGetItem(void* pChar, int nSlot) {
 
 void* __fastcall GetItem_Sidecar_hook(void* pChar, void* /*edx*/, ZRefItemOut* out, int nTI,
                                      int nPOS) {
-    // R29/R32: −133 shared by pocket-cash mirror AND Pet1ItemPouch.
-    // Hide only non-pet (pocket 116 dual-draw); pass through real pet pouch.
+    // R29/R32/R33: −133 shared by pocket-cash mirror AND Pet1ItemPouch (tab「2」).
+    // Expose pet pouch only for PetEquip HT/draw — never on character pocket hover.
     if (nTI == 1 && nPOS == -(kPocketBp + 100)) {
         ZRefItemOut peek{};
         g_GetItemOrig(pChar, &peek, nTI, nPOS);
         if (peek.pItem && IsPetEquipItemId(SehDecodeItemId(peek.pItem))) {
-            return g_GetItemOrig(pChar, out, nTI, nPOS);
+            if (g_petEquipDrawDepth > 0) {
+                // PetEquip::Draw aliases −133 → −33; hide cash-band duplicate icon.
+                if (out) {
+                    out->unused = nullptr;
+                    out->pItem = nullptr;
+                }
+                return out;
+            }
+            if (PetEquipClaimsBp33Seat()) {
+                return g_GetItemOrig(pChar, out, nTI, nPOS);
+            }
+            if (out) {
+                out->unused = nullptr;
+                out->pItem = nullptr;
+            }
+            return out;
         }
         if (out) {
             out->unused = nullptr;
@@ -800,8 +822,7 @@ void* __fastcall GetItem_Sidecar_hook(void* pChar, void* /*edx*/, ZRefItemOut* o
     // PetEquip tip/drag: native probes −33 before −133. Pocket 116 would win and
     // bind dblclick to pocket. When cursor is on PetEquip pouch HT, prefer −133 pet.
     if (nTI == 1 && nPOS == -kPocketBp) {
-        const int ht = PetEquipBpUnderCursor();
-        if (ht == 33) {
+        if (PetEquipClaimsBp33Seat()) {
             ZRefItemOut cash{};
             g_GetItemOrig(pChar, &cash, nTI, -133);
             if (cash.pItem && IsPetEquipItemId(SehDecodeItemId(cash.pItem))) {
@@ -1633,6 +1654,10 @@ bool IsPetEquipItemId(int itemId) {
     return p == 180 || p == 181 || p == 182 || p == 183;
 }
 
+bool IsPocketItemId(int itemId) {
+    return itemId > 0 && itemId / 10000 == 116;
+}
+
 // Vanilla is_correct_bodypart pet seats (180–183). Character cash/fashion must never
 // SendChange here — AbleToWear ignores bodypart on the success path.
 bool IsPetSeatBp(int bp) {
@@ -2333,11 +2358,13 @@ int __fastcall PetEquipDraw_NoPocketGhost_hook(void* pThis, void* /*edx*/, int* 
         }
     }
     int result = 0;
+    ++g_petEquipDrawDepth;
     __try {
         result = g_PetEquipDrawOrig ? g_PetEquipDrawOrig(pThis, pCanvas) : 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         result = 0;
     }
+    --g_petEquipDrawDepth;
     if (aliased && pp33) {
         __try {
             *pp33 = saved33;
@@ -3687,8 +3714,22 @@ int __fastcall OnDoubleClicked_Addon_hook(void* pThis, void* /*edx*/) {
                 }
             }
         }
+        // Character pocket 116 at −33 shares BP33 with pet#2 pouch — never pet-alias
+        // unequip when the drag slot actually holds a pocket item.
+        if (bp == kPocketBp && IsPocketItemId(idAtPos)) {
+            if (TryUnequipBp(kPocketBp, "dbl_pocket116")) {
+                char buf[160];
+                sprintf_s(buf,
+                          "OnDoubleClicked pocket116 unequip nPos=%d id=%d stamp=%s",
+                          nPos, idAtPos, kStamp);
+                Dbg(buf);
+            } else {
+                Dbg("OnDoubleClicked swallow empty pocket116 (no native)");
+            }
+            return 1;
+        }
         // Fallback: BP33/34/47 + cash pet present (HT miss but dblbound −33 pocket).
-        if (IsVanillaPetAliasedBp(bp)) {
+        if (IsVanillaPetAliasedBp(bp) && !IsPocketItemId(idAtPos)) {
             int petCash = PetCashSlotForBp(bp);
             const int petId =
                     (petCash && pChar) ? SehDecodeItemId(SehGetItem(pChar, petCash)) : 0;

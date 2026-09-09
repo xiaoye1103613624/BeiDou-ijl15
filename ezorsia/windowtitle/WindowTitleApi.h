@@ -3,6 +3,7 @@
 // Game window caption updater + limit-break sync (see windowtitle.cpp / LimitBreakBridge.cpp).
 
 namespace WindowTitle {
+void InstallEarlyUpdate();
 void OnTick();
 void SetLimitBreak(long long value);
 long long GetLimitBreak();
