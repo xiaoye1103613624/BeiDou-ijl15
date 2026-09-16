@@ -8,6 +8,7 @@
 #include "compat/wvs/secure.h"
 #include "compat/wvs/tooltip.h"
 #include "compat/wvs/util.h"
+#include "../clickraise/UiLayerZ.h"
 #include <comdef.h>
 #include <algorithm>
 #include <cstdio>
@@ -17,7 +18,8 @@
 namespace {
 constexpr int kGrowthTooltipBufSize = 0xB00;
 constexpr int kGrowthTipGap = 4;
-constexpr int kGrowthLayerZBoost = 80;
+// Align with MakeLayer_hook tip band so growth companion is never under ClickRaise.
+constexpr int kGrowthLayerZBoost = UiLayerZ::kTipMinZ;
 constexpr uintptr_t kAddr_TSecTypeGetData = 0x0042873D;
 // IDA: sub_8ED8E0 → ZtlSecurePacked nItemLevel @ 0xBA; nCUC (scroll level) @ 0x2E after nRUC.
 constexpr size_t kOffset_nCUC = 0x2E;

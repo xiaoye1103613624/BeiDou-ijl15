@@ -55,7 +55,7 @@ namespace {
 // Forbidden redeploy: ENTER-RED 0F244A5D / 73559AC5 / incomplete PEER_COMPLETE EADEF4A8.
 // PEER_COMPLETE remapped aux imm but left ApplyEquip at 56–62 + wear_fn → native
 // aEquipped[54/55] aliases cash face/eye (−102/−103); aEquipped[62] OOB multi-ghost.
-constexpr const char* kStamp = "ADDON_POCKET_BP33_DISAMBIG_20260903";
+constexpr const char* kStamp = "ADDON_PET2_POUCH_RED_FIX_20260916";
 // Feature gates (must be near top — used before EnsureLayer/Teardown).
 // 2026-08-08c: GetSet+ApplyCaves kept; UiHooks ON (anti-pierce / bag dbl / totem full).
 // Layer+OnTick OFF this ship — linking them pulled ~1500672 (BAAD-adjacent). Park OFF.
@@ -330,8 +330,19 @@ CharacterData_SetItemFn g_SetItemOrig =
 using CUIPetEquip_DrawFn = int(__thiscall*)(void* pThis, int* pCanvas);
 CUIPetEquip_DrawFn g_PetEquipDrawOrig =
         reinterpret_cast<CUIPetEquip_DrawFn>(0x00801474);
+// CUIPetEquip::Draw — after icon blit, cmp [ebp-24],0 → paint 0x40FF0000 red.
+// Tab「2」pouch walks BE2260[32]=BP33; −133 pet bag aliased onto −33 makes cash-band
+// check fail → false red. Skip red when esi points at BP33 slot.
+static constexpr DWORD kPetEquipRedCmp = 0x008017EC; // 39 5D DC 75 3B
+static constexpr DWORD kPetEquipRedCont = 0x008017F1; // canvas null-check → red blit
+static constexpr DWORD kPetEquipRedSkip = 0x0080182C;
+static constexpr DWORD kPetEquipBp33SlotXy = 0x00BE2360; // &BE2260[32]
+static bool g_petEquipRedCaveDone = false;
 bool g_petEquipDrawHooked = false;
 static thread_local int g_petEquipDrawDepth = 0;
+// Naked PetEquipSkipRedBp33_cave reads this by absolute address — must NOT be
+// thread_local (TLS). Draw runs on the UI thread; volatile keeps the cave in sync.
+static volatile bool g_petEquipPouchAliased = false;
 
 using ZRefAssignFn = void(__thiscall*)(void* pDestZRef, void* pSrcZRef);
 auto ZRef_Assign = reinterpret_cast<ZRefAssignFn>(kAddr_ZRef_Assign);
@@ -790,29 +801,23 @@ void* SehGetItem(void* pChar, int nSlot) {
 
 void* __fastcall GetItem_Sidecar_hook(void* pChar, void* /*edx*/, ZRefItemOut* out, int nTI,
                                      int nPOS) {
-    // R29/R32/R33: −133 shared by pocket-cash mirror AND Pet1ItemPouch (tab「2」).
-    // Expose pet pouch only for PetEquip HT/draw — never on character pocket hover.
+    // R29/R32/R33/R34: −133 shared by pocket-cash mirror AND Pet1ItemPouch (tab「2」).
+    // Single tip source: PetEquip HT remaps −33 → pet; −133 itself stays hidden from
+    // hooked GetItem (SehGetItem still uses g_GetItemOrig for unequip). Character
+    // Equip red9 never sees 180–183 on the cash band.
     if (nTI == 1 && nPOS == -(kPocketBp + 100)) {
         ZRefItemOut peek{};
         g_GetItemOrig(pChar, &peek, nTI, nPOS);
         if (peek.pItem && IsPetEquipItemId(SehDecodeItemId(peek.pItem))) {
-            if (g_petEquipDrawDepth > 0) {
-                // PetEquip::Draw aliases −133 → −33; hide cash-band duplicate icon.
-                if (out) {
-                    out->unused = nullptr;
-                    out->pItem = nullptr;
-                }
-                return out;
-            }
-            if (PetEquipClaimsBp33Seat()) {
-                return g_GetItemOrig(pChar, out, nTI, nPOS);
-            }
+            // Draw aliases −133 → −33; PetEquip tip uses −33 remap only — hide −133
+            // so native tip does not ShowItemToolTip twice for the same pouch.
             if (out) {
                 out->unused = nullptr;
                 out->pItem = nullptr;
             }
             return out;
         }
+        // Stale pocket-cash on −133: hide (server now keeps 116 on −33 only).
         if (out) {
             out->unused = nullptr;
             out->pItem = nullptr;
@@ -820,7 +825,8 @@ void* __fastcall GetItem_Sidecar_hook(void* pChar, void* /*edx*/, ZRefItemOut* o
         return out;
     }
     // PetEquip tip/drag: native probes −33 before −133. Pocket 116 would win and
-    // bind dblclick to pocket. When cursor is on PetEquip pouch HT, prefer −133 pet.
+    // bind dblclick to pocket. When cursor is on PetEquip pouch HT, prefer −133 pet
+    // via −33 only (do not also expose −133 — that stacked identical tips).
     if (nTI == 1 && nPOS == -kPocketBp) {
         if (PetEquipClaimsBp33Seat()) {
             ZRefItemOut cash{};
@@ -833,6 +839,22 @@ void* __fastcall GetItem_Sidecar_hook(void* pChar, void* /*edx*/, ZRefItemOut* o
                 out->pItem = nullptr;
             }
             return out;
+        }
+        // Character Equip red9: if −33 empty but −133 still holds a pet pouch,
+        // do not invent a pocket icon from the pet item (GetItemAtBp is −33-only;
+        // native cash tip must also stay empty).
+        ZRefItemOut normal{};
+        g_GetItemOrig(pChar, &normal, nTI, nPOS);
+        if (!normal.pItem) {
+            ZRefItemOut cash{};
+            g_GetItemOrig(pChar, &cash, nTI, -133);
+            if (cash.pItem && IsPetEquipItemId(SehDecodeItemId(cash.pItem))) {
+                if (out) {
+                    out->unused = nullptr;
+                    out->pItem = nullptr;
+                }
+                return out;
+            }
         }
     }
     if (nTI == 1 && nPOS <= -(kSidecarBpMin + 100) && nPOS >= -(kSidecarBpMax + 100)) {
@@ -2281,6 +2303,49 @@ bool PetEquipOpen() {
     return SafeReadPtr(kCUIPetEquipSingleton) != nullptr;
 }
 
+// IDA @8017EC: cmp [ebp-24], ebx; jnz skip_red. esi = current &BE2260[i].
+// Tab「2」自动拾取 (BP33): skip false 0x40FF0000 only while −133 pet pouch is aliased.
+void __declspec(naked) PetEquipSkipRedBp33_cave() {
+    __asm {
+        cmp esi, kPetEquipBp33SlotXy
+        jne pe_vanilla
+        cmp byte ptr [g_petEquipPouchAliased], 0
+        jne pe_skip_red
+    pe_vanilla:
+        cmp dword ptr [ebp - 24h], ebx
+        jnz pe_skip_red
+        push kPetEquipRedCont
+        ret
+    pe_skip_red:
+        push kPetEquipRedSkip
+        ret
+    }
+}
+
+void EnsurePetEquipSkipRedBp33() {
+    if (g_petEquipRedCaveDone) {
+        return;
+    }
+    static const unsigned char kExpect[] = {0x39, 0x5D, 0xDC, 0x75, 0x3B};
+    auto* p = reinterpret_cast<const unsigned char*>(kPetEquipRedCmp);
+    bool match = true;
+    for (size_t i = 0; i < sizeof(kExpect); ++i) {
+        if (p[i] != kExpect[i]) {
+            match = false;
+            break;
+        }
+    }
+    // Already caved (E9) — treat as done.
+    if (!match && p[0] != 0xE9) {
+        return;
+    }
+    if (match) {
+        Memory::CodeCave(PetEquipSkipRedBp33_cave, kPetEquipRedCmp, sizeof(kExpect));
+        Dbg("PetEquip skip-red BP33 cave OK");
+    }
+    g_petEquipRedCaveDone = true;
+}
+
 // IDA CharacterData::GetItem (−slot): pItem* at this - 8*slot + 235 (normal band).
 void** EquippedNormalItemPtr(void* pChar, int negSlot) {
     if (!pChar || negSlot >= 0 || negSlot <= -100) {
@@ -2295,6 +2360,8 @@ void** EquippedNormalItemPtr(void* pChar, int negSlot) {
 int __fastcall PetEquipDraw_NoPocketGhost_hook(void* pThis, void* /*edx*/, int* pCanvas) {
     // Ensure tab「2」BP33 XY was not left at Equip pocket (5,35) from older dlls.
     RestorePetEquipSharedBe2260();
+    EnsurePetEquipSkipRedBp33();
+    g_petEquipPouchAliased = false;
     void* pChar = GetLocalCharacterData();
     void* saved[3] = {nullptr, nullptr, nullptr};
     void** slots[3] = {nullptr, nullptr, nullptr};
@@ -2340,6 +2407,10 @@ int __fastcall PetEquipDraw_NoPocketGhost_hook(void* pThis, void* /*edx*/, int* 
                 pp33 = nullptr;
             }
         }
+        // −33 already holds 181xxxx (pouch) after ghost-hide: still suppress false red.
+        if (saved33 && IsPetEquipItemId(SehDecodeItemId(saved33))) {
+            g_petEquipPouchAliased = true;
+        }
         ZRefItemOut cash{};
         __try {
             g_GetItemOrig(pChar, &cash, 1, -133);
@@ -2351,9 +2422,14 @@ int __fastcall PetEquipDraw_NoPocketGhost_hook(void* pThis, void* /*edx*/, int* 
             __try {
                 *pp33 = aliasPet;
                 aliased = true;
+                g_petEquipPouchAliased = true;
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 aliased = false;
                 aliasPet = nullptr;
+                // Keep flag if −33 already had a real pet pouch before alias attempt.
+                if (!(saved33 && IsPetEquipItemId(SehDecodeItemId(saved33)))) {
+                    g_petEquipPouchAliased = false;
+                }
             }
         }
     }
@@ -2365,6 +2441,7 @@ int __fastcall PetEquipDraw_NoPocketGhost_hook(void* pThis, void* /*edx*/, int* 
         result = 0;
     }
     --g_petEquipDrawDepth;
+    g_petEquipPouchAliased = false;
     if (aliased && pp33) {
         __try {
             *pp33 = saved33;
@@ -2427,9 +2504,10 @@ void ClearTip() {
     }
     const int prevBp = g_hoverBp;
     if (g_tipReady) {
-        // Leaving Addon tip onto classic Equip: keep 套装 tip; native tip rebinds.
-        SetItem_ReleaseCustomMainTipWithoutHidingSet(
-                reinterpret_cast<CUIToolTip*>(g_tipBuf));
+        // Dismiss set/growth companions while we still own the main tip, then Clear.
+        // (ClearToolTip hook also does this; Dismiss covers edge cases where activeMain
+        // was already released without hiding companions.)
+        SetItem_DismissHoverCompanionsIfMain(reinterpret_cast<CUIToolTip*>(g_tipBuf));
         SehClearTip();
     }
     g_tipOn = false;
@@ -3953,7 +4031,8 @@ void HandleInput(CWnd* eq) {
         s_dragArmed = false;
         return;
     }
-    // Addon dock only: refresh tip (clearFirst only on seat change — keep set tip).
+    // Addon dock only: refresh tip (clearFirst only on seat change — keep set tip
+    // while hovering same seat; ClearTip on leave fully dismisses set companion).
     ShowTip(bp, pt.x, pt.y);
 
     // Arm drag-off + dblclick unequip (layer is not a CWnd — poll LBUTTON).
@@ -4041,10 +4120,11 @@ void InstallLoginPersistOnce() {
     }
     if (!g_petEquipDrawHooked) {
         g_petEquipDrawHooked = true;
+        EnsurePetEquipSkipRedBp33();
         if (!ATTACH_HOOK(g_PetEquipDrawOrig, PetEquipDraw_NoPocketGhost_hook)) {
             Dbg("PetEquip Draw hook FAILED");
         } else {
-            Dbg("PetEquip Draw hook OK (suppress pocket/ghost on BP33/34/47)");
+            Dbg("PetEquip Draw hook OK (suppress pocket/ghost + skip-red BP33)");
         }
     }
     if (!cd64 && !g_setItemHooked) {

@@ -722,9 +722,10 @@ static void ShowEquippedCompareToolTip(
 
     g_showingCompareTooltip = true;
     __try {
-        // Call through the live entry so SetItem can ignore this tip (not steal companions).
-        // Prefer trampoline that skips SetItem companion side-effects via g_showingCompareTooltip.
-        Original_ShowItemToolTip(
+        // Live entry @ 0x8F5B20 (outermost = SetItem): SetItem arms tip-ID pending then
+        // early-returns companions; EquipCompare hook also early-returns via g_showingCompareTooltip.
+        // Do NOT call Original_* trampoline here — that skips SetItem and would omit "ID: n".
+        reinterpret_cast<ShowItemToolTipFn>(kAddrShowItemToolTip)(
             CompareToolTip(),
             left,
             top,

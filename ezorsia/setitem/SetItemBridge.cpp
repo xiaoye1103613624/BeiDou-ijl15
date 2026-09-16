@@ -4,6 +4,7 @@
 #include "compat/ClientAddresses.h"
 #include "compat/PacketDispatcher.h"
 #include "compat/wvs/Packet.h"
+#include "../statdetail/StatDetailApi.h"
 #include <map>
 #include <set>
 #include <string>
@@ -21,6 +22,7 @@ void SetItem_RelayoutCompareCompanion(CUIToolTip* compareTip);
 namespace SetItemData {
 int g_finalDamagePercent = 0;
 int g_damageSkinId = 0;
+CombatPanelStats g_combatPanel{};
 } // namespace SetItemData
 
 namespace {
@@ -67,8 +69,34 @@ bool HandleSetItemInbound(void* /*clientSocket*/, CompatInPacket* packet, unsign
 
     switch (opcode) {
     case CustomSendOpcode::kSetItemFinalDamage: {
-        SetItemData::g_finalDamagePercent = static_cast<int>(packet->Decode<uint16_t>());
-        SetItemData::g_damageSkinId = static_cast<int>(packet->Decode<uint32_t>());
+        // Layout must match PacketCreator.setItemFinalDamageBonus
+        SetItemData::CombatPanelStats& s = SetItemData::g_combatPanel;
+        s.finalDamagePercent = static_cast<int>(packet->Decode<uint16_t>());
+        s.damageSkinId = static_cast<int>(packet->Decode<uint32_t>());
+        s.damR = static_cast<int>(packet->Decode<uint16_t>());
+        s.bossDamR = static_cast<int>(packet->Decode<uint16_t>());
+        s.normalDamR = static_cast<int>(packet->Decode<uint16_t>());
+        s.ignorePDR = static_cast<int>(packet->Decode<uint16_t>());
+        s.ignoreMDR = static_cast<int>(packet->Decode<uint16_t>());
+        s.critRate = static_cast<int>(packet->Decode<uint16_t>());
+        s.critDam = static_cast<int>(packet->Decode<uint16_t>());
+        s.padR = static_cast<int>(packet->Decode<uint16_t>());
+        s.madR = static_cast<int>(packet->Decode<uint16_t>());
+        const uint16_t fdCount = packet->Decode<uint16_t>();
+        for (uint16_t i = 0; i < fdCount; ++i) {
+            (void)packet->Decode<uint16_t>();
+        }
+        s.itemDropProp = static_cast<int>(packet->Decode<uint16_t>());
+        s.mesoDropProp = static_cast<int>(packet->Decode<uint16_t>());
+        s.damageReduce = static_cast<int>(packet->Decode<uint16_t>());
+        if (packet->CanRead(6)) {
+            s.asrR = static_cast<int>(packet->Decode<uint16_t>());
+            s.buffTimeR = static_cast<int>(packet->Decode<uint16_t>());
+            s.stanceProp = static_cast<int>(packet->Decode<uint16_t>());
+        }
+        SetItemData::g_finalDamagePercent = s.finalDamagePercent;
+        SetItemData::g_damageSkinId = s.damageSkinId;
+        StatDetailExt::OnCombatPanelUpdated();
         return true;
     }
     case CustomSendOpcode::kSetItemSkillBonus: {

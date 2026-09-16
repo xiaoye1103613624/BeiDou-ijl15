@@ -201,6 +201,8 @@ static const wchar_t* FallbackPathForPrefix(const wchar_t* prefix) {
     if (wcscmp(prefix, L"Daily") == 0) return L"UI/UIWindow.img/Quest/icon0/0";
     if (wcscmp(prefix, L"attendance") == 0) return L"UI/UIWindow.img/Quest/icon8/0";
     if (wcscmp(prefix, L"dailyGift") == 0) return L"UI/UIWindow.img/Quest/icon7/0";
+    // 任务提醒：原版 NPC 头顶白灯泡
+    if (wcscmp(prefix, L"QuestAlert") == 0) return L"UI/UIWindow.img/QuestIcon/0/0";
     if (wcscmp(prefix, L"mapleHelper") == 0) return L"UI/UIWindow.img/Quest/icon3/6";
     if (wcscmp(prefix, L"mapleStyle") == 0) return L"UI/UIWindow.img/Quest/icon2/0";
     if (wcscmp(prefix, L"itemCollection") == 0) return L"UI/UIWindow.img/Bag/BtOreBag/normal/0";

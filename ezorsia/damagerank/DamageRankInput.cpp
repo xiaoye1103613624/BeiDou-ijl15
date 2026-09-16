@@ -4,6 +4,7 @@
 #include "compat/wvs/wndman.h"
 #include "../storagebag/StorageBagApi.h"
 #include "../invresize/InvResizeApi.h"
+#include "../clickraise/ClickRaiseApi.h"
 
 namespace {
 static void ClearDamageRankFocus(CWndMan* wndMan) {
@@ -33,6 +34,12 @@ int CWndMan::TranslateMessageImpl_hook(
     const bool damageRankMouse =
             DamageRank_HandleMouseMessage(msg, wParam, lParam, plResult);
 
+    // Raise the visual-top CWnd under the cursor before ProcessMouse picks
+    // m_pMoveWnd — stops Equip/Inventory drags from moving MiniMap underneath.
+    if (msg == WM_LBUTTONDOWN) {
+        ClickRaise_OnLButtonDown();
+    }
+
     const int result =
             CWndMan::TranslateMessageImpl(this, msg, wParam, lParam, plResult);
 
@@ -44,5 +51,10 @@ int CWndMan::TranslateMessageImpl_hook(
 }
 
 void AttachDamageRankInputHooks() {
+    static bool s_attached = false;
+    if (s_attached) {
+        return;
+    }
+    s_attached = true;
     ATTACH_HOOK(CWndMan::TranslateMessageImpl, CWndMan::TranslateMessageImpl_hook);
 }

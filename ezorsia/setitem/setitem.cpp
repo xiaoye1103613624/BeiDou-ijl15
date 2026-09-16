@@ -369,12 +369,86 @@ static int SafeGetItemId(GW_ItemSlotEquip* pe) {
 }
 
 // IDA 0x8F5C26: ShowItemToolTip reads item id from a4 + 0xC (all paths incl. backpack).
+// Equip-only: used by set/growth companions — do not widen to non-equip.
 static int ReadShowItemToolTipItemId(int* a4) {
     if (!a4) {
         return 0;
     }
     const int id = DecodeItemIdAt(a4, 0xC);
     return IsEquipItemId(id) ? id : 0;
+}
+
+// Any positive item id (equip / consume / etc.) for tip bottom "ID: n" line.
+// Must stay separate from ReadShowItemToolTipItemId (equip filter).
+static int ReadAnyShowItemToolTipItemId(int* a4) {
+    if (!a4) {
+        return 0;
+    }
+    const int id = DecodeItemIdAt(a4, 0xC);
+    return id > 0 ? id : 0;
+}
+
+// Pending for Pet/Bundle early-MakeLayer canvas draw (those paths never PrintLines).
+// Equip/Ring go through SetToolTip_Equip_Basic instead — CUIEquip/CUIPetEquip call
+// SetToolTip_Equip directly and bypass ShowItemToolTip, so Basic is the reliable entry.
+// Tip pointer match prevents main/compare cross-talk; thread_local for UI thread.
+static thread_local CUIToolTip* g_pendingIdTip = nullptr;
+static thread_local int g_pendingItemId = 0;
+static thread_local bool g_pendingIdConsumed = false;
+
+// AddInfoEx advances m_nHeight by fontH+4 (~13+4). Pet/Bundle canvas band matches that.
+static constexpr int kItemTipIdLineAdvance = 17;
+static constexpr int kItemTipIdDrawX = 12;
+
+static void ClearPendingItemTipId() {
+    g_pendingIdTip = nullptr;
+    g_pendingItemId = 0;
+    g_pendingIdConsumed = false;
+}
+
+static void SetPendingItemTipId(CUIToolTip* tip, int itemId) {
+    if (!Client::showItemTipId || !tip || itemId <= 0) {
+        ClearPendingItemTipId();
+        return;
+    }
+    g_pendingIdTip = tip;
+    g_pendingItemId = itemId;
+    g_pendingIdConsumed = false;
+}
+
+static void MarkPendingItemTipIdConsumed(CUIToolTip* tip) {
+    if (tip && tip == g_pendingIdTip) {
+        g_pendingIdConsumed = true;
+        g_pendingIdTip = nullptr;
+    }
+}
+
+static int TipInfoLineCount(CUIToolTip* tip) {
+    if (!tip) {
+        return 0;
+    }
+    // CUIToolTip info-line count at +0x1C (IDA AddInfoEx / PrintLines).
+    return *reinterpret_cast<int*>(reinterpret_cast<char*>(tip) + 0x1C);
+}
+
+// Must run before MakeLayer bakes the canvas. After Original_ShowItemToolTip returns,
+// AddInfoEx is a no-op for display (canvas already created).
+// Split SEH vs C++ unwind: ZXString dtor cannot live in a __try function (C2712).
+static void AppendItemIdLineImpl(CUIToolTip* tip, int itemId) {
+    ZXString<char> sLine;
+    sLine.Format("ID: %d", itemId);
+    // Font 14/15: same AddInfoEx slot pair as equipcompare / fusionanvil tip lines.
+    tip->AddInfoEx(14, 15, sLine, ZXString<char>(), 1, 1001);
+}
+
+static void AppendItemIdLine(CUIToolTip* tip, int itemId) {
+    if (!tip || itemId <= 0 || !Client::showItemTipId) {
+        return;
+    }
+    __try {
+        AppendItemIdLineImpl(tip, itemId);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
 }
 
 static int FetchEquippedItemAt(void* pCharData, int pos) {
@@ -2273,6 +2347,104 @@ typedef int(__thiscall* ShowItemToolTip_t)(
 static auto Original_ShowItemToolTip = reinterpret_cast<ShowItemToolTip_t>(
         ClientAddresses::SetItem::kShowItemToolTip);
 
+// IDA 0x8F3141 CUIToolTip::MakeLayer — Pet/Bundle early-bake path only.
+// Equip/Ring ID is appended in SetToolTip_Equip_Basic (before footer height reserve).
+// Detours chain: this hook outermost → rs MakeLayer_hook (clamp) → game.
+typedef IWzCanvasPtr*(__thiscall* MakeLayer_t)(
+        CUIToolTip* pThis,
+        IWzCanvasPtr* result,
+        int nLeft,
+        int nTop,
+        int bDoubleOutline,
+        int bLogin,
+        int bCharToolTip,
+        unsigned int uColor);
+static auto Original_MakeLayer = reinterpret_cast<MakeLayer_t>(0x008F3141);
+
+// Pet/Bundle: MakeLayer runs right after SetBasicInfo (no AddInfoEx / PrintLines).
+// Reserve a bottom band before bake, then paint ASCII on the canvas.
+static void DrawItemIdOnTipCanvas(CUIToolTip* tip, int itemId) {
+    if (!tip || itemId <= 0 || !Client::showItemTipId) {
+        return;
+    }
+    EnsureSetTipFonts(tip);
+    char buf[48] = {};
+    sprintf_s(buf, "ID: %d", itemId);
+    IWzCanvasPtr canvas = GetTooltipCanvas(tip);
+    IWzFontPtr font = GetSetTipFont(SetTipStyle::White);
+    if (!canvas || !font) {
+        return;
+    }
+    // Height was bumped by kItemTipIdLineAdvance before MakeLayer; paint inside
+    // that reserved band (not above it — old formula overlapped prior content).
+    const int y = tip->m_nHeight - kItemTipIdLineAdvance + 2;
+    if (y < 0) {
+        return;
+    }
+    DrawSetTipText(canvas, kItemTipIdDrawX, y, buf, font);
+}
+
+// IDA 0x8ECA0C — append ID at end of Basic, BEFORE SetToolTip_Equip footer reserve
+// (sub_8F4535 measure + optional +30). MakeLayer-time AddInfoEx landed inside that
+// reserve and overlapped orange 剪刀/交易文案 (or left a huge gap).
+// Also covers CUIEquip/CUIPetEquip OnMouseMove → SetToolTip_Equip (bypasses ShowItemToolTip).
+typedef void(__thiscall* SetToolTipEquipBasic_t)(CUIToolTip* tip, GW_ItemSlotEquip* pe);
+static auto Original_SetToolTipEquipBasic =
+        reinterpret_cast<SetToolTipEquipBasic_t>(0x008ECA0C);
+
+void __fastcall Hook_SetToolTipEquipBasic(
+        CUIToolTip* tip,
+        void* /*edx*/,
+        GW_ItemSlotEquip* pe) {
+    Original_SetToolTipEquipBasic(tip, pe);
+    if (!Client::showItemTipId || !tip || !pe) {
+        return;
+    }
+    const int itemId = SafeGetItemId(pe);
+    if (itemId <= 0) {
+        return;
+    }
+    AppendItemIdLine(tip, itemId);
+    MarkPendingItemTipIdConsumed(tip);
+}
+
+IWzCanvasPtr* __fastcall Hook_MakeLayer(
+        CUIToolTip* pThis,
+        void* /*edx*/,
+        IWzCanvasPtr* result,
+        int nLeft,
+        int nTop,
+        int bDoubleOutline,
+        int bLogin,
+        int bCharToolTip,
+        unsigned int uColor) {
+    int canvasDrawId = 0;
+    // Equip/Ring: Basic hook already AppendItemIdLine + consumed before footer reserve.
+    // Never AddInfoEx here when TipInfoLineCount>0 — SetToolTip_Equip has already
+    // measured orange footer into m_nHeight; late AddInfoEx lands in that band and
+    // overlaps 剪刀/制炼书文案 (the original bug). Pet/Bundle only: lineCount==0.
+    if (pThis &&
+            pThis == g_pendingIdTip &&
+            !g_pendingIdConsumed &&
+            g_pendingItemId > 0 &&
+            Client::showItemTipId) {
+        if (TipInfoLineCount(pThis) == 0) {
+            pThis->m_nHeight += kItemTipIdLineAdvance;
+            canvasDrawId = g_pendingItemId;
+        }
+        // else: equip path should have been handled in Hook_SetToolTipEquipBasic;
+        // drop pending rather than late-append into footer reserve.
+        g_pendingIdConsumed = true;
+        g_pendingIdTip = nullptr;
+    }
+    IWzCanvasPtr* layer = Original_MakeLayer(
+            pThis, result, nLeft, nTop, bDoubleOutline, bLogin, bCharToolTip, uColor);
+    if (canvasDrawId > 0) {
+        DrawItemIdOnTipCanvas(pThis, canvasDrawId);
+    }
+    return layer;
+}
+
 static void SyncLayoutFromTip(CUIToolTip* tip) {
     if (!tip) {
         return;
@@ -2298,8 +2470,19 @@ int __fastcall Hook_ShowItemToolTip(
         int a7,
         int a8,
         unsigned int a9) {
+    // Always clear pending on exit so a missed MakeLayer cannot leak into the next tip.
+    struct PendingItemTipIdScope {
+        ~PendingItemTipIdScope() {
+            ClearPendingItemTipId();
+        }
+    } pendingScope;
+
     // Compare tip nested ShowItemToolTip must not steal hover set/growth companions.
+    // Still arm pending so compare tip gets its own "ID: n" (tip pointer match).
     if (EquipCompare::IsEquippedCompareTip(pThis) || EquipCompare::IsShowingCompareTip()) {
+        if (item) {
+            SetPendingItemTipId(pThis, ReadAnyShowItemToolTipItemId(item));
+        }
         return Original_ShowItemToolTip(pThis, nLeft, nTop, item, param, a6, a7, a8, a9);
     }
 
@@ -2322,6 +2505,9 @@ int __fastcall Hook_ShowItemToolTip(
             g_inShowItemToolTip = false;
         }
     } scope;
+
+    // Arm before Original: SetToolTip_* → MakeLayer (our hook Appends then bakes).
+    SetPendingItemTipId(pThis, ReadAnyShowItemToolTipItemId(item));
 
     const int hoverItemId = ReadShowItemToolTipItemId(item);
     g_primaryShowItemId = hoverItemId;
@@ -2379,6 +2565,23 @@ void RedrawActivePanel() {
     g_lastEquippedCount = 0;
     UpdateSetTooltip(g_activeMainTooltip, g_lastLayoutX, g_lastLayoutY, g_lastHoverItemId, false);
 }
+
+void DismissHoverCompanionsIfMain(CUIToolTip* tip) {
+    if (!tip || tip != g_activeMainTooltip) {
+        return;
+    }
+    if (g_inShowItemToolTip) {
+        return;
+    }
+    HideSetTooltip();
+    HideAltSetTooltip();
+    HideCmpSetTooltip();
+    EquipGrowth_Hide();
+    g_activeMainTooltip = nullptr;
+    g_activeEquip = nullptr;
+    g_primaryShowItemId = 0;
+    EquipCompare::ClearPendingCompare();
+}
 } // namespace SetItemMod
 
 void SetItem_RedrawActivePanel() {
@@ -2394,6 +2597,10 @@ void SetItem_ReleaseCustomMainTipWithoutHidingSet(CUIToolTip* tip) {
     if (tip && tip == SetItemMod::g_activeMainTooltip) {
         SetItemMod::g_activeMainTooltip = nullptr;
     }
+}
+
+void SetItem_DismissHoverCompanionsIfMain(CUIToolTip* tip) {
+    SetItemMod::DismissHoverCompanionsIfMain(tip);
 }
 
 bool SetItem_TryGetActiveSetTooltipRect(int& outX, int& outY, int& outW, int& outH) {
@@ -2439,6 +2646,12 @@ void AttachSetItemUiHooks() {
     SetItemMod::g_uiHooksAttached = true;
     AttachEquipTooltipStyleHooks();
     ATTACH_HOOK(SetItemMod::Original_ShowItemToolTip, SetItemMod::Hook_ShowItemToolTip);
+    // After EquipCompare's SetToolTip_Equip_Basic: Detours makes us outermost so ID
+    // appends after compare-only stats and before SetToolTip_Equip footer reserve.
+    ATTACH_HOOK(SetItemMod::Original_SetToolTipEquipBasic, SetItemMod::Hook_SetToolTipEquipBasic);
+    // After rs MakeLayer_hook: Detours makes us outermost so Pet/Bundle reserve+draw
+    // runs around bake+clamp.
+    ATTACH_HOOK(SetItemMod::Original_MakeLayer, SetItemMod::Hook_MakeLayer);
     // Re-hook game DrawToolTip_Equip address so Detours chains us outermost over
     // FusionAnvil (Bind-to-trampoline previously skipped FA or failed to fire).
     SetItemMod::CUIToolTip__DrawToolTip_Equip =
@@ -2450,7 +2663,8 @@ void AttachSetItemUiHooks() {
                 SetItemMod::CUIToolTip__ClearToolTip_SetItem_hook);
     SetItemMod::EnsureSetItemDatabaseLoaded();
     std::cout << "[SetItem] EnsureUiHooks OK sets=" << SetItemMod::g_setDefs.size()
-              << " items=" << SetItemMod::g_itemToSet.size() << std::endl;
+              << " items=" << SetItemMod::g_itemToSet.size()
+              << " showItemTipId=" << (Client::showItemTipId ? "on" : "off") << std::endl;
 }
 
 int SetItem_GetSetIdForItem(int itemId) {

@@ -23,8 +23,6 @@
 
 static constexpr uintptr_t kAddr_AvatarLook_Load              = 0x004E72AD;
 static constexpr uintptr_t kAddr_ItemSlotBase_Decode          = 0x004E33F9;
-static constexpr uintptr_t kAddr_InPacket_Decode1             = 0x004065F3;
-static constexpr uintptr_t kAddr_InPacket_Decode2             = 0x0042470C;
 static constexpr uintptr_t kAddr_InPacket_Decode4             = 0x00406629;
 static constexpr uintptr_t kAddr_SendConsumeCash              = 0x00A0A63F;
 static constexpr uintptr_t kAddr_SendEtcCash                  = 0x00A1DC5B;
@@ -63,10 +61,9 @@ static constexpr uintptr_t kPatch_SubtypeAllocSizeImm         = 0x004E3580;
 //   nSocket2         @ 0x138 (int)    — 星岩槽2
 //   nSocket3         @ 0x13C (int)    — 星岩槽3 Phase10
 //   nBreakthrough    @ 0x140 (short)  — 破界等级 0~50 Phase12
-// Chaos ledger is NOT in-struct (avoid alloc churn); sidecar map after Decode.
-// Struct grew 0x140 → 0x142 (server writes breakthrough short at tail). Keep
-// PacketCreator.addItemInfo tail in sync — mismatch desyncs inventory decode.
-// New size 0x142 (0x140 → +breakthrough short). Keep PacketCreator tail in sync.
+// Struct grew 0x140 → 0x142 for extension fields (tooltip/avatar readers).
+// Wire layout after native writeInt(-1): ONLY anvilItemId (4B) — see
+// PacketCreator.addItemInfo. Do not consume the old 71B spirit/pot/soul tail.
 static constexpr uint32_t  kNewItemSlotEquipSize              = 0x142;
 static constexpr size_t    kOffset_nAnvilItemID               = 0xF9;
 static constexpr size_t    kOffset_nEquipSkillID              = 0xFD;
@@ -567,10 +564,6 @@ void CUIFusionAnvil::SendRequestPacket() {
 // Hook 1: GW_ItemSlotBase::Decode — static __cdecl factory.
 // ===========================================================================
 
-static auto CInPacket__Decode1 =
-    reinterpret_cast<unsigned char(__thiscall*)(CInPacket*)>(kAddr_InPacket_Decode1);
-static auto CInPacket__Decode2 =
-    reinterpret_cast<uint16_t(__thiscall*)(CInPacket*)>(kAddr_InPacket_Decode2);
 static auto CInPacket__Decode4 =
     reinterpret_cast<uint32_t(__thiscall*)(CInPacket*)>(kAddr_InPacket_Decode4);
 
@@ -615,96 +608,33 @@ int __cdecl GW_ItemSlotBase__Decode_hook(void* pOutZRef, CInPacket* pPacket) {
     if (nType != 1) return ret;
 
     auto* pEquip = reinterpret_cast<GW_ItemSlotEquip*>(pItem);
-    // NATIVE-V83 LAYOUT (08-11): the server now encodes getCharInfo with the
-    // plain v83 equip layout (addItemInfoV83Vanilla) — no 71B anvil/spirit/
-    // potential/soul/socket tail follows writeInt(-1). The classic FusionAnvil
-    // Decode-hook tail consumption would read into the next item and desync
-    // the whole inventory straight to EOF ("38 已到文件结尾"). Keep the
-    // struct-size enlargement (0x142) so all extension-field readers
-    // (tooltip/avatar/userinfo) stay in-bounds; just zero-fill the pad so
-    // nothing leaks heap garbage into tooltips.
+    // Wire: server may append 0 or 4 bytes (anvilItemId) after native writeInt(-1).
+    // Always CanRead before Decode4 — missing bytes → CInPacket EOF ("已到文件结尾");
+    // leftover unconsumed anvil bytes also desync CharInfo. Zero-fill extension pad.
     __try {
         memset(reinterpret_cast<char*>(pEquip) + kOffset_nAnvilItemID, 0,
                kNewItemSlotEquipSize - kOffset_nAnvilItemID);
     } __except (EXCEPTION_EXECUTE_HANDLER) { return ret; }
-    return ret;
 
-    uint32_t nAnvilItemID = 0;
-    uint32_t nSkillID = 0;
-    uint32_t nSkillLevel = 0;
-    uint32_t expireLo = 0;
-    uint32_t expireHi = 0;
-    unsigned char nEnhance = 0;
-    unsigned char nPotGrade = 0;
-    uint16_t nInfusion = 0;
-    uint32_t nPot1 = 0;
-    uint32_t nPot2 = 0;
-    uint32_t nPot3 = 0;
-    unsigned char nBonusGrade = 0;
-    uint32_t nBonus1 = 0;
-    uint32_t nBonus2 = 0;
-    uint32_t nBonus3 = 0;
-    uint32_t nSoulId = 0;
-    uint32_t nSoulOption = 0;
-    uint32_t nSocket1 = 0;
-    uint32_t nSocket2 = 0;
-    uint32_t nSocket3 = 0;
-    uint16_t nBreakthrough = 0;
+    // Raw CInPacket layout (v83): +0x8 = data*, +0xC = length(u16), +0x14 = offset(u32)
+    auto* raw = reinterpret_cast<unsigned char*>(pPacket);
+    unsigned char* data = nullptr;
+    unsigned short length = 0;
+    unsigned int offset = 0;
     __try {
-        nAnvilItemID = CInPacket__Decode4(pPacket);
-        nSkillID = CInPacket__Decode4(pPacket);
-        nSkillLevel = CInPacket__Decode4(pPacket);
-        expireLo = CInPacket__Decode4(pPacket);
-        expireHi = CInPacket__Decode4(pPacket);
-        // Phase2 Hyper/Potential — after spirit expire (PacketCreator tail)
-        nEnhance = CInPacket__Decode1(pPacket);
-        nPotGrade = CInPacket__Decode1(pPacket);
-        nInfusion = CInPacket__Decode2(pPacket); // 0x10F → 注能等级 (低字节)
-        nPot1 = CInPacket__Decode4(pPacket);
-        nPot2 = CInPacket__Decode4(pPacket);
-        nPot3 = CInPacket__Decode4(pPacket);
-        // Phase3 附加潜能
-        nBonusGrade = CInPacket__Decode1(pPacket);
-        (void)CInPacket__Decode1(pPacket); // pad
-        (void)CInPacket__Decode2(pPacket); // reserved
-        nBonus1 = CInPacket__Decode4(pPacket);
-        nBonus2 = CInPacket__Decode4(pPacket);
-        nBonus3 = CInPacket__Decode4(pPacket);
-        // Phase4 灵魂 + 星岩 + Phase10 socket3
-        nSoulId = CInPacket__Decode4(pPacket);
-        nSoulOption = CInPacket__Decode4(pPacket);
-        nSocket1 = CInPacket__Decode4(pPacket);
-        nSocket2 = CInPacket__Decode4(pPacket);
-        nSocket3 = CInPacket__Decode4(pPacket);
-        // Phase12 破界等级 (short) — must consume exactly 2 bytes to keep the
-        // following item decode aligned. Server writes it after socket3.
-        nBreakthrough = CInPacket__Decode2(pPacket);
-        // Chaos ledger stays DB-only — do NOT decode extra bytes here.
-        g_chaosByEquip.erase(reinterpret_cast<uintptr_t>(pEquip));
+        data = *reinterpret_cast<unsigned char**>(raw + 0x8);
+        length = *reinterpret_cast<unsigned short*>(raw + 0xC);
+        offset = *reinterpret_cast<unsigned int*>(raw + 0x14);
     } __except (EXCEPTION_EXECUTE_HANDLER) { return ret; }
-    __try {
-        pEquip->nAnvilItemID = static_cast<int32_t>(nAnvilItemID);
-        pEquip->nEquipSkillID = static_cast<int32_t>(nSkillID);
-        pEquip->nEquipSkillLevel = static_cast<int32_t>(nSkillLevel);
-        pEquip->tEquipSkillExpire =
-            (static_cast<uint64_t>(expireHi) << 32) | expireLo;
-        pEquip->nEnhance = nEnhance;
-        pEquip->nPotentialGrade = nPotGrade;
-        pEquip->nInfusion = nInfusion;
-        pEquip->nPotential1 = static_cast<int32_t>(nPot1);
-        pEquip->nPotential2 = static_cast<int32_t>(nPot2);
-        pEquip->nPotential3 = static_cast<int32_t>(nPot3);
-        pEquip->nBonusPotentialGrade = nBonusGrade;
-        pEquip->nBonusPotential1 = static_cast<int32_t>(nBonus1);
-        pEquip->nBonusPotential2 = static_cast<int32_t>(nBonus2);
-        pEquip->nBonusPotential3 = static_cast<int32_t>(nBonus3);
-        pEquip->nSoulId = static_cast<int32_t>(nSoulId);
-        pEquip->nSoulOption = static_cast<int32_t>(nSoulOption);
-        pEquip->nSocket1 = static_cast<int32_t>(nSocket1);
-        pEquip->nSocket2 = static_cast<int32_t>(nSocket2);
-        pEquip->nSocket3 = static_cast<int32_t>(nSocket3);
-        pEquip->nBreakthrough = nBreakthrough;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+    if (data && offset + 4 <= length) {
+        uint32_t nAnvilItemID = 0;
+        __try {
+            nAnvilItemID = CInPacket__Decode4(pPacket);
+            g_chaosByEquip.erase(reinterpret_cast<uintptr_t>(pEquip));
+            pEquip->nAnvilItemID = static_cast<int32_t>(nAnvilItemID);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
     return ret;
 }
 

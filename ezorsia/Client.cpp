@@ -37,6 +37,7 @@ bool Client::disableBossHP = false;
 bool Client::disableWorldMap = false;
 bool Client::enableGrowthCompanionTip = true; // growth companion tip; config optional.enableGrowthCompanion (hover-lazy)
 bool Client::enableNativeAdventurerDice = true; // config optional.enableNativeAdventurerDice
+bool Client::showItemTipId = true; // tip bottom "ID: n"; config optional.showItemTipId
 bool Client::expandItem = false;
 bool Client::expandItemUI = false;
 bool Client::expandItemSlotLimits = false;
@@ -1000,16 +1001,17 @@ void Client::MoreHook() {
 	Memory::WriteInt(0x0049064B + 2, talkTime);
 
 	// 角色能力/能力详情：始终对齐 live UIWindow.img Stat 画布（不再仅 high-cap 路径）。
-	// orange-wz 实测：Stat/backgrnd=213x347，Stat/backgrnd2=218x203。
-	// 原 CreateWnd 宽 176 / 详情宽 177 / 详情 x 170，会裁切加宽后的 WZ。
+	// orange-wz 实测：Stat/backgrnd=213x347，Stat/backgrnd2=218x203，Stat/backgrnd4=237x239。
+	// 详情窗取 max(backgrnd2, backgrnd4)=237x239，避免第 2 页裁切。
 	// IDA 已核对仅改 immediate / 既有 apDetailBtn cave；未改 hook 地址。
 	Memory::WriteInt(0x008C485A + 1, 192); // 面板关闭按钮x（原 156）
 	Memory::WriteInt(0x008C4AB3 + 1, 213); // 左侧 CreateWnd 宽（原 176 → backgrnd 213）
-	Memory::WriteInt(0x008C510A + 1, 218); // 详情面板宽（原 177 → backgrnd2 218）
+	Memory::WriteInt(0x008C5105 + 1, 239); // 详情面板高（原 203 → backgrnd4 239）
+	Memory::WriteInt(0x008C510A + 1, 237); // 详情面板宽（原 177 → max(backgrnd2,4)=237）
 	Memory::WriteInt(0x008C4EA2 + 1, 213); // 详情面板初始x（原 170）
 	Memory::WriteInt(0x008C5760 + 1, 213); // 详情面板切换x（原 170）
 	Memory::WriteInt(0x008C7AD9 + 1, 185); // 加属性按钮x（原 153）
-	Memory::WriteInt(0x008C2754 + 1, 195); // 详情面板关闭按钮x（原 155）
+	Memory::WriteInt(0x008C2754 + 1, 214); // 详情面板关闭按钮x（原 155；随宽 237 右移）
 	Memory::WriteInt(0x008C6C72 + 1, 213); // 移动时详情面板x（原 170）
 	Memory::CodeCave(apDetailBtn, 0x008C4E1B, 7); // 详情按钮 x 124→153
 	// 喇叭

@@ -17,6 +17,7 @@
 #include "../ztl/ztl.h"
 #include "../../weather/WeatherApi.h"
 #include "../../windowtitle/WindowTitleApi.h"
+#include "../../clickraise/UiLayerZ.h"
 #include <windows.h>
 #include <intrin.h>
 #include <psapi.h>
@@ -717,7 +718,8 @@ void CUtilDlgEx::CreateUtilDlgEx_hook() {
     int nLeft = zclamp<int>(rs_questDlgRect.left - m_wndWidth / 2, 0, rs_width);
     int nTop = zclamp<int>(rs_questDlgRect.top - m_wndHeight / 2, 0, rs_height);
     // Call CreateWnd directly (return addr ≠ CreateDlg) so origin stays LT/m_pOrgWindow.
-    CreateWnd(nLeft, nTop, m_wndWidth, m_wndHeight, 10, 1, nullptr, 1);
+    // z = modal floor so ClickRaise-raised panels (≤500) cannot cover NPC/quest dialogs.
+    CreateWnd(nLeft, nTop, m_wndWidth, m_wndHeight, UiLayerZ::kModalFloorZ, 1, nullptr, 1);
     std::cout << "[RS] UtilDlgEx at " << nLeft << "," << nTop
               << " size=" << m_wndWidth << "x" << m_wndHeight
               << " screen=" << rs_width << "x" << rs_height << std::endl;
@@ -1016,7 +1018,7 @@ static void RsPlaceAbsDlg(CWnd* pThis, int l, int t, int nWidth, int nHeight,
         rs_width, rs_height, rs_originActive ? 1 : 0);
     RsLogFlush(buf);
 
-    rs_OrigCreateWnd(pThis, l, t, nWidth, nHeight, 10, 1, pData, 1);
+    rs_OrigCreateWnd(pThis, l, t, nWidth, nHeight, UiLayerZ::kModalFloorZ, 1, pData, 1);
     // Always re-assert LT: OrigCreateWnd bypasses CreateWnd_hook, so CC cannot be
     // applied there — but layer may still inherit a non-LT origin from construction.
     RsForceLtAbs(pThis, l, t);
@@ -1276,13 +1278,14 @@ static void rs_afterSuccessfulSwitch(int nw, int nh, bool grChanged, bool loginU
         // rematch origins/metrics. Destroying StatusBar + ReloadBack while SysOpt was still
         // open / D3D DEVICENOTRESET pending caused 2nd-switch black-screen hang.
         //
-        // follow-login only when live field dims still equal login dims → UpdateResolution
-        // (no Origin). Explicit SysOpt tier picks clear follow_login before switch; still
-        // gate on dims here so a stale follow_login flag cannot skip Origin after HD
-        // ScreenResolution (first-switch UI stuck / unclickable hitboxes).
+        // follow-login skip-Origin is ONLY safe at true 800×600. HD + UpdateResolution
+        // without Origin left: unclickable/drop-dead zones past the old 800×600 island,
+        // and CreateDlg Notice/YesNo skewed (LT place runs only when Origin is on).
+        // Explicit SysOpt tier picks clear follow_login before switch.
         // Do NOT treat !grChanged as skip-Origin: soft-fail / SysOpt same-size heal used to
         // leave Origin off forever on HD (info bar / hotkeys / minimap misplaced).
-        if (rs_field_follow_login && nw == rs_login_w && nh == rs_login_h) {
+        const bool vanillaSize = (nw <= 800 && nh <= 600);
+        if (rs_field_follow_login && nw == rs_login_w && nh == rs_login_h && vanillaSize) {
             rs_originActive = false;
             rs_adjust_cy = 0;
             RsLogFlush("[RS] follow-login field — skip Origin (UpdateResolution layout)");
@@ -1294,9 +1297,12 @@ static void rs_afterSuccessfulSwitch(int nw, int nh, bool grChanged, bool loginU
             rs_refreshWorldMapCenter();
         } else {
             if (rs_field_follow_login) {
-                // HD (or any non-login) size while flag still set — leave follow-login.
                 rs_field_follow_login = false;
-                RsLogFlush("[RS] clear stale follow_login (field dims != login) — apply Origin");
+                if (!vanillaSize) {
+                    RsLogFlush("[RS] HD follow-login → Origin (hitbox/drop/Notice outside 800x600)");
+                } else {
+                    RsLogFlush("[RS] clear stale follow_login (field dims != login) — apply Origin");
+                }
             }
             rs_originActive = true;
             if (!rs_layoutHooksInstalled) {
@@ -1769,11 +1775,20 @@ int RsInput::SetCursorPos_hook(int x, int y) {
 }
 
 // ===== CUIToolTip bounds =====
-// Screen-edge clamp ONLY (SetItem companion tip, BossHP %, equip tips, etc.).
+// Screen-edge clamp + tip-band z (vanilla MakeLayer uses 0/10/210 — below ClickRaise).
 // Never re-origin or StatusBar-snap tooltips — callers own (x,y).
 IWzCanvasPtr* CUIToolTip::MakeLayer_hook(IWzCanvasPtr* result, int nLeft, int nTop,
     int bDoubleOutline, int bLogin, int bCharToolTip, unsigned int uColor) {
     CUIToolTip::MakeLayer(this, result, nLeft, nTop, bDoubleOutline, bLogin, bCharToolTip, uColor);
+    // Pin tip layers above raised panels / modals (see UiLayerZ::kTipMinZ).
+    if (m_pLayer) {
+        __try {
+            if (m_pLayer->z < UiLayerZ::kTipMinZ) {
+                m_pLayer->z = UiLayerZ::kTipMinZ;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
     // Screen-edge clamp only when size is valid. Skip if width/height unset (companion
     // SetItem / Potential / Hyper tips) — RelMove(boundX - 0) shoved tips off-screen.
     if (!bCharToolTip && m_pLayer && m_nWidth > 0 && m_nHeight > 0) {
@@ -2558,17 +2573,22 @@ static bool RsTryPlaceCUIMenuLt(CWnd* pThis, int l, int t, int w, int h, uintptr
     return true;
 }
 
-// CWnd::CreateDlg @0x4EDA94 — reliable gate (PatchCall sites never FIRE'd on click).
-// CUIMenu only by vtable (+ optional w==100 size). Never touch SysOpt / other dialogs.
+// CDialog::CreateDlg @0x4EDA94 — HD place for CUIMenu + modal-band z for all dialogs.
+// Vanilla dialog z is low; ClickRaise can raise panels to ≤500 and cover them.
+static int RsClampDialogZ(int z) {
+    return (z < UiLayerZ::kModalFloorZ) ? UiLayerZ::kModalFloorZ : z;
+}
+
 int __fastcall rs_CreateDlg_hook(CWnd* pThis, void* /*edx*/,
     int l, int t, int w, int h, int z, int bScreenCoord, void* pData) {
+    const int dlgZ = RsClampDialogZ(z);
     if (RsIsCUISysOptWnd(pThis)) {
-        return rs_OrigCreateDlg(pThis, l, t, w, h, z, bScreenCoord, pData);
+        return rs_OrigCreateDlg(pThis, l, t, w, h, dlgZ, bScreenCoord, pData);
     }
     const bool isMenu = rs_width > 800 && pThis
         && (RsIsCUIMenuWnd(pThis) || RsLooksLikeUIMenuSize(w, h));
     if (!isMenu) {
-        return rs_OrigCreateDlg(pThis, l, t, w, h, z, bScreenCoord, pData);
+        return rs_OrigCreateDlg(pThis, l, t, w, h, dlgZ, bScreenCoord, pData);
     }
 
     const int mw = (w > 0) ? w : 100;
@@ -2582,7 +2602,7 @@ int __fastcall rs_CreateDlg_hook(CWnd* pThis, void* /*edx*/,
         l, t, nl, nt, mw, mh, btnL, btnT);
     RsLogFlush(buf);
 
-    const int r = rs_OrigCreateDlg(pThis, nl, nt, mw, mh, z, bScreenCoord, pData);
+    const int r = rs_OrigCreateDlg(pThis, nl, nt, mw, mh, dlgZ, bScreenCoord, pData);
     // CreateWnd_hook may still bind CC — re-assert LT with screen-abs place.
     const bool ok = RsForceLtAbs(pThis, nl, nt);
     sprintf_s(buf,
@@ -2661,7 +2681,8 @@ void __fastcall rs_CreateWnd_hook(CWnd* pThis, void* edx, int l, int t, int w, i
     }
 
     const bool createDlgRet =
-        (ret == 0x004EDAB3 || ret == 0x004EDAEB || ret == 0x004EDB9A);
+        (ret == 0x004EDAB3 || ret == 0x004EDAEB || ret == 0x004EDB9A ||
+         ret == 0x007F202C || ret == 0x00897BD8 || ret == 0x00994CB8);
     // Megaphone / cash CUIMenu only — never SysOpt (stack scan removed: false positives).
     if (rs_width > 800 && createDlgRet && !RsIsCUISysOptWnd(pThis)) {
         const bool byVt = RsIsCUIMenuWnd(pThis);
@@ -2673,23 +2694,15 @@ void __fastcall rs_CreateWnd_hook(CWnd* pThis, void* edx, int l, int t, int w, i
         }
     }
 
-    if (!rs_originActive) return;
-
-    switch (ret) {
-    case 0x005362BC: case 0x0053638B: case 0x00545D24: case 0x0056042E:
-    case 0x00578B30: case 0x00A24D15:
-        pThis->m_pLayer->origin = static_cast<IUnknown*>(rs_orgEx[1]); return; // CT: clocks
-    case 0x0045A5EF:
-        pThis->m_pLayer->origin = static_cast<IUnknown*>(rs_orgEx[2]); return; // RT: megaphone
-    case 0x004EDAEB: case 0x004EDB9A: case 0x004EDAB3:
-    case 0x007F202C: case 0x00897BD8: case 0x00994CB8:
-        // WorldMap 666x524: LT + screen center (codecave already pushes LT coords).
-        // Never CC here — and never call CWnd::GetAbsLeft virtual (unsafe / can hang).
+    // CreateDlg / Notice / YesNo / WorldMap: run on HD even when Origin is off
+    // (follow-login used to skip Origin → Notice skewed + island dead-zone).
+    if (createDlgRet && (rs_width > 800 || rs_height > 600) && !RsIsCUISysOptWnd(pThis) &&
+        !RsIsCUIMenuWnd(pThis) && !RsLooksLikeUIMenuSize(w, h)) {
         if (w == 666 && h == 524) {
             const int cx = (rs_width - w) / 2;
             const int cy = (rs_height - h) / 2;
-            if (rs_orgEx[0])
-                pThis->m_pLayer->origin = static_cast<IUnknown*>(rs_orgEx[0]); // LT
+            if (rs_originActive && rs_orgEx[0])
+                pThis->m_pLayer->origin = static_cast<IUnknown*>(rs_orgEx[0]);
             const bool ok = RsForceLtAbs(pThis, cx, cy);
             char buf[192];
             sprintf_s(buf,
@@ -2699,37 +2712,48 @@ void __fastcall rs_CreateWnd_hook(CWnd* pThis, void* edx, int l, int t, int w, i
             RsLogFlush(buf);
             return;
         }
-        // CreateDlg (shop / Notice / YesNo / etc.):
-        // Vanilla + kaentake put these on CC so RelMove uses 800×600 island coords.
-        // BeiDou also saves GetUIWndPos as HD screen-abs — pairing that with CC
-        // shifts UI by +(W-800)/2 and makes drag/Notice look off-center.
-        // Fix: always LT + screen-abs. 800-space seeds (fit in 800×600) are
-        // lifted into the centered island; already-HD seeds pass through.
-        {
-            int nl = l;
-            int nt = t;
-            if (rs_width > 800 || rs_height > 600) {
-                const bool looks800 =
-                    l >= -5 && l < 800 && t >= -5 && t < 600;
-                if (looks800) {
-                    nl = l + (rs_width - 800) / 2;
-                    nt = t + (rs_height - 600) / 2;
-                }
+        // Near-center 800 seeds → true screen center (Notice/YesNo/签到成功).
+        // Other 800 seeds lift into the centered island.
+        int nl = l;
+        int nt = t;
+        const int vanillaCx = (800 - w) / 2;
+        const int vanillaCy = (600 - h) / 2;
+        const bool nearCenter =
+            w > 0 && h > 0 &&
+            abs(l - vanillaCx) <= 48 && abs(t - vanillaCy) <= 48;
+        if (nearCenter) {
+            nl = (rs_width - w) / 2;
+            nt = (rs_height - h) / 2;
+        } else {
+            const bool looks800 = l >= -5 && l < 800 && t >= -5 && t < 600;
+            if (looks800) {
+                nl = l + (rs_width - 800) / 2;
+                nt = t + (rs_height - 600) / 2;
             }
-            if (nl + w > rs_width) nl = rs_width - w;
-            if (nt + h > rs_height) nt = rs_height - h;
-            if (nl < 0) nl = 0;
-            if (nt < 0) nt = 0;
-            const bool ok = RsForceLtAbs(pThis, nl, nt);
-            char buf[256];
-            sprintf_s(buf,
-                "[RS] CreateDlg LT place=%d,%d seed=%d,%d size=%dx%d abs=%d,%d "
-                "force=%d screen=%dx%d (no CC skew)",
-                nl, nt, l, t, w, h, RsWndAbsLeft(pThis), RsWndAbsTop(pThis),
-                ok ? 1 : 0, rs_width, rs_height);
-            RsLogFlush(buf);
-            return;
         }
+        if (nl + w > rs_width) nl = rs_width - w;
+        if (nt + h > rs_height) nt = rs_height - h;
+        if (nl < 0) nl = 0;
+        if (nt < 0) nt = 0;
+        const bool ok = RsForceLtAbs(pThis, nl, nt);
+        char buf[256];
+        sprintf_s(buf,
+            "[RS] CreateDlg LT place=%d,%d seed=%d,%d size=%dx%d abs=%d,%d "
+            "force=%d screen=%dx%d origin=%d",
+            nl, nt, l, t, w, h, RsWndAbsLeft(pThis), RsWndAbsTop(pThis),
+            ok ? 1 : 0, rs_width, rs_height, rs_originActive ? 1 : 0);
+        RsLogFlush(buf);
+        return;
+    }
+
+    if (!rs_originActive) return;
+
+    switch (ret) {
+    case 0x005362BC: case 0x0053638B: case 0x00545D24: case 0x0056042E:
+    case 0x00578B30: case 0x00A24D15:
+        pThis->m_pLayer->origin = static_cast<IUnknown*>(rs_orgEx[1]); return; // CT: clocks
+    case 0x0045A5EF:
+        pThis->m_pLayer->origin = static_cast<IUnknown*>(rs_orgEx[2]); return; // RT: megaphone
     // Kaentake: CFadeWnd::CreateFadeWnd + CUIStatusBar → ms_pOrgStatusBar.
     // Covers GameMenu(界面)/ShortCut(目录) and other FadeWnd popups.
     // Do NOT add (H-600) to RelMove — org already embeds it.

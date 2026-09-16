@@ -45,3 +45,7 @@ credentials.json
 node_modules/
 aside_*/
 _quarantine_*/
+
+# Local build noise
+build_exit.txt
+

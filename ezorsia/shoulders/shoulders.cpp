@@ -152,12 +152,25 @@ static constexpr DWORD kDrawRedOverlaySkip = 0x007FEFA5;
 // Mount TSec fail @7FEDD9 → red BP18/19/20 (push 12h/13h/14h). BP20 repurposed
 // for shoulder 115 — skip ONLY the push-14h block; 7FEF80 cave does not cover this.
 static constexpr DWORD kMountFailRedBp20 = 0x007FEE1B; // 6A 14 … call sub_7FF006 @7FEE2E
+// CUIEquip::GetSlotXY @7FEFEA — flag? BE2580 : BE23F0. Native BP20 = (71,233) mount row.
+static constexpr DWORD kGetSlotXyFn = 0x007FEFEA;
+// Native mount-row third seat (BP18/19/20 at Y=233). Shoulder must NEVER draw here.
+static constexpr int kMountRowBp20X = 71;
+static constexpr int kMountRowBp20Y = 233;
 
 static constexpr DWORD kEquipSlotPosBase = 0x00BE2260;
 static constexpr DWORD kEquipSlotPosCashBase = 0x00BE23F0;
 static constexpr int kShoulderIndex = 19; // BP20
 static constexpr int kShoulderUiX = 137;
 static constexpr int kShoulderUiY = 101;
+
+struct EquipSlotPos {
+    int x;
+    int y;
+};
+
+// Forced GetSlotXY result for BP20 — keeps 115 off mount row even if tables race.
+static EquipSlotPos g_shoulderForcedXy = {kShoulderUiX, kShoulderUiY};
 // Classic extra seats (IDA sub_7FEC32 skips index 20..47 — pocket needs a hook).
 static constexpr int kPocketIndex = 32; // BP33
 static constexpr int kPocketUiX = 5;   // red9 HT only (EquipAddon classic)
@@ -165,11 +178,6 @@ static constexpr int kPocketUiY = 35;
 static constexpr int kAuxBp = 62;
 static constexpr int kAuxUiX = 5;     // red10 HT — no collide shoulder red8 (137,101)
 static constexpr int kAuxUiY = 101;
-
-struct EquipSlotPos {
-    int x;
-    int y;
-};
 
 static auto is_correct_bodypart =
     reinterpret_cast<int(__cdecl*)(int, int, int)>(0x00460358);
@@ -383,11 +391,14 @@ static int __fastcall is_able_to_wear_hook(
 
 static void PatchShoulderUiCoords() {
     // HT BE2260 + Cash BE23F0 + GetSlotXY BE2580 (flag!=0). Never touch BE27E0.
+    // Mount row native BP20=(71,233) must stay vacated — 115 draws at classic red8 only.
     static constexpr DWORD kGetSlotXyGs = 0x00BE2580;
     auto* regular = reinterpret_cast<EquipSlotPos*>(kEquipSlotPosBase);
     auto* cash = reinterpret_cast<EquipSlotPos*>(kEquipSlotPosCashBase);
     auto* gs = reinterpret_cast<EquipSlotPos*>(kGetSlotXyGs);
     DWORD oldProt = 0;
+    g_shoulderForcedXy.x = kShoulderUiX;
+    g_shoulderForcedXy.y = kShoulderUiY;
     VirtualProtect(regular, 50 * sizeof(EquipSlotPos), PAGE_EXECUTE_READWRITE, &oldProt);
     regular[kShoulderIndex].x = kShoulderUiX;
     regular[kShoulderIndex].y = kShoulderUiY;
@@ -402,6 +413,36 @@ static void PatchShoulderUiCoords() {
     gs[kShoulderIndex].x = kShoulderUiX;
     gs[kShoulderIndex].y = kShoulderUiY;
     VirtualProtect(gs, 50 * sizeof(EquipSlotPos), oldProt, &oldProt);
+}
+
+// IDA: int* __thiscall sub_7FEFEA(_DWORD *flag, int bpIndex)
+using GetSlotXyFn = EquipSlotPos*(__thiscall*)(void*, int);
+static GetSlotXyFn g_GetSlotXyOrig =
+        reinterpret_cast<GetSlotXyFn>(kGetSlotXyFn);
+static bool g_getSlotXyHooked = false;
+
+// Force BP20 GetSlotXY → classic red8. Mount UI (Y=233 row) never receives 115 icon.
+static EquipSlotPos* __fastcall GetSlotXy_ForceShoulder_hook(void* pFlag, void* /*edx*/,
+                                                             int bpIndex) {
+    if (bpIndex == kShoulderIndex) {
+        g_shoulderForcedXy.x = kShoulderUiX;
+        g_shoulderForcedXy.y = kShoulderUiY;
+        return &g_shoulderForcedXy;
+    }
+    return g_GetSlotXyOrig(pFlag, bpIndex);
+}
+
+static void InstallGetSlotXyShoulderHook() {
+    if (g_getSlotXyHooked) {
+        return;
+    }
+    auto* p = reinterpret_cast<const unsigned char*>(kGetSlotXyFn);
+    // Stock prologue starts 83 39 00 (cmp dword ptr [ecx],0) — also accept existing E9.
+    if (!(p[0] == 0x83 && p[1] == 0x39) && p[0] != 0xE9) {
+        return;
+    }
+    ATTACH_HOOK(g_GetSlotXyOrig, GetSlotXy_ForceShoulder_hook);
+    g_getSlotXyHooked = true;
 }
 
 static bool ExpectBytes(DWORD va, const unsigned char* expected, size_t n) {
@@ -2301,6 +2342,7 @@ void AttachShoulderSlotsFix() {
 
     if (kMoveShoulderUiTo8) {
         PatchShoulderUiCoords();
+        InstallGetSlotXyShoulderHook();
     }
 
     if (kHookBodypart115) {
@@ -2344,6 +2386,7 @@ void Shoulder_SetExtHitTestSlot(int index, int x, int y) {
 void Shoulder_ReassertUiAndDiag() {
     if (kMoveShoulderUiTo8) {
         PatchShoulderUiCoords();
+        InstallGetSlotXyShoulderHook();
     }
     PatchExtendedSlotHitTestAtDllMain();
     const bool redCave = EnsureShoulderRedCave();
@@ -2354,7 +2397,7 @@ void Shoulder_ReassertUiAndDiag() {
 }
 
 extern "C" __declspec(dllexport) const char* Shoulder_GetStamp() {
-    return "FIX_LOGIN_STAT_NULLITEM_R2_20260825";
+    return "MOUNT_BP20_OFF_ROW_PET_RED_20260916b";
 }
 
 bool Shoulder_UseNativeCd64Slots() {

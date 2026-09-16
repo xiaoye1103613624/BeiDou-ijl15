@@ -60,6 +60,8 @@ public:
 	static bool enableGrowthCompanionTip;
 	/** 冒险家创建角色投骰子（封包末尾追加 STR/DEX/INT/LUK）；默认 true */
 	static bool enableNativeAdventurerDice;
+	/** 道具 tip 底部显示「ID: n」；默认 true（optional.showItemTipId） */
+	static bool showItemTipId;
 	static bool expandItem;
 	static bool expandItemUI;
 	static bool expandItemSlotLimits;

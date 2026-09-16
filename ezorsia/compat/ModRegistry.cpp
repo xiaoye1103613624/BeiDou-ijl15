@@ -21,6 +21,7 @@
 #include "../equipcompare/EquipCompareApi.h"
 #include "../slotlock/SlotLockApi.h"
 #include "../sidetoolbar/SideToolbarApi.h"
+#include "../sidetoolbar/OverheadIconsApi.h"
 #include "../equipaddon/EquipAddonApi.h"
 #include "../cashshop/CashShopApi.h"
 #include "../equipgrowth/EquipGrowthApi.h"
@@ -30,6 +31,7 @@
 #include "../invexpand/InvExpandApi.h"
 #include "../windowtitle/WindowTitleApi.h"
 #include "../combatpower/CombatPowerApi.h"
+#include "../statdetail/StatDetailApi.h"
 
 namespace {
 std::vector<CompatModule> g_modules;
@@ -201,6 +203,7 @@ void ModRegistry::RegisterBuiltins() {
     setItem.onAttach = []() {
         SetItem::RegisterPacketHandler();
         SetItem::EnsureHooks();
+        StatDetailExt::AttachHooks();
     };
     ModRegistry::RegisterModule(std::move(setItem));
 
@@ -250,6 +253,8 @@ void ModRegistry::RegisterBuiltins() {
     sideToolbar.onAttach = []() {
         // No UI at attach — create only from OnTick after enter-game.
         SideToolbar::RegisterPacketHandler();
+        // 头顶灯泡迁侧边栏：屏蔽场上 NPC/角色 QuestIcon（世界地图标记保留）
+        OverheadIcons::AttachHooks();
     };
     sideToolbar.onTick = []() {
         SideToolbar::OnTick();

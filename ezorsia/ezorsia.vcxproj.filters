@@ -153,6 +153,15 @@
     <ClInclude Include="SelectCharMacFix.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="statdetail\StatDetailApi.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="clickraise\ClickRaiseApi.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="clickraise\UiLayerZ.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -183,6 +192,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="SelectCharMacFix.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="statdetail\statdetail.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="clickraise\clickraise.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

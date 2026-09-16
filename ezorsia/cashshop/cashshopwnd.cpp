@@ -569,10 +569,15 @@ const CatDef kCats[] = {
     { 5, 6,  "\xBD\xC7\xC9\xAB" }, // 角色
     { 6, 0,  "\xB3\xE8\xCE\xEF" }, { 6, 1,  "\xB3\xE8\xD7\xB0" }, { 6, 2,  "\xB3\xE8\xD3\xC3" }, // 宠物/宠装/宠用
     { 7, 0,  "\xC0\xF1\xB0\xFC" }, // 礼包
-    // Custom BeiDou tabs (DB legacy_tab 9/10). Names: 皮肤 / XY玩法
+    // Custom BeiDou tabs (DB legacy_tab 9/10/11). Names: 皮肤 / XY玩法 / 坐骑二级
     // GBK: 肤=B7F4 (was wrongly B7B4=反 →「皮反」); 玩=\xCD\xE6 法=\xB7\xA8
     { 9, 0,  "\xC6\xA4\xB7\xF4" },
     { 10, 0, "XY\xCD\xE6\xB7\xA8" },
+    // 坐骑二级（商品桶）；一级 11:0 仅服务端 taxonomy 标注，不进 kCats（无货）
+    // GBK: 坐骑=\xD7\xF8\xC6\xEF 鞍具=\xB0\xB0\xBE\xDF 道具=\xB5\xC0\xBE\xDF
+    { 11, 1, "\xD7\xF8\xC6\xEF" },
+    { 11, 2, "\xB0\xB0\xBE\xDF" },
+    { 11, 3, "\xD7\xF8\xC6\xEF\xB5\xC0\xBE\xDF" },
     // Tab 8 ("Guide": How to Use / How to Gift) is deliberately absent. It sold nothing --
     // in v83 its only members are four 403xxxx manual items -- and a tab of instructions
     // has no place in a window that is already the instructions.
@@ -585,6 +590,7 @@ const TabDef kTabs[] = {
     { 2, "\xD7\xB0\xB1\xB8" }, { 3, "\xCF\xFB\xBA\xC4" }, { 5, "\xC9\xE8\xD6\xC3" }, // 装备/消耗/设置
     { 6, "\xB3\xE8\xCE\xEF" }, { 7, "\xC0\xF1\xB0\xFC" }, // 宠物/礼包
     { 9, "\xC6\xA4\xB7\xF4" }, { 10, "XY\xCD\xE6\xB7\xA8" }, // 皮肤 / XY玩法
+    { 11, "\xD7\xF8\xC6\xEF" }, // 坐骑（二级：坐骑/鞍具/坐骑道具）
 };
 constexpr int kTabCount = static_cast<int>(_countof(kTabs));
 
@@ -662,9 +668,9 @@ constexpr int kRedH     = 3;
 constexpr int kTabY     = kBandY + 1;          // inset from the top so it reads as sunk
 constexpr int kTabH     = kBandH - 1;
 constexpr int kTabX0    = 8;
-// 7 tabs must fit 760px: was 132/134 for 5 tabs; shrink so 皮肤/XY玩法 fit.
-constexpr int kTabW     = 100;
-constexpr int kTabPitch = 102;
+// 8 tabs must fit 760px (装备…XY玩法 + 坐骑): was 100/102 for 7 tabs.
+constexpr int kTabW     = 88;
+constexpr int kTabPitch = 90;
 
 // TIER 2: THE CATEGORY STRIP.
 //

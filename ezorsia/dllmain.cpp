@@ -162,6 +162,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 							reader.GetBoolean("optional", "enableEquipGrowthTip", true));
 			Client::enableNativeAdventurerDice =
 					reader.GetBoolean("optional", "enableNativeAdventurerDice", true);
+			// Item tip bottom line "ID: n". Default true; missing key = on.
+			Client::showItemTipId =
+					reader.GetBoolean("optional", "showItemTipId", true);
 			Client::expandItem = reader.GetBoolean("optional", "expandItem", true);
 			Client::expandItemUI = reader.GetBoolean("optional", "expandItemUI", true);
 			Client::expandItemSlotLimits = reader.GetBoolean("optional", "expandItemSlotLimits", true);

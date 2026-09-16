@@ -25,3 +25,5 @@ bool TryGetActiveCompareSetTooltipRect(int& outX, int& outY, int& outW, int& out
 // When custom equip tip skips vanilla DrawToolTip_Equip, still refresh set companion.
 void SetItem_OnEquipTipDrawn(CUIToolTip* tip, GW_ItemSlotEquip* pe);
 void SetItem_ReleaseCustomMainTipWithoutHidingSet(CUIToolTip* tip);
+// If tip is the active hover main tip, hide set/growth/compare companions and clear locks.
+void SetItem_DismissHoverCompanionsIfMain(CUIToolTip* tip);
