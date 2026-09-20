@@ -1,4 +1,4 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "AddyLocations.h"
 #include "codecaves.h"
 #include "FixIme.h"
@@ -457,10 +457,12 @@ void Client::UpdateResolution() {
 
 	Memory::WriteInt(0x00897BB4 + 1, (m_nGameWidth / 2) - 143);//??related to exp gain/item pick up msg
 
-	if (WindowedMode) {
-		unsigned char forced_window[] = { 0xb8, 0x00, 0x00, 0x00, 0x00 }; //force window mode	//thanks stelmo for showing me how to do this
-		Memory::WriteByteArray(0x009F7A9B, forced_window, sizeof(forced_window));//force window mode
-	}
+	// DO NOT patch 0x009F7A9B here. Stock bytes are `mov eax,[BF1AC8]` (BPP for
+	// IWzGr2D::Initialize). Replacing with `mov eax,0` was mislabeled "force
+	// windowed" and contributed to Gr2D PcCreate/Init failures (HRESULT
+	// 0x8876086C D3DERR_INVALIDCALL). Windowed soft-ok is handled by
+	// rs_install_early_findscreenmode_hook() before InitializeGr2D.
+	(void)WindowedMode;
 	if (RemoveLogos) {
 		Memory::FillBytes(0x0062EE54, 0x90, 21);	//no Logo @launch //Thanks Denki!!
 	}

@@ -1,4 +1,4 @@
-﻿// dllmain.cpp : Defines the entry point for the DLL application.
+// dllmain.cpp : Defines the entry point for the DLL application.
 #include "stdafx.h"
 #include "NMCO.h"
 #include "ijl15.h"
@@ -31,17 +31,8 @@
 #include "windowtitle/WindowTitleApi.h"
 #include "bootlog/LoadTraceApi.h"
 #include "bootlog/CrashDiag.h"
+#include "bootlog/DeferredBootPatches.h"
 #pragma comment(lib, "ws2_32.lib")
-
-// SEH wrapper must live outside DllMain (C2712: DllMain has C++ unwinding).
-static void AttachLevel300ModSafe() {
-	__try {
-		AttachLevel300Mod();
-	} __except (EXCEPTION_EXECUTE_HANDLER) {
-		BootLog("*** AttachLevel300Mod SEH 0x%08X — continuing boot without Level300",
-				GetExceptionCode());
-	}
-}
 
 // config.ini can use IP or hostname (ServerIP_Address=...).
 // The patch expects an IPv4 dotted string; resolve hostnames to IPv4.
@@ -128,6 +119,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 			Client::WindowedMode = reader.GetBoolean("general", "WindowedMode", true);
 			Client::RemoveLogos = reader.GetBoolean("general", "RemoveLogos", true);
 			Memory::UseVirtuProtect = reader.GetBoolean("general", "UseVirtuProtect", true);
+			// Remember config want; force OFF for all pre-Gr2D DllMain Memory::Write*.
+			// UseVirtuProtect=true .text patches before InitializeGr2D → PcCreate
+			// IWzGr2D fails with D3DERR_INVALIDCALL (0x8876086C) on this host.
+			DeferredBoot_SetWantVirtuProtect(Memory::UseVirtuProtect);
+			Memory::UseVirtuProtect = false;
 			Client::setDamageCap = reader.GetReal("optional", "setDamageCap", 199999);
 			Client::setMAtkCap = reader.GetReal("optional", "setMAtkCap", 1999);
 			Client::setAccCap = reader.GetReal("optional", "setAccCap", 999);
@@ -201,8 +197,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		HookSaveGlobal(true);
 		HookSelectCharMacFix(true);
 
-		Client::UpdateGameStartup();
-
 		// Custom.wz SysOpt stretch (fail-soft). Needed so resolution combo + OK/Cancel
 		// at y=338/372 sit on the stretched backgrnd (vanilla dialog clips them).
 		rs_resman_init();
@@ -213,67 +207,26 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
 		if (rs_tier > RS_TIER_MAX) rs_tier = 0;
 
 		std::cout << "Applying resolution " << Client::m_nGameWidth << "x" << Client::m_nGameHeight << std::endl;
-		Client::UpdateResolution();
-		// RS set_stage / follow-login use rs_login_* (defaults 800x600). Without sync,
-		// login restore re-applies 800 UpdateResolution inside an HD window → empty
-		// wooden-board mid/bottom planks and squeezed ID/PW (see rs.cpp restore path).
+		// Defer UpdateGameStartup / UpdateResolution / Client::* Memory patches and
+		// most ApplyPatches until AFTER InitializeGr2D (DeferredBootPatches +
+		// Hook_InitGr2D). Pre-Gr2D .text writes → PcCreate IWzGr2D HRESULT
+		// 0x8876086C (D3DERR_INVALIDCALL) on this host.
 		rs_set_login_dims(Client::m_nGameWidth, Client::m_nGameHeight);
 		rs_width = Client::m_nGameWidth;
 		rs_height = Client::m_nGameHeight;
 		rs_adjust_cy = (rs_height > 600) ? (rs_height - 600) / 2 : 0;
-		Client::FixMouseWheel();
-		Client::Chinese();
-		Client::LongQuickSlot();
-		Client::FixDateFormat();
-		Client::FixItemType();
-		Client::JumpCap();
-		Client::FixChatPosHook();
-		Client::NoPassword();
-		BootLogStage("pre MoreHook");
-		Client::MoreHook();
-		BootLogStage("post MoreHook");
-		Client::DeleteChar();
+		BootLog("pre-Gr2D skip UpdateResolution/UpdateGameStartup (deferred); login=%dx%d win=%d vpWant=%d",
+				Client::m_nGameWidth, Client::m_nGameHeight,
+				Client::WindowedMode ? 1 : 0,
+				DeferredBoot_GetWantVirtuProtect() ? 1 : 0);
 
-		// Early patches that are safe at DllMain (no late UI).
-		// Miles AIL_quick_startup ExitProcess(0) stub + boot stage trace (same as Client_1).
+		// Miles AIL stub + boot stage trace BEFORE Gr2D so Hook_InitGr2D can
+		// install FindScreenMode soft-ok + apply deferred patches on success.
+		// Do NOT call rs_install_early_findscreenmode_hook() here — DllMain loader
+		// lock makes LoadLibrary(Gr2D_DX8) fail (rs_ui: pattern miss).
 		AttachLoadTrace();
-		HigherStorageList::ApplyPatches();
-		HigherShopList::ApplyPatches();
-		AttachNewCharDiceMod();
-		AttachMaxHpMpMod();
-		// Must match PacketCreator writeShort(level)+writeLong(exp); without this,
-		// CHARLIST mis-aligns → garbage avatar UOLs → 0x80030002 on channel select.
-		// Soft-fail: Level300 must not take down logo/boot (SEH + Fuse recurse guard).
-		AttachLevel300ModSafe();
-		AttachMesoUncapMod();
-		AttachGameDataGuard();
-		// SkillTipCrashGuards OFF 2026-09-02: same commit as broken MapEnterNullGuard;
-		// keep vanilla until enter-game is stable again.
-		// AttachSkillTipCrashGuards();
-		AttachPersonalShopMod();
-		if (Client::quickLogin) {
-			AttachQuickLoginMod();
-		}
-		if (Client::allowCashTrade) {
-			AttachAllowCashTradeMod();
-		}
-		AttachCharSlotsMod();
-		AttachShoulderSlotsFix();
-		// MapTransfer expand TEMPORARILY OFF (2026-08-30): select-char -> set_stage AV
-		// at BeiDou.exe+0x6292F9 (null+0x3D) with preceding hr=0x800401F8/0x80004003.
-		// Hook sites IDA-verified OK on S9 EXE, but expand still correlated with channel-enter
-		// crash; keep vanilla 5/10 until decode/UI path is proven. Must stay in sync with
-		// GameConstants.TROCK_MAP_SIZE / VIP_TROCK_MAP_SIZE on the server.
-		// AttachMapTransferExpandMod();
-
-		Client::ExpandItem();
-		try {
-			EquipAddon::InstallLoginPersistEarly();
-		} catch (...) {
-		}
 
 		// Late UI + packet modules attach on first CField via LazyCompat.
-		// (replaces early ModRegistry::Initialize + BossHP::Hook in DllMain)
 		LazyCompatInit::InstallBootstrapHook();
 		rs_register();
 

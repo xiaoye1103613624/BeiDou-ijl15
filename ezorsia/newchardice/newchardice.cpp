@@ -45,14 +45,27 @@ constexpr uintptr_t kVtableMsg = 0x00AF7518;
 constexpr size_t kDrawSlot = 0x2C;
 constexpr size_t kMouseSlot = 0x08;
 
-constexpr uintptr_t kDrawNumberByImage = 0x00988345;
+// DrawNumberByImage(0x00988345) 已弃用：其调用约定/参数个数未经验证，调用返回后破坏栈
+// （崩溃 code=0xC0000096 @ PCOM.DLL，栈上返回地址落在 0x988345+0x62，即该函数内部）。
+// 改为用 UI/Basic.img/LevelNo/0..9 数字图 + CopyEx 逐位绘制。
 constexpr uintptr_t kInvalidateRect = 0x009E04C9;
 
 constexpr int kWindowWidth = 201;
-constexpr int kWindowHeight = 332;
-constexpr int kButtonY = 286;
+constexpr int kWindowHeight = 420;   // 332 -> 420：给属性面板底图(210高)留出完整空间
+constexpr int kButtonY = 380;        // 286 -> 380：随窗口加高下移，避免被面板盖住
 constexpr int kConfirmButtonX = 19;
-constexpr RECT kDiceHitRect{106, 146, 190, 242};
+// 骰子命中区：面板右上“掷骰子”按钮位（画布坐标）
+constexpr RECT kDiceHitRect{100, 170, 180, 210};
+
+// 属性面板底图：NewChar/scroll/0/3 为完全展开帧(242x210)，
+// 力量/敏捷/智力/运气标签与输入框烙在图里；掷骰子按钮在右上。
+// 引擎 DrawTextA 对 CJK 字形映射异常（实测乱码），故标签一律用图，不用文字。
+constexpr wchar_t kWzPanelPath[] = L"UI/Login.img/NewChar/scroll/0/3";
+constexpr int kPanelX = -20;          // 242 宽画布居中：(201-242)/2
+constexpr int kPanelY = 158;          // 名字牌下缘之后
+constexpr int kStatLabelX = 30;       // 面板局部：标签列 x（备查）
+constexpr int kStatValueX = 85;       // 面板局部：数值框 x
+constexpr int kStatRowY[4] = {68, 94, 120, 146};  // 面板局部：四行 y（截图后校准）
 
 constexpr std::array<unsigned char, 5> kOriginalLevelGate{0xE8, 0x66, 0xE5, 0xBA, 0xFF};
 constexpr std::array<unsigned char, 5> kPatchedLevelGate{0xE9, 0x9D, 0x01, 0x00, 0x00};
@@ -95,16 +108,22 @@ bool g_layout_patched = false;
 bool g_assets_loaded = false;
 
 IWzCanvasPtr g_dice[4];
-IWzPropertyPtr g_numberFont;
+IWzCanvasPtr g_digit[10];   // UI/Basic.img/LevelNo/0..9 数字图
+IWzCanvasPtr g_panel;       // UI/Login.img/NewChar/scroll/0/3 属性面板底图
 DWORD g_animStartTick = 0;
 bool g_animating = false;
 void* g_lastNameWnd = nullptr;
+
+// [DBG-dice] 临时诊断状态（骰子UI不显示分诊用，修复后删除）
+// 收集 1s 内 Hook_Draw 见到的 wnd 指针，并在汇总时报告活动名窗(*BEDA44)是否命中门控。
+void* g_diagSeen[64] = {};
+int g_diagSeenCount = 0;
+DWORD g_diagLastTick = 0;
 
 using Encode1Fn = void(__thiscall*)(void* packet, unsigned char value);
 using SendCreateFn = void(__thiscall*)(void* uiThis, void* packet);
 using DrawFn = void(__thiscall*)(void* wnd, const RECT* rect);
 using MouseFn = void(__thiscall*)(void* handler, unsigned int msg, unsigned int wParam, int rx, int ry);
-using DrawNumberByImageFn = int(__cdecl*)(void* canvas, int left, int top, int value, void* font, int spacing);
 using InvalidateFn = void(__thiscall*)(void* wnd, const RECT* rect);
 
 Encode1Fn g_Encode1 = reinterpret_cast<Encode1Fn>(kEncode1);
@@ -229,11 +248,24 @@ bool LoadAssets() {
                 DiceLog("WARN missing dice canvas %d", i);
             }
         }
-        g_numberFont = get_rm()->GetObjectA(const_cast<wchar_t*>(L"UI/Basic.img/LevelNo")).GetUnknown();
-        if (!g_numberFont) {
-            g_numberFont = get_rm()->GetObjectA(const_cast<wchar_t*>(L"UI/Basic.img/LevelNo/number")).GetUnknown();
+        int digitsLoaded = 0;
+        for (int d = 0; d < 10; ++d) {
+            wchar_t digitPath[64];
+            _snwprintf_s(digitPath, _countof(digitPath), _TRUNCATE, L"UI/Basic.img/LevelNo/%d", d);
+            g_digit[d] = get_unknown(get_rm()->GetObjectA(digitPath));
+            if (g_digit[d]) {
+                ++digitsLoaded;
+            }
         }
-        DiceLog("assets dice0=%d font=%d", g_dice[0] ? 1 : 0, g_numberFont ? 1 : 0);
+        if (digitsLoaded != 10) {
+            DiceLog("WARN digits loaded %d/10", digitsLoaded);
+        }
+        g_panel = get_unknown(get_rm()->GetObjectA(const_cast<wchar_t*>(kWzPanelPath)));
+        if (!g_panel) {
+            DiceLog("WARN missing panel canvas");
+        }
+        DiceLog("assets dice0=%d digits=%d panel=%d", g_dice[0] ? 1 : 0,
+                digitsLoaded, g_panel ? 1 : 0);
     } catch (...) {
         DiceLog("WARN LoadAssets exception");
         return false;
@@ -241,40 +273,93 @@ bool LoadAssets() {
     return g_dice[0] != nullptr;
 }
 
+// [DBG-dice] SEH 守护 + 细粒度诊断（临时，修复后删除）
+// 关键：C++ try/catch 抓不住访问违例(AV)，骰子绘制撞到空 Gr2D 会直接崩客户端。
+// 这里用 __try/__except 把 AV 变成可记录的跳过；helper 内只用裸指针/POD，
+// 避免 __try 与 C++ 析构对象同帧（MSVC C2712）。
+static IWzCanvasPtr SafeGetCanvas(CWnd* w) {
+    try {
+        return w->GetCanvas();
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+static int SafeSrcDims(IWzCanvas* src, int* outW, int* outH) {
+    if (outW) *outW = 0;
+    if (outH) *outH = 0;
+    if (!src) return -2;
+    __try {
+        if (outW) *outW = static_cast<int>(src->Getwidth());
+        if (outH) *outH = static_cast<int>(src->Getheight());
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+    return 0;
+}
+
+static int SafeCopyEx(IWzCanvas* dst, int dx, int dy, IWzCanvas* src, int w, int h, HRESULT* outHr = nullptr) {
+    if (outHr) {
+        *outHr = E_POINTER;
+    }
+    if (!dst || !src) return -2;
+    HRESULT hr = E_FAIL;
+    __try {
+        hr = dst->CopyEx(dx, dy, src, CANVAS_ALPHATYPE::CA_OVERWRITE, w, h, 0, 0, w, h);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (outHr) {
+            *outHr = E_FAIL;
+        }
+        return -1;
+    }
+    if (outHr) {
+        *outHr = hr;
+    }
+    return SUCCEEDED(hr) ? 0 : -3;
+}
+
+// 用 UI/Basic.img/LevelNo/0..9 数字图逐位绘制（CopyEx，与其余模块一致的稳妥路径）。
 void DrawValue(IWzCanvas* canvas, int x, int y, int value) {
-    if (!canvas || !g_numberFont || value < 0) {
+    if (!canvas || value < 0) {
         return;
     }
-    auto drawNumber = reinterpret_cast<DrawNumberByImageFn>(kDrawNumberByImage);
-    try {
-        drawNumber(canvas, x, y, value, g_numberFont.GetInterfacePtr(), -1);
-    } catch (...) {
+    char text[16];
+    _snprintf_s(text, sizeof(text), _TRUNCATE, "%d", value);
+    int cursor = x;
+    for (const char* p = text; *p != '\0'; ++p) {
+        if (*p < '0' || *p > '9') {
+            continue;
+        }
+        IWzCanvas* src = g_digit[*p - '0'].GetInterfacePtr();
+        int w = 0, h = 0;
+        if (SafeSrcDims(src, &w, &h) != 0 || w <= 0 || h <= 0) {
+            DiceLog("[DBG-dice] DrawValue baddigit '%c' w=%d h=%d", *p, w, h);
+            continue;
+        }
+        SafeCopyEx(canvas, cursor, y, src, w, h);
+        cursor += w;
     }
 }
 
 void DrawDiceFrame(IWzCanvas* canvas, int frame) {
     if (!canvas || frame < 0 || frame > 3 || !g_dice[frame]) {
+        DiceLog("[DBG-dice] DrawDiceFrame skip frame=%d dice=%p", frame, g_dice[frame].GetInterfacePtr());
         return;
     }
-    IWzCanvas* src = g_dice[frame];
-    int w = 0;
-    int h = 0;
-    try {
-        w = static_cast<int>(src->Getwidth());
-        h = static_cast<int>(src->Getheight());
-    } catch (...) {
-        return;
-    }
-    if (w <= 0 || h <= 0) {
+    IWzCanvas* src = g_dice[frame].GetInterfacePtr();
+    int w = 0, h = 0;
+    int rcDim = SafeSrcDims(src, &w, &h);
+    if (rcDim != 0 || w <= 0 || h <= 0) {
+        DiceLog("[DBG-dice] DrawDiceFrame badsrc frame=%d rc=%d w=%d h=%d", frame, rcDim, w, h);
         return;
     }
     const int cx = (kDiceHitRect.left + kDiceHitRect.right) / 2;
     const int cy = (kDiceHitRect.top + kDiceHitRect.bottom) / 2;
     const int dx = cx - w / 2;
     const int dy = cy - h / 2;
-    try {
-        canvas->CopyEx(dx, dy, src, CANVAS_ALPHATYPE::CA_OVERWRITE, w, h, 0, 0, w, h);
-    } catch (...) {
+    int rc = SafeCopyEx(canvas, dx, dy, src, w, h);
+    if (rc != 0) {
+        DiceLog("[DBG-dice] DrawDiceFrame CopyEx rc=%d frame=%d w=%d h=%d", rc, frame, w, h);
     }
 }
 
@@ -287,13 +372,10 @@ void PaintDiceUi(void* wnd) {
         return;
     }
 
-    IWzCanvasPtr canvas;
-    try {
-        canvas = reinterpret_cast<CWnd*>(wnd)->GetCanvas();
-    } catch (...) {
-        return;
-    }
+    CWnd* cw = reinterpret_cast<CWnd*>(wnd);
+    IWzCanvasPtr canvas = SafeGetCanvas(cw);
     if (!canvas) {
+        DiceLog("[DBG-dice] GetCanvas null wnd=%p", wnd);
         return;
     }
 
@@ -307,12 +389,21 @@ void PaintDiceUi(void* wnd) {
             frame = static_cast<int>((elapsed / kAnimFrameMs) % 4);
         }
     }
-    DrawDiceFrame(canvas, frame);
+    // 属性面板底图（含烙图的 力量/敏捷/智力/运气 标签与掷骰子按钮），盖住原生小招牌。
+    IWzCanvas* panel = g_panel.GetInterfacePtr();
+    if (panel) {
+        int pw = 0, ph = 0;
+        if (SafeSrcDims(panel, &pw, &ph) == 0 && pw > 0 && ph > 0) {
+            SafeCopyEx(canvas.GetInterfacePtr(), kPanelX, kPanelY, panel, pw, ph);
+        }
+    }
+    DrawDiceFrame(canvas.GetInterfacePtr(), frame);
     if (!g_animating && g_has_roll) {
-        DrawValue(canvas, 70, 161, g_stats.str);
-        DrawValue(canvas, 70, 180, g_stats.dex);
-        DrawValue(canvas, 70, 199, g_stats.intelligence);
-        DrawValue(canvas, 70, 218, g_stats.luk);
+        // 数值画进面板的四个小框；面板局部坐标 + kPanelX/kPanelY 映射到画布。
+        DrawValue(canvas.GetInterfacePtr(), kPanelX + kStatValueX, kPanelY + kStatRowY[0], g_stats.str);
+        DrawValue(canvas.GetInterfacePtr(), kPanelX + kStatValueX, kPanelY + kStatRowY[1], g_stats.dex);
+        DrawValue(canvas.GetInterfacePtr(), kPanelX + kStatValueX, kPanelY + kStatRowY[2], g_stats.intelligence);
+        DrawValue(canvas.GetInterfacePtr(), kPanelX + kStatValueX, kPanelY + kStatRowY[3], g_stats.luk);
     }
 }
 
@@ -328,7 +419,34 @@ void __fastcall Hook_Draw(void* wnd, void* /*edx*/, const RECT* rect) {
         g_OrigDraw(wnd, rect);
     }
     if (wnd && wnd == GetActiveNameWnd()) {
-        PaintDiceUi(wnd);
+        __try {
+            PaintDiceUi(wnd);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            DiceLog("[DBG-dice] PaintDiceUi AV wnd=%p", wnd);
+        }
+    }
+
+    // [DBG-dice] 诊断：Hook_Draw 每帧被所有窗口调用，收集 1s 内见到的 wnd，
+    // 并报告活动名窗(*BEDA44)是否出现在本秒 Draw 集合中（=门控能否命中）。
+    if (wnd && g_diagSeenCount < 64) {
+        bool found = false;
+        for (int i = 0; i < g_diagSeenCount; ++i) {
+            if (g_diagSeen[i] == wnd) { found = true; break; }
+        }
+        if (!found) g_diagSeen[g_diagSeenCount++] = wnd;
+    }
+    DWORD dbgNow = GetTickCount();
+    if (dbgNow - g_diagLastTick >= 1000) {
+        g_diagLastTick = dbgNow;
+        void* active = GetActiveNameWnd();
+        bool hit = false;
+        if (active) {
+            for (int i = 0; i < g_diagSeenCount; ++i) {
+                if (g_diagSeen[i] == active) { hit = true; break; }
+            }
+        }
+        DiceLog("[DBG-dice] DrawSeen=%d active=%p hit=%d", g_diagSeenCount, active, hit ? 1 : 0);
+        g_diagSeenCount = 0;
     }
 }
 
@@ -484,6 +602,15 @@ void NewCharDice::OnClientTick() {
     if (!Client::enableNativeAdventurerDice) {
         return;
     }
+
+    // [DBG-dice] 诊断：确认 OnClientTick 每帧运行，并报告活动名窗指针与动画态。
+    static DWORD s_tickDbg = 0;
+    if (GetTickCount() - s_tickDbg >= 5000) {
+        s_tickDbg = GetTickCount();
+        DiceLog("[DBG-dice] Tick active=%p lastNameWnd=%p animating=%d",
+                GetActiveNameWnd(), g_lastNameWnd, g_animating ? 1 : 0);
+    }
+
     void* wnd = GetActiveNameWnd();
     if (wnd && wnd != g_lastNameWnd) {
         g_lastNameWnd = wnd;

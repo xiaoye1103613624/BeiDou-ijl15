@@ -32,6 +32,7 @@
 #include "../windowtitle/WindowTitleApi.h"
 #include "../combatpower/CombatPowerApi.h"
 #include "../statdetail/StatDetailApi.h"
+#include "../chatemoticon/ChatEmoticonApi.h"
 
 namespace {
 std::vector<CompatModule> g_modules;
@@ -133,6 +134,8 @@ void ModRegistry::RegisterBuiltins() {
         DailyCheckin::RegisterPacketHandler();
     };
     ModRegistry::RegisterModule(std::move(dailyCheckin));
+
+    ChatEmoticon::RegisterModule();
 
     CompatModule miracleCube{};
     miracleCube.name = "MiracleCube";

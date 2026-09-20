@@ -39,3 +39,6 @@ void rs_on_enter_field();
 void rs_register();
 // Custom.wz resource manager (call once at DllMain, BEFORE InitializeResMan)
 void rs_resman_init();
+// Before CWvsApp::InitializeGr2D: hook IWzGr2D::Initialize (vtable+0x0C, Gr2D_DX8 RVA 0x30D3)
+// and pass through to native with an arg guard. Never write to the object head — it is the vptr.
+void rs_install_early_findscreenmode_hook();

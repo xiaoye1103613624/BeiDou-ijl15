@@ -18,20 +18,14 @@ public:
     static void PatchNop(DWORD dwOriginAddress, int nCount) {
         if (nCount <= 0) return;
 
-        // 根据需要设置内存保护
-        DWORD oldProtect;
-        if (UseVirtuProtect) {
-            VirtualProtect((LPVOID)dwOriginAddress, nCount, PAGE_EXECUTE_READWRITE, &oldProtect);
+        // Always VirtualProtect (same rationale as Memory.cpp FillBytes).
+        DWORD oldProtect = 0;
+        if (!VirtualProtect((LPVOID)dwOriginAddress, nCount, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+            return;
         }
-
-        // 填充NOP指令(0x90)
         memset((void*)dwOriginAddress, 0x90, nCount);
-
-        // 恢复内存保护
-        if (UseVirtuProtect) {
-            DWORD temp;
-            VirtualProtect((LPVOID)dwOriginAddress, nCount, oldProtect, &temp);
-        }
+        DWORD temp;
+        VirtualProtect((LPVOID)dwOriginAddress, nCount, oldProtect, &temp);
     }
 };
 

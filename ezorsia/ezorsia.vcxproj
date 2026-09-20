@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -105,7 +105,7 @@
       <PreprocessorDefinitions>WIN32;_DEBUG;EZORSIA_EXPORTS;_WINDOWS;_USRDLL;_CRT_NON_CONFORMING_SWPRINTFS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)weather;$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)miraclecube;$(ProjectDir)storagebag;$(ProjectDir)invresize;$(ProjectDir)invexpand;$(ProjectDir)sidetoolbar;$(ProjectDir)cashshop;$(ProjectDir)slotlock;$(ProjectDir)fusionanvil;$(ProjectDir)higherstoragelist;$(ProjectDir)highershoplist;$(ProjectDir)bufftimer;$(ProjectDir)charslots;$(ProjectDir)maptransfer;$(ProjectDir)equipcompare;$(ProjectDir)maxhpmp;$(ProjectDir)shoulders;$(ProjectDir)quicklogin;$(ProjectDir)pendant2;$(ProjectDir)equipaddon;$(ProjectDir)extendequip;$(ProjectDir)setitem;$(ProjectDir)equipgrowth;$(ProjectDir)partybuffs;$(ProjectDir)potentialscroll;$(ProjectDir)mesouncap;$(ProjectDir)gamedata;$(ProjectDir)personalshop;$(ProjectDir)userinfodetail;$(ProjectDir)coloringprism;$(ProjectDir)vskill;$(ProjectDir)bounce;$(ProjectDir)combatpower;$(ProjectDir)statdetail;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)weather;$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)miraclecube;$(ProjectDir)storagebag;$(ProjectDir)invresize;$(ProjectDir)invexpand;$(ProjectDir)sidetoolbar;$(ProjectDir)cashshop;$(ProjectDir)slotlock;$(ProjectDir)fusionanvil;$(ProjectDir)higherstoragelist;$(ProjectDir)highershoplist;$(ProjectDir)bufftimer;$(ProjectDir)charslots;$(ProjectDir)maptransfer;$(ProjectDir)equipcompare;$(ProjectDir)maxhpmp;$(ProjectDir)shoulders;$(ProjectDir)quicklogin;$(ProjectDir)pendant2;$(ProjectDir)equipaddon;$(ProjectDir)extendequip;$(ProjectDir)setitem;$(ProjectDir)equipgrowth;$(ProjectDir)partybuffs;$(ProjectDir)potentialscroll;$(ProjectDir)mesouncap;$(ProjectDir)gamedata;$(ProjectDir)personalshop;$(ProjectDir)userinfodetail;$(ProjectDir)userinfomount;$(ProjectDir)coloringprism;$(ProjectDir)vskill;$(ProjectDir)bounce;$(ProjectDir)combatpower;$(ProjectDir)statdetail;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <UndefinePreprocessorDefinitions>%(UndefinePreprocessorDefinitions)</UndefinePreprocessorDefinitions>
       <AdditionalOptions>-D _CRT_SECURE_NO_WARNINGS %(AdditionalOptions)</AdditionalOptions>
@@ -151,7 +151,7 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
-      <AdditionalIncludeDirectories>$(ProjectDir)weather;$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)miraclecube;$(ProjectDir)storagebag;$(ProjectDir)invresize;$(ProjectDir)invexpand;$(ProjectDir)sidetoolbar;$(ProjectDir)cashshop;$(ProjectDir)slotlock;$(ProjectDir)fusionanvil;$(ProjectDir)higherstoragelist;$(ProjectDir)highershoplist;$(ProjectDir)bufftimer;$(ProjectDir)charslots;$(ProjectDir)maptransfer;$(ProjectDir)equipcompare;$(ProjectDir)maxhpmp;$(ProjectDir)shoulders;$(ProjectDir)quicklogin;$(ProjectDir)pendant2;$(ProjectDir)equipaddon;$(ProjectDir)extendequip;$(ProjectDir)setitem;$(ProjectDir)equipgrowth;$(ProjectDir)partybuffs;$(ProjectDir)potentialscroll;$(ProjectDir)mesouncap;$(ProjectDir)gamedata;$(ProjectDir)personalshop;$(ProjectDir)userinfodetail;$(ProjectDir)coloringprism;$(ProjectDir)vskill;$(ProjectDir)bounce;$(ProjectDir)combatpower;$(ProjectDir)statdetail;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)weather;$(ProjectDir);$(ProjectDir)compat;$(ProjectDir)compat\WzLib;$(ProjectDir)compat\ztl;$(ProjectDir)compat\wvs;$(ProjectDir)worldmap;$(ProjectDir)damagerank;$(ProjectDir)damageskin;$(ProjectDir)beautyshop;$(ProjectDir)dailycheckin;$(ProjectDir)miraclecube;$(ProjectDir)storagebag;$(ProjectDir)invresize;$(ProjectDir)invexpand;$(ProjectDir)sidetoolbar;$(ProjectDir)cashshop;$(ProjectDir)slotlock;$(ProjectDir)fusionanvil;$(ProjectDir)higherstoragelist;$(ProjectDir)highershoplist;$(ProjectDir)bufftimer;$(ProjectDir)charslots;$(ProjectDir)maptransfer;$(ProjectDir)equipcompare;$(ProjectDir)maxhpmp;$(ProjectDir)shoulders;$(ProjectDir)quicklogin;$(ProjectDir)pendant2;$(ProjectDir)equipaddon;$(ProjectDir)extendequip;$(ProjectDir)setitem;$(ProjectDir)equipgrowth;$(ProjectDir)partybuffs;$(ProjectDir)potentialscroll;$(ProjectDir)mesouncap;$(ProjectDir)gamedata;$(ProjectDir)personalshop;$(ProjectDir)userinfodetail;$(ProjectDir)userinfomount;$(ProjectDir)coloringprism;$(ProjectDir)vskill;$(ProjectDir)bounce;$(ProjectDir)combatpower;$(ProjectDir)statdetail;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -358,6 +358,9 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
     <ClCompile Include="dailycheckin\dailycheckin.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="chatemoticon\chatemoticon.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="miraclecube\MiracleCubeBridge.cpp">
       <PrecompiledHeader>Use</PrecompiledHeader>
     </ClCompile>
@@ -421,6 +424,7 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
     </ClCompile>
     <ClCompile Include="higherstoragelist\HigherStorageListBridge.cpp" />
     <ClCompile Include="higherstoragelist\higherstoragelist.cpp" />
+    <ClCompile Include="userinfomount\userinfomount.cpp" />
     <ClCompile Include="newchardice\newchardice.cpp" />
     <ClCompile Include="potentialscroll\potentialscroll.cpp" />
     <ClCompile Include="highershoplist\HigherShopListBridge.cpp" />
@@ -449,6 +453,11 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="gamedata\EnterGameCanvasNullGuards.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="gamedata\MapEnterNullGuard.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
@@ -468,6 +477,11 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="bootlog\DeferredBootPatches.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ReleaseMinimal|Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="personalshop\personalshop.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
@@ -549,7 +563,11 @@ echo [Deploy] $(TargetFileName) -&gt; $(BeiDouClientDir)</Command>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="coloringprism\EquipDye.cpp">
+    <ClCompile Include="coloringprism\weapontint.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="coloringprism\itemeff.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
     </ClCompile>

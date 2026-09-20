@@ -1,4 +1,4 @@
-// rs.cpp - Multi-resolution module. Self-contained, hooks via ModRegistry.
+﻿// rs.cpp - Multi-resolution module. Self-contained, hooks via ModRegistry.
 #include "stdafx.h"
 #include "rs.h"
 #include "../ModRegistry.h"
@@ -101,7 +101,24 @@ static void* RsGetCWndMan() {
 // ===== Pattern scan =====
 static unsigned char* g_ModuleBase(const char* dll, size_t* pSize) {
     HMODULE h = GetModuleHandleA(dll);
-    if (!h) { h = LoadLibraryA(dll); if (!h) return nullptr; }
+    if (!h) {
+        // Prefer absolute path beside the EXE — bare LoadLibrary fails when CWD ≠ client dir.
+        char exePath[MAX_PATH] = {};
+        if (GetModuleFileNameA(nullptr, exePath, MAX_PATH)) {
+            std::string dir(exePath);
+            const size_t slash = dir.find_last_of("\\/");
+            if (slash != std::string::npos) {
+                dir.resize(slash + 1);
+                h = LoadLibraryA((dir + dll).c_str());
+            }
+        }
+        if (!h) {
+            h = LoadLibraryA(dll);
+        }
+        if (!h) {
+            return nullptr;
+        }
+    }
     MODULEINFO mi;
     if (!GetModuleInformation(GetCurrentProcess(), h, &mi, sizeof(mi))) return nullptr;
     *pSize = mi.SizeOfImage;
@@ -162,8 +179,18 @@ public:
     MEMBER_AT(void*, 0x90, m_pD3DDevice)
     MEMBER_AT(int, 0x94, m_hrErrorCode)
 
-    typedef int(__thiscall* FindScreenMode_t)(RsGr2D*, SCREENMODE*, int bFullScreen, int w, int h, int unused);
-    static FindScreenMode_t FindScreenMode;
+    // IWzGr2D::Initialize —— COM 接口方法是 STDMETHODCALLTYPE(__stdcall)，this 是第一个
+    // 栈参数而不是 ECX。依据（IDA MCP 反编译 CWvsApp::InitializeGr2D @0x9F7A3B +
+    // 本仓 compat/WzLib/IWzGr2D.h 的 raw_Initialize）：
+    //   (*(*IWzGr2D + 12))(This, 800, 600, VARIANT vHwnd, VARIANT vBPP, VARIANT vRefreshRate)
+    // 参数合计 15 个 DWORD = 0x3C 字节，被调者清栈（Gr2D_DX8 RVA 0x30D3 结尾 leave; ret 0x3C）。
+    // 三个 VARIANT 各 16 字节按值入栈，展开为 4 个 DWORD。这里不直接写 VARIANT，
+    // 是为了不在 rs.cpp 引入 OAIdl 依赖（本文件包含链里没有 VARIANT 定义）。
+    typedef HRESULT(__stdcall* Initialize_t)(
+        void* This, unsigned int uWidth, unsigned int uHeight,
+        unsigned int vHwnd0, unsigned int vHwnd1, unsigned int vHwnd2, unsigned int vHwnd3,
+        unsigned int vBPP0, unsigned int vBPP1, unsigned int vBPP2, unsigned int vBPP3,
+        unsigned int vRR0, unsigned int vRR1, unsigned int vRR2, unsigned int vRR3);
 
     void ApplyPresentSize(int nWidth, int nHeight) {
         m_screenMode.nWidth = nWidth;
@@ -188,6 +215,10 @@ public:
         }
     }
 
+    // 切换分辨率：不再调用 vtable+0x0C —— 那是 IWzGr2D::Initialize（0x3C 字节参数、语义为
+    // 初始化），用旧的 6 参数 thiscall 签名调用会栈失衡且语义错误。窗口模式改为直接改写
+    // present 参数并置 D3DERR_DEVICENOTRESET，让引擎在下一帧自行 Reset，与原先
+    // "FindScreenMode miss" 的降级路径等价（偏移均落在 m_screenMode 内，不会碰到 +0 的 vptr）。
     HRESULT ScreenResolution(int nWidth, int nHeight) {
         if (!nWidth || !nHeight) return E_INVALIDARG;
         if (m_screenMode.nWidth == nWidth && m_screenMode.nHeight == nHeight) {
@@ -196,74 +227,274 @@ public:
             RsLogFlush("[RS] ScreenResolution already matched on Gr2D object");
             return S_OK;
         }
-        if (!FindScreenMode) {
-            FindScreenMode = reinterpret_cast<FindScreenMode_t>(
-                FindPattern("GR2D_DX8.DLL", "B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 EC 68"));
-            if (FindScreenMode) {
-                RsLogFlush("[RS] FindScreenMode resolved in GR2D_DX8.DLL");
-            } else {
-                FindScreenMode = reinterpret_cast<FindScreenMode_t>(
-                    FindPattern("GR2D_DX9.DLL", "B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 EC 68"));
-                if (FindScreenMode)
-                    RsLogFlush("[RS] FindScreenMode resolved in GR2D_DX9.DLL");
-            }
-        }
-        if (!FindScreenMode) {
-            size_t dx8sz = 0, dx9sz = 0;
-            g_ModuleBase("GR2D_DX8.DLL", &dx8sz);
-            g_ModuleBase("GR2D_DX9.DLL", &dx9sz);
-            char buf[192];
-            sprintf_s(buf,
-                      "[RS] FindScreenMode pattern miss dev=%p dx8_img=%zu dx9_img=%zu",
-                      m_pD3DDevice, dx8sz, dx9sz);
+        if (!Client::WindowedMode) {
+            char buf[160];
+            sprintf_s(buf, "[RS] ScreenResolution %dx%d skipped (fullscreen, no native mode lookup)",
+                      nWidth, nHeight);
             RsLogFlush(buf);
             return E_FAIL;
         }
-        // bFullScreen at +0x58 is unreliable after FindScreenMode (-1). Use config.
-        const int fs = Client::WindowedMode ? 0 : 1;
-        if (Client::WindowedMode)
-            ForceWindowedFlag();
-        SCREENMODE mode{};
-        if (FindScreenMode(this, &mode, fs, nWidth, nHeight, 0)) {
-            m_screenMode = mode;
-            ApplyPresentSize(nWidth, nHeight);
-            if (Client::WindowedMode)
-                ForceWindowedFlag();
-            m_hrErrorCode = 0x88760869; // D3DERR_DEVICENOTRESET
-            {
-                char buf[192];
-                sprintf_s(buf, "[RS] FindScreenMode ok -> DEVICENOTRESET %dx%d pp=%dx%d win=%d",
-                          nWidth, nHeight, m_screenMode.nBackBufferWidth,
-                          m_screenMode.nBackBufferHeight, m_screenMode.nWindowed);
-                RsLogFlush(buf);
-            }
-            return S_OK;
-        }
-        // Windowed: EnumAdapterModes often omits 1366x768 / ultrawide — patch PP.
-        if (Client::WindowedMode) {
-            ApplyPresentSize(nWidth, nHeight);
-            ForceWindowedFlag();
-            m_hrErrorCode = 0x88760869;
-            {
-                char buf[224];
-                sprintf_s(buf,
-                    "[RS] FindScreenMode miss %dx%d — windowed custom pp=%dx%d win=%d",
-                    nWidth, nHeight, m_screenMode.nBackBufferWidth,
-                    m_screenMode.nBackBufferHeight, m_screenMode.nWindowed);
-                RsLogFlush(buf);
-            }
-            return S_OK;
-        }
-        {
-            char buf[160];
-            sprintf_s(buf, "[RS] FindScreenMode failed %dx%d fs=%d dev=%p",
-                      nWidth, nHeight, fs, m_pD3DDevice);
-            RsLogFlush(buf);
-        }
-        return E_FAIL;
+        ApplyPresentSize(nWidth, nHeight);
+        ForceWindowedFlag();
+        m_hrErrorCode = 0x88760869; // D3DERR_DEVICENOTRESET
+        char buf[192];
+        sprintf_s(buf, "[RS] ScreenResolution windowed pp patched %dx%d pp=%dx%d win=%d",
+                  nWidth, nHeight, m_screenMode.nBackBufferWidth,
+                  m_screenMode.nBackBufferHeight, m_screenMode.nWindowed);
+        RsLogFlush(buf);
+        return S_OK;
     }
 };
-RsGr2D::FindScreenMode_t RsGr2D::FindScreenMode = nullptr;
+// ===== IWzGr2D::Initialize 早期 hook（旧名 "FindScreenMode"）===================
+// 它 hook 的实际是 IWzGr2D::Initialize（vtable+0x0C，Gr2D_DX8 RVA 0x30D3）。旧实现用
+// __fastcall(pThis, edx, SCREENMODE*, ...) 去接一个 __stdcall（this 为首个栈参数、共
+// 15 个 DWORD = 0x3C 字节）的 COM 方法，参数整体错位一个槽：mode 实际拿到的是 this，
+// 于是把 800/600 写进 this+0（vptr），InitializeGr2D 紧接着的虚调用 put_backColor
+// （vtable+0x50）执行 call [eax+0x50] 时 eax=800 → 读 0x370 → AV → Init SEH →
+// ExitProcess(1)。现按真实签名原样透传，参数不可信时拒写任何内存。
+static RsGr2D::Initialize_t g_earlyInitOrig = nullptr;
+static bool g_earlyInitInstalled = false;
+
+// 参数闸门：this 必须非空可读，宽高需落在合理区间。不满足时只透传、绝不写内存，
+// 把"参数错位写坏对象"从崩溃降级为无害透传。
+static bool rs_init_args_plausible(const void* This, unsigned int uWidth, unsigned int uHeight) {
+    if (!This || IsBadReadPtr(This, sizeof(void*))) return false;
+    if (uWidth < 640 || uWidth > RS_SCREEN_WIDTH_MAX) return false;
+    if (uHeight < 480 || uHeight > RS_SCREEN_HEIGHT_MAX) return false;
+    return true;
+}
+
+// 异常安全封装：原生 IWzGr2D::Initialize 在 800x600x16 不可枚举时并非返回失败码，
+// 而是 throw_hr（_CxxThrowException，SEH 码 0xE06D7363）抛 C++ 异常，导致
+// rs_EarlyInitialize_hook 内 "if (FAILED(hr)) 重试 32bpp" 逻辑永远拿不到 hr、
+// 异常直接被 CWvsApp::Init 的 SEH 捕获 → ExitProcess(1)。这里用 __try/__except
+// 把抛异常翻译成 HRESULT 0x80004005 返回，使 32bpp 重试真正执行（文档 §5 已验证 32bpp 重试成功）。
+// 注：函数体内仅栈标量/数组，无需要析构的 C++ 对象，SEH __try 安全。
+static HRESULT CallNativeInit(
+    void* This, unsigned int uWidth, unsigned int uHeight,
+    unsigned int vHwnd0, unsigned int vHwnd1, unsigned int vHwnd2, unsigned int vHwnd3,
+    unsigned int vBPP0, unsigned int vBPP1, unsigned int vBPP2, unsigned int vBPP3,
+    unsigned int vRR0, unsigned int vRR1, unsigned int vRR2, unsigned int vRR3) {
+    __try {
+        return g_earlyInitOrig(This, uWidth, uHeight,
+                               vHwnd0, vHwnd1, vHwnd2, vHwnd3,
+                               vBPP0, vBPP1, vBPP2, vBPP3,
+                               vRR0, vRR1, vRR2, vRR3);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        RsLogFlush("[RS] early IWzGr2D::Initialize native threw (screen mode unsupported) — convert to 0x80004005 for 32bpp retry");
+        return 0x80004005;
+    }
+}
+
+// 前向声明：以下两个帮助函数在本 hook 之后定义，需在早期初始化阶段复用（登录尺寸归位）。
+static void rs_resizeGameWindow(int nw, int nh);
+static void rs_syncClientDims(int nw, int nh);
+
+static HRESULT __stdcall rs_EarlyInitialize_hook(
+    void* This, unsigned int uWidth, unsigned int uHeight,
+    unsigned int vHwnd0, unsigned int vHwnd1, unsigned int vHwnd2, unsigned int vHwnd3,
+    unsigned int vBPP0, unsigned int vBPP1, unsigned int vBPP2, unsigned int vBPP3,
+    unsigned int vRR0, unsigned int vRR1, unsigned int vRR2, unsigned int vRR3) {
+    if (!g_earlyInitOrig)
+        return E_FAIL;
+    if (!rs_init_args_plausible(This, uWidth, uHeight)) {
+        RsLogFlush("[RS] early Initialize arg guard hit — pass through, no memory write");
+        return CallNativeInit(This, uWidth, uHeight,
+                              vHwnd0, vHwnd1, vHwnd2, vHwnd3,
+                              vBPP0, vBPP1, vBPP2, vBPP3,
+                              vRR0, vRR1, vRR2, vRR3);
+    }
+    char buf[192];
+    sprintf_s(buf, "[RS] early IWzGr2D::Initialize enter this=%p %ux%u bpp=%u win=%d",
+              This, uWidth, uHeight, vBPP2, Client::WindowedMode ? 1 : 0);
+    RsLogFlush(buf);
+
+    auto* grEarly = reinterpret_cast<RsGr2D*>(This);
+    // WindowedMode（config.ini [general] WindowedMode，默认 true）：在调用原生 Initialize
+    // 之前写入 m_screenMode 窗口标志，尽量让 D3D 以窗口化创建设备，避免 ChangeDisplaySettings
+    // 把系统桌面分辨率改掉再改回（用户可见「闪一下」）。全屏模式不预写，保持引擎默认。
+    if (Client::WindowedMode) {
+        grEarly->ApplyPresentSize(rs_login_w, rs_login_h);
+        RsLogFlush("[RS] early Initialize pre-set windowed present=login size");
+    }
+
+    // 本机 D3D8 常枚举不到引擎默认的 800x600；原生 throw 会弄坏对象，故不在损坏对象上重试。
+    // 窗口模式：只试登录尺寸与少量常见窗口安全档，禁止 1920/桌面原生作 Initialize 目标
+    //（否则先 OK@1920 再 realign→1280，桌面分辨率会闪一下）。全屏模式才允许桌面/大档候选。
+    unsigned int deskW = (unsigned)GetSystemMetrics(SM_CXSCREEN);
+    unsigned int deskH = (unsigned)GetSystemMetrics(SM_CYSCREEN);
+    {
+        char deskMsg[160];
+        sprintf_s(deskMsg, "[RS] early Initialize desk=%ux%u login=%dx%d max=%dx%d",
+                  deskW, deskH, rs_login_w, rs_login_h,
+                  RS_SCREEN_WIDTH_MAX, RS_SCREEN_HEIGHT_MAX);
+        RsLogFlush(deskMsg);
+    }
+    struct Cand { unsigned w, h; };
+    // 窗口模式候选：优先登录/小档；桌面原生作首选兜底（与系统模式相同，闪烁最小）。
+    // 1920/1366 仅作最后手段——本机曾依赖它们才能 Initialize；有桌面成功时不会走到。
+    // 注意：桌面可能超过 RS_SCREEN_*_MAX（如 2560x1600），见下方 isDesk 豁免。
+    Cand winCands[] = {
+        {(unsigned)rs_login_w, (unsigned)rs_login_h},
+        {uWidth, uHeight},
+        {1280u, 720u},
+        {1024u, 768u},
+        {800u, 600u},
+        {deskW, deskH},
+        {1920u, 1080u},
+        {1366u, 768u},
+    };
+    Cand fsCands[] = {
+        {(unsigned)rs_login_w, (unsigned)rs_login_h},
+        {1920u, 1080u},
+        {deskW, deskH},
+        {2560u, 1440u},
+        {1600u, 900u},
+        {1280u, 720u},
+        {800u, 600u},
+    };
+    const Cand* cands = Client::WindowedMode ? winCands : fsCands;
+    const size_t candCount = Client::WindowedMode ? _countof(winCands) : _countof(fsCands);
+
+    HRESULT hr = 0x80004005;
+    for (size_t i = 0; i < candCount; ++i) {
+        unsigned int cw = cands[i].w, ch = cands[i].h;
+        // 桌面原生允许超出 RS_SCREEN_*_MAX（本机常见 2560x1600）：仅作 Initialize
+        // 兜底，随后 ScreenResolution 归位到登录尺寸。其它候选仍受引擎布局上限约束。
+        const bool isDesk = (cw == deskW && ch == deskH);
+        if (cw < 640 || ch < 480) {
+            char skipLo[160];
+            sprintf_s(skipLo, "[RS] early Initialize skip too-small %ux%u", cw, ch);
+            RsLogFlush(skipLo);
+            continue;
+        }
+        if (!isDesk && (cw > RS_SCREEN_WIDTH_MAX || ch > RS_SCREEN_HEIGHT_MAX)) {
+            char skipHi[176];
+            sprintf_s(skipHi, "[RS] early Initialize skip over-max %ux%u (max %dx%d)",
+                      cw, ch, RS_SCREEN_WIDTH_MAX, RS_SCREEN_HEIGHT_MAX);
+            RsLogFlush(skipHi);
+            continue;
+        }
+        if (isDesk && (cw > RS_SCREEN_WIDTH_MAX || ch > RS_SCREEN_HEIGHT_MAX)) {
+            char deskNote[176];
+            sprintf_s(deskNote, "[RS] early Initialize allow desk over-max %ux%u (layout max %dx%d)",
+                      cw, ch, RS_SCREEN_WIDTH_MAX, RS_SCREEN_HEIGHT_MAX);
+            RsLogFlush(deskNote);
+        }
+        bool dup = false;
+        for (size_t j = 0; j < i; ++j) {
+            if (cands[j].w == cw && cands[j].h == ch) { dup = true; break; }
+        }
+        if (dup) {
+            char skipMsg[160];
+            sprintf_s(skipMsg, "[RS] early Initialize skip dup %ux%u", cw, ch);
+            RsLogFlush(skipMsg);
+            continue;
+        }
+        if (Client::WindowedMode)
+            grEarly->ApplyPresentSize((int)cw, (int)ch);
+        char dbg[160];
+        sprintf_s(dbg, "[RS] early Initialize try %ux%u @32bpp win=%d",
+                  cw, ch, Client::WindowedMode ? 1 : 0);
+        RsLogFlush(dbg);
+        hr = CallNativeInit(This, cw, ch,
+                            vHwnd0, vHwnd1, vHwnd2, vHwnd3,
+                            vBPP0, vBPP1, 32, vBPP3,
+                            vRR0, vRR1, vRR2, vRR3);
+        if (SUCCEEDED(hr)) {
+            sprintf_s(dbg, "[RS] early Initialize OK at %ux%u", cw, ch);
+            RsLogFlush(dbg);
+            break;
+        }
+    }
+    sprintf_s(buf, "[RS] early IWzGr2D::Initialize rc=0x%08X", (unsigned)hr);
+    RsLogFlush(buf);
+    // 引擎默认可能仍按全屏建设备。旧 patch 改 BPP 来源会让 Initialize 失败；成功后强制窗口标志。
+    if (SUCCEEDED(hr) && Client::WindowedMode) {
+        grEarly->ForceWindowedFlag();
+        RsLogFlush("[RS] early Initialize — windowed flag applied (BPP untouched)");
+        // 若仍落到非登录尺寸（窗口安全候选之一），用 ScreenResolution 归位——该路径只改
+        // present/backbuffer + DEVICENOTRESET，不 ChangeDisplaySettings，桌面分辨率不应再闪。
+        const unsigned int realW = grEarly->m_screenMode.nWidth;
+        const unsigned int realH = grEarly->m_screenMode.nHeight;
+        if (realW != (unsigned int)rs_login_w || realH != (unsigned int)rs_login_h) {
+            grEarly->ScreenResolution(rs_login_w, rs_login_h);
+            rs_resizeGameWindow(rs_login_w, rs_login_h);
+            rs_syncClientDims(rs_login_w, rs_login_h);
+            char realign[176];
+            sprintf_s(realign, "[RS] early Initialize realign %ux%u -> %dx%d (login, windowed)",
+                      realW, realH, rs_login_w, rs_login_h);
+            RsLogFlush(realign);
+        } else {
+            RsLogFlush("[RS] early Initialize already at login size — no realign");
+        }
+    }
+    return hr;
+}
+
+
+void rs_install_early_findscreenmode_hook() {
+	if (g_earlyInitInstalled)
+		return;
+	// Prefer absolute LoadLibrary beside BeiDou.exe — plain GetModuleHandle often
+	// misses before first CoCreate, and relative LoadLibrary can fail if CWD != client.
+	HMODULE gr2dMod = nullptr;
+	{
+		char exePath[MAX_PATH] = {};
+		if (GetModuleFileNameA(nullptr, exePath, MAX_PATH)) {
+			std::string dir(exePath);
+			const size_t slash = dir.find_last_of("\\/");
+			if (slash != std::string::npos)
+				dir.resize(slash + 1);
+			const char* names[] = { "Gr2D_DX8.dll", "GR2D_DX8.DLL", "Gr2D_DX9.dll", "GR2D_DX9.DLL" };
+			for (const char* n : names) {
+				gr2dMod = GetModuleHandleA(n);
+				if (gr2dMod)
+					break;
+				const std::string full = dir + n;
+				gr2dMod = LoadLibraryA(full.c_str());
+				if (gr2dMod) {
+					char buf[192];
+					sprintf_s(buf, "[RS] early LoadLibrary %s", full.c_str());
+					RsLogFlush(buf);
+					break;
+				}
+			}
+		}
+	}
+	// IWzGr2D::Initialize（Gr2D_DX8 RVA 0x30D3 = vtable+0x0C）入口特征：
+	// mov eax,<scope table>; call __EH_prolog; sub esp,0xDC。
+	// 校准依据（capstone + IDA MCP）：0x30D0 处是上一函数的 ret 0x14，0x30D3 才是入口；
+	// 错误串 "Failed in finding proper screen mode for Gr2D" 的引用在 RVA 0x3533，
+	// 落在 0x30D3~0x3577 函数体内。旧 pattern "83 EC 68" 命中 RVA 0x2E1B（另一个子函数）。
+	void* addr = FindPattern("GR2D_DX8.DLL",
+			"B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 81 EC DC 00 00 00");
+	if (!addr)
+		addr = FindPattern("GR2D_DX9.DLL",
+				"B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 81 EC DC 00 00 00");
+	if (!addr && gr2dMod)
+		addr = reinterpret_cast<char*>(gr2dMod) + 0x30D3;
+	if (!addr) {
+		// Legacy pattern kept as last resort (wrong on S9 Gr2D_DX8).
+		addr = FindPattern("GR2D_DX8.DLL", "B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 EC 68");
+		if (!addr)
+			addr = FindPattern("GR2D_DX9.DLL", "B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 EC 68");
+	}
+	if (!addr) {
+		RsLogFlush("[RS] early IWzGr2D::Initialize pattern miss (DX8/DX9 not loaded?)");
+		return;
+	}
+	g_earlyInitOrig = reinterpret_cast<RsGr2D::Initialize_t>(addr);
+	if (Memory::SetHook(true, reinterpret_cast<void**>(&g_earlyInitOrig),
+						CastHook(&rs_EarlyInitialize_hook))) {
+		g_earlyInitInstalled = true;
+		char buf[128];
+		sprintf_s(buf, "[RS] early IWzGr2D::Initialize hook OK @%p", addr);
+		RsLogFlush(buf);
+	} else {
+		RsLogFlush("[RS] early IWzGr2D::Initialize Detour FAILED");
+	}
+}
 
 // Persist field tier beside ijl15.dll (never CWD / %WINDIR%).
 //
@@ -687,6 +918,28 @@ public:
 static void rs_syncClientDims(int nw, int nh) {
     Client::m_nGameWidth = nw;
     Client::m_nGameHeight = nh;
+}
+
+// 高分辨率档（>1280x720）死区修复：Client::UpdateResolution() 在 boot 仅按 m_nGameWidth/Height
+// 默认 1280x720 写死一批屏幕尺寸立即数（含 Gr2D 初始化屏幕尺寸 0x9F7B1D/9F7B23 等字段世界鼠标
+// 转换依赖者），rs 自身的重 patch（RsApplyInputHitTestCoords / RsApplyFieldEffectMetrics）未覆盖
+// 它们。结果：>1280x720 档下字段世界鼠标仍按 1280 中心换算 → 屏幕两侧点不到 NPC / 丢道具死区；
+// 1280x720 因恰好等于 INI 默认值而"巧合正常"。
+// 这里在切分辨率（ScreenResolution 之前）用真实档位尺寸再跑一次 UpdateResolution 刷新这批立即数。
+// WriteInt / CodeCave 对相同参数幂等，仅在尺寸相对上次变更时重放，避免每次换图重复装 detour。
+static int rs_lastFullResW = 0;
+static int rs_lastFullResH = 0;
+static void rs_reapplyFullResolution(int nw, int nh) {
+    if (nw == rs_lastFullResW && nh == rs_lastFullResH)
+        return;
+    Client::m_nGameWidth = nw;
+    Client::m_nGameHeight = nh;
+    Client::UpdateResolution();
+    rs_lastFullResW = nw;
+    rs_lastFullResH = nh;
+    char buf[176];
+    sprintf_s(buf, "[RS] re-applied Client::UpdateResolution for %dx%d (high-res field deadzone fix)", nw, nh);
+    RsLogFlush(buf);
 }
 
 // WorldMap codecave (0x009EB594) pushes (wordMapX, wordMapY) into CreateDlg.
@@ -1216,8 +1469,34 @@ static void RsApplyToolTipRelMoveDimPatches() {
     Patch4(0x008EBC58 + 1, reinterpret_cast<uintptr_t>(&rs_height));
 }
 
+// CInputSystem 命中坐标：鼠标屏幕坐标 → 视图向量的转换 + 钳制上限。
+// IDA 校准依据：
+//   CInputSystem::SetCursorVectorPos @0x59A0CB
+//       (*(*pGr2D + 144))(pGr2D, a2: x - 400, a3: y - 300, VARIANT, VARIANT)
+//       → 0x0059A15D + 2 = -(H/2)、0x0059A169 + 2 = -(W/2)（"moves all interactable UI"）
+//   CInputSystem::SetCursorPos @0x59A887：clamp 上限
+//       → 0x0059A898 + 1 = W、0x0059A8B1 + 1 = H
+//   CInputSystem::UpdateMouse @0x59AAFE
+//       → 0x0059AC09 + 1 = W、0x0059AC22 + 1 = H
+// 这些原先只在 Client::UpdateResolution() 里按登录尺寸写一次，rs 的 Origin 切换后从不
+// 更新，于是 HD 下出现 800x600 之外点不到 NPC / 丢不了道具的死区（rs.cpp 既有注释亦记载
+// "unclickable/drop-dead zones past the old 800x600 island"）。
+static void RsApplyInputHitTestCoords() {
+    const int halfW = rs_width / 2;
+    const int halfH = rs_height / 2;
+    Memory::WriteInt(0x0059A15D + 2, -halfH);
+    Memory::WriteInt(0x0059A169 + 2, -halfW);
+    Memory::WriteInt(0x0059A898 + 1, rs_width);
+    Memory::WriteInt(0x0059A8B1 + 1, rs_height);
+    Memory::WriteInt(0x0059AC09 + 1, rs_width);
+    Memory::WriteInt(0x0059AC22 + 1, rs_height);
+}
+
 static void rs_callUpdateResolution() {
     Client::UpdateResolution();
+    // UpdateResolution 按 m_nGameWidth/Height 写命中坐标；这里再按运行时真实尺寸复核一次，
+    // 避免登录/回退路径留下过期值。
+    RsApplyInputHitTestCoords();
     if (rs_layoutHooksInstalled) {
         RsApplyToolTipRelMoveDimPatches();
     }
@@ -1322,6 +1601,8 @@ static void rs_afterSuccessfulSwitch(int nw, int nh, bool grChanged, bool loginU
             RsLogFlush("[RS] field Origin layout applied");
         }
     }
+    // 无论 Origin 是否启用，命中坐标都必须与当前真实分辨率一致（点 NPC / 丢道具依赖它）。
+    RsApplyInputHitTestCoords();
 
     if (rs_originActive && RsCtx::IsInstantiated()) {
         RsCtx::GetInstance()->m_temporaryStatView.AdjustPosition_hook();
@@ -1340,7 +1621,16 @@ static void rs_afterSuccessfulSwitch(int nw, int nh, bool grChanged, bool loginU
 
 static void rs_switchToSize(int nw, int nh, bool loginUi = false) {
     if (nw <= 0 || nh <= 0) return;
-    const bool sameSize = (nw == rs_width && nh == rs_height);
+    auto* gr = reinterpret_cast<RsGr2D*>(get_gr().GetInterfacePtr());
+    if (!gr) {
+        RsLogFlush("[RS] get_gr null — cannot ScreenResolution");
+        return;
+    }
+    // Gr2D 的真实后备缓冲尺寸才是判定依据：引擎固定以 800x600 调 IWzGr2D::Initialize，
+    // 而 rs_width/rs_height 只是本模块的期望值（dllmain 已置为登录尺寸）。只比期望值会
+    // 误判"已匹配"而永远不切换（表现为登录界面停在 800x600）。
+    const bool grSame = (gr->m_screenMode.nWidth == nw && gr->m_screenMode.nHeight == nh);
+    const bool sameSize = grSame && (nw == rs_width && nh == rs_height);
     // Re-apply when: (a) leaving field to login UI while Origin still on, or
     // (b) entering/staying in field at same dims but Origin was off (e.g. after bug).
     const bool needLoginUiReapply = loginUi && rs_originActive;
@@ -1352,15 +1642,13 @@ static void rs_switchToSize(int nw, int nh, bool loginUi = false) {
         RsLogFlush(buf);
         return;
     }
-    auto* gr = reinterpret_cast<RsGr2D*>(get_gr().GetInterfacePtr());
-    if (!gr) {
-        RsLogFlush("[RS] get_gr null — cannot ScreenResolution");
-        return;
-    }
     const int prevW = gr->m_screenMode.nWidth;
     const int prevH = gr->m_screenMode.nHeight;
+    // 在 ScreenResolution 之前用真实档位尺寸刷新 boot 写死的屏幕尺寸立即数，避免 >1280x720
+    // 档字段世界鼠标仍按 1280 中心换算导致两侧死区（幂等，仅在尺寸变更时重放）。
+    rs_reapplyFullResolution(nw, nh);
     HRESULT hr = S_OK;
-    if (!sameSize) {
+    if (!grSame) {
         hr = gr->ScreenResolution(nw, nh);
         char buf[192];
         sprintf_s(buf, "[RS] ScreenResolution(%dx%d)=0x%08X prev=%dx%d now=%dx%d pp=%dx%d",
@@ -1467,8 +1755,13 @@ void __cdecl rs_set_stage_hook(CStage* pStage, void* pParam) {
     // created the book UI under HD Origin → black left / book bottom-right.
     // Skip CInterStage (loading) only.
     if (!pStage || !pStage->IsKindOf(reinterpret_cast<const CRTTI*>(0x00BED874))) {
-        if (rs_originActive || rs_width != rs_login_w || rs_height != rs_login_h) {
-            std::cout << "[RS] set_stage pre-restore login before stage build" << std::endl;
+        // 除期望值外还要看 Gr2D 实际尺寸：初始化后仍是引擎硬编码的 800x600 时，
+        // rs_width/rs_height 已等于登录尺寸，仅凭期望值判断会漏掉这次恢复。
+        auto* gr = reinterpret_cast<RsGr2D*>(get_gr().GetInterfacePtr());
+        const bool grMismatch = gr && (gr->m_screenMode.nWidth != rs_login_w ||
+                                       gr->m_screenMode.nHeight != rs_login_h);
+        if (rs_originActive || grMismatch || rs_width != rs_login_w || rs_height != rs_login_h) {
+            RsLogFlush("[RS] set_stage pre-restore login before stage build");
             rs_restoreLoginResolution();
         }
     }
@@ -1598,6 +1891,76 @@ public:
 static CCtrlComboBox* rs_cb = nullptr;
 static int rs_cb_last_select = 0;
 
+// ===== TEMP DEBUG (A'): trace combo selection commit =====
+// Listbox->combo selection is normally committed by a call to SetSelect (0x004C738B),
+// the ONLY writer of combo+0x68. It has 0 static callers, so we log OnCommand
+// (0x004C7343, receives child notifications w/ 0x80 bit) and SetSelect to learn
+// which msg/index the listbox emits on item click. Filter on our one combo (rs_cb).
+class CCtrlComboBox_dbg {
+public:
+    MEMBER_HOOK(void, 0x004C7343, OnCommand, int msg, int param)
+    MEMBER_HOOK(void, 0x004C738B, SetSelect, int idx)
+};
+void CCtrlComboBox_dbg::OnCommand_hook(int msg, int param) {
+    if ((void*)this == (void*)rs_cb) {
+        // A' fix: our hand-new'd combo lacks the native listbox->combo SetSelect linkage,
+        // so clicking a list item updates only the listbox's own +0x68, never combo's
+        // m_nSelect(+0x68). On a child-notify (list item selected, param high-bit 0x80),
+        // pull the live listbox selection (combo+0x4c -> listbox, listbox+0x68) and commit
+        // it via SetSelect while the listbox is still alive.
+        if (param & 0x80000000) {
+            char* cbp = (char*)rs_cb;
+            void* lb = *(void**)(cbp + 0x4c);
+            if (lb) {
+                int lbSel = *(int*)((char*)lb + 0x68);
+                char dbg[192];
+                sprintf_s(dbg, "[RS-DBG] childNotify lb=%p lbSel=%d m_nSelect=%d",
+                          lb, lbSel, rs_cb->m_nSelect);
+                RsLogFlush(dbg);
+                if (lbSel >= 0 && lbSel <= RS_TIER_MAX && lbSel != rs_cb->m_nSelect)
+                    CCtrlComboBox_dbg::SetSelect(rs_cb, lbSel);
+            }
+        }
+        char b[192];
+        sprintf_s(b, "[RS-DBG] combo OnCommand msg=0x%X param=0x%X childNotify=%d",
+                  msg, (unsigned)param, (param & 0x80000000) ? 1 : 0);
+        RsLogFlush(b);
+    }
+    CCtrlComboBox_dbg::OnCommand(this, msg, param);
+}
+void CCtrlComboBox_dbg::SetSelect_hook(int idx) {
+    if ((void*)this == (void*)rs_cb) {
+        char b[96];
+        sprintf_s(b, "[RS-DBG] combo SetSelect idx=%d", idx);
+        RsLogFlush(b);
+    }
+    CCtrlComboBox_dbg::SetSelect(this, idx);
+}
+// Also cover the case where the dropdown listbox notifies the DIALOG directly
+// (0x258) instead of the combo. On any 0x258 while our combo's listbox is alive,
+// sync combo m_nSelect from the live listbox selection.
+class CUISysOpt_dbg {
+public:
+    MEMBER_HOOK(void, 0x009948ec, OnCommand, int p1, int p2, int p3)
+};
+void CUISysOpt_dbg::OnCommand_hook(int p1, int p2, int p3) {
+    if (p2 == 0x258 && rs_cb) {
+        char* cbp = (char*)rs_cb;
+        void* lb = *(void**)(cbp + 0x4c);
+        if (lb) {
+            int lbSel = *(int*)((char*)lb + 0x68);
+            char dbg[192];
+            sprintf_s(dbg, "[RS-DBG] dlgOnCmd 0x258 p1=0x%X lb=%p lbSel=%d m_nSelect=%d",
+                      (unsigned)p1, lb, lbSel, rs_cb->m_nSelect);
+            RsLogFlush(dbg);
+            if (lbSel >= 0 && lbSel <= RS_TIER_MAX && lbSel != rs_cb->m_nSelect)
+                CCtrlComboBox_dbg::SetSelect(rs_cb, lbSel);
+        }
+    }
+    CUISysOpt_dbg::OnCommand(this, p1, p2, p3);
+}
+// ===== TEMP DEBUG end =====
+
 void CUISysOpt::OnCreate_hook(void* pData) {
     RsLogFlush("[RS] SysOpt OnCreate enter");
     CUISysOpt::OnCreate(this, pData);
@@ -1632,6 +1995,13 @@ void CUISysOpt::OnCreate_hook(void* pData) {
     if (showTier < 0 || showTier > RS_TIER_MAX) showTier = 0;
     rs_cb->SetSelect(showTier);
     rs_cb_last_select = showTier;
+    {
+        // 读回校验：若 m_nSelect 偏移(0x68)与游戏真实选中字段不一致，readback 会与 showTier 不符。
+        char rb[128];
+        sprintf_s(rb, "[RS] SysOpt combo SetSelect(%d) readback=%d (offset 0x68 sanity)",
+                  showTier, rs_cb->m_nSelect);
+        RsLogFlush(rb);
+    }
     char buf[160];
     sprintf_s(buf, "[RS] SysOpt combo created select=%d (rs_tier=%d) follow_login=%d live=%dx%d",
               showTier, rs_tier, rs_field_follow_login ? 1 : 0, rs_width, rs_height);
@@ -1702,14 +2072,28 @@ void CWvsApp::CallUpdate_hook(int tCurTime) {
 void CConfig::ApplySysOpt_hook(void* pSysOpt, int bApplyVideo) {
     CConfig::ApplySysOpt(this, pSysOpt, bApplyVideo);
     {
+        // sel 必须在 bApplyVideo 早退之前记录，否则"改选"这类 bApplyVideo=0 的调用看不到选中值变化。
+        const int curSel = rs_cb ? rs_cb->m_nSelect : -1;
         char buf[192];
         sprintf_s(buf,
-            "[RS] ApplySysOpt pSysOpt=%d bApplyVideo=%d cb=%d follow_login=%d cur_tier=%d",
-            pSysOpt ? 1 : 0, bApplyVideo, rs_cb ? 1 : 0,
+            "[RS] ApplySysOpt pSysOpt=%d bApplyVideo=%d cb=%d sel=%d follow_login=%d cur_tier=%d",
+            pSysOpt ? 1 : 0, bApplyVideo, rs_cb ? 1 : 0, curSel,
             rs_field_follow_login ? 1 : 0, rs_tier);
         RsLogFlush(buf);
     }
     if (!pSysOpt || !bApplyVideo) return;
+
+    // A' fallback sync: if the dropdown listbox still exists, pull its live selection
+    // into combo's m_nSelect(+0x68) so OK applies the tier the user actually picked.
+    if (rs_cb) {
+        char* cbp = (char*)rs_cb;
+        void* lb = *(void**)(cbp + 0x4c);
+        if (lb) {
+            int lbSel = *(int*)((char*)lb + 0x68);
+            if (lbSel >= 0 && lbSel <= RS_TIER_MAX && lbSel != rs_cb->m_nSelect)
+                CCtrlComboBox_dbg::SetSelect(rs_cb, lbSel);
+        }
+    }
 
     int sel = rs_cb ? rs_cb->m_nSelect : rs_cb_last_select;
     if (rs_cb) rs_cb_last_select = sel;
@@ -2921,6 +3305,10 @@ void rs_attach() {
 
     ATTACH_HOOK(CUISysOpt::OnCreate, CUISysOpt::OnCreate_hook);
     ATTACH_HOOK(CUISysOpt::Destructor, CUISysOpt::Destructor_hook);
+    // TEMP DEBUG (A'): trace combo selection commit — REMOVE when fix landed.
+    ATTACH_HOOK(CCtrlComboBox_dbg::OnCommand, CCtrlComboBox_dbg::OnCommand_hook);
+    ATTACH_HOOK(CCtrlComboBox_dbg::SetSelect, CCtrlComboBox_dbg::SetSelect_hook);
+    ATTACH_HOOK(CUISysOpt_dbg::OnCommand, CUISysOpt_dbg::OnCommand_hook);
     ATTACH_HOOK(CWvsApp::CallUpdate, CWvsApp::CallUpdate_hook);
     Patch4(0x009945BC + 1, 372); // SysOpt OK/Cancel shift for combo room
 

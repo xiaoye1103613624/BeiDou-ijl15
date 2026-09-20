@@ -4,18 +4,25 @@
 #include <windows.h>
 
 
+// Real v83 layout: AvatarLook::operator= copies 52 slots (push 0x34), struct end 0x1C5.
+// Declaring 60 was internally consistent with a wrong sizeof assert and overrun into
+// neighbouring fields / heap (aItemEffectLayer). See coloring-prism INTEGRATION 4.2c.
+#ifndef AVATAR_EQUIP_SLOTS
+#define AVATAR_EQUIP_SLOTS 52
+#endif
+
 #pragma pack(push, 1)
 struct AvatarLook : public ZRefCounted {
-    unsigned char nGender;
-    int nSkin;
-    int nFace;
-    int nWeaponStickerID;
-    int anHairEquip[60];
-    int anUnseenEquip[60];
-    int anPetID[3];
+    unsigned char nGender;                      // +0x0C
+    int nSkin;                                  // +0x0D
+    int nFace;                                  // +0x11
+    int nWeaponStickerID;                       // +0x15
+    int anHairEquip[AVATAR_EQUIP_SLOTS];        // +0x19
+    int anUnseenEquip[AVATAR_EQUIP_SLOTS];      // +0xE9
+    int anPetID[3];                             // +0x1B9
 };
 #pragma pack(pop)
-static_assert(sizeof(AvatarLook) == 0x205);
+static_assert(sizeof(AvatarLook) == 0x1C5);
 
 
 struct USERLAYER {
@@ -52,7 +59,7 @@ public:
         int bBlinking;
         POINT ptBodyRelMove;
         int nRidingChairID;
-        ITEMEFFECTLAYER aItemEffectLayer[60];
+        ITEMEFFECTLAYER aItemEffectLayer[AVATAR_EQUIP_SLOTS];
     };
 
     virtual ~CAvatar() = 0;

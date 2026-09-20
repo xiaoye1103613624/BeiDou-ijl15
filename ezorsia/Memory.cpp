@@ -31,13 +31,16 @@ bool Memory::SetHook(bool attach, void** ptrTarget, void* ptrDetour)
 }
 
 void Memory::FillBytes(const DWORD dwOriginAddress, const unsigned char ucValue, const int nCount) {
-    if (UseVirtuProtect) {
-        DWORD dwOldProtect;
-        VirtualProtect((LPVOID)dwOriginAddress, nCount, PAGE_EXECUTE_READWRITE, &dwOldProtect); //thanks colaMint, joo, and stelmo for informing me of using virtualprotect
-        memset((void*)dwOriginAddress, ucValue, nCount);
-        VirtualProtect((LPVOID)dwOriginAddress, nCount, dwOldProtect, &dwOldProtect);
-    }
-    else { memset((void*)dwOriginAddress, ucValue, nCount); }
+	// Always VirtualProtect: targets often include PE .rsrc (e.g. 0xC08459 asInvoker).
+	// UseVirtuProtect=false + raw memset → AV in VCRUNTIME140 memset → DllMain fails
+	// as STATUS_DLL_INIT_FAILED (0xC0000142). Never write if protect change failed.
+	if (nCount <= 0) return;
+	DWORD dwOldProtect = 0;
+	if (!VirtualProtect((LPVOID)dwOriginAddress, nCount, PAGE_EXECUTE_READWRITE, &dwOldProtect)) {
+		return;
+	}
+	memset((void*)dwOriginAddress, ucValue, nCount);
+	VirtualProtect((LPVOID)dwOriginAddress, nCount, dwOldProtect, &dwOldProtect);
 }
 
 /*
@@ -65,71 +68,64 @@ void Memory::WriteString(const DWORD dwOriginAddress, const char* sContent, cons
 
 void Memory::WriteString(const DWORD dwOriginAddress, const char* sContent) {
     const size_t nSize = strlen(sContent);
-    if (UseVirtuProtect) {
-        DWORD dwOldProtect;
-        VirtualProtect((LPVOID)dwOriginAddress, nSize, PAGE_EXECUTE_READWRITE, &dwOldProtect);
-        memcpy((void*)dwOriginAddress, sContent, nSize);
-        VirtualProtect((LPVOID)dwOriginAddress, nSize, dwOldProtect, &dwOldProtect);
-    }
-    else { memcpy((void*)dwOriginAddress, sContent, nSize); }
+	if (nSize == 0) return;
+	DWORD dwOldProtect = 0;
+	if (!VirtualProtect((LPVOID)dwOriginAddress, nSize, PAGE_EXECUTE_READWRITE, &dwOldProtect)) {
+		return;
+	}
+	memcpy((void*)dwOriginAddress, sContent, nSize);
+	VirtualProtect((LPVOID)dwOriginAddress, nSize, dwOldProtect, &dwOldProtect);
 }
 
 void Memory::WriteByte(const DWORD dwOriginAddress, const unsigned char ucValue) {
     if (dwOriginAddress < 0x10000) {
         return;
     }
-    if (UseVirtuProtect) {
-        DWORD dwOldProtect;
-        VirtualProtect((LPVOID)dwOriginAddress, sizeof(unsigned char), PAGE_EXECUTE_READWRITE, &dwOldProtect);
-        *(unsigned char*)dwOriginAddress = ucValue;
-        VirtualProtect((LPVOID)dwOriginAddress, sizeof(unsigned char), dwOldProtect, &dwOldProtect);
-    }
-    else { *(unsigned char*)dwOriginAddress = ucValue; }
+	DWORD dwOldProtect = 0;
+	if (!VirtualProtect((LPVOID)dwOriginAddress, sizeof(unsigned char), PAGE_EXECUTE_READWRITE, &dwOldProtect)) {
+		return;
+	}
+	*(unsigned char*)dwOriginAddress = ucValue;
+	VirtualProtect((LPVOID)dwOriginAddress, sizeof(unsigned char), dwOldProtect, &dwOldProtect);
 }
 
 void Memory::WriteShort(const DWORD dwOriginAddress, const unsigned short usValue) {
-    if (UseVirtuProtect) {
-        DWORD dwOldProtect;
-        VirtualProtect((LPVOID)dwOriginAddress, sizeof(unsigned short), PAGE_EXECUTE_READWRITE, &dwOldProtect);
-        *(unsigned short*)dwOriginAddress = usValue;
-        VirtualProtect((LPVOID)dwOriginAddress, sizeof(unsigned short), dwOldProtect, &dwOldProtect);
-    }
-    else { *(unsigned short*)dwOriginAddress = usValue; }
+	DWORD dwOldProtect = 0;
+	if (!VirtualProtect((LPVOID)dwOriginAddress, sizeof(unsigned short), PAGE_EXECUTE_READWRITE, &dwOldProtect)) {
+		return;
+	}
+	*(unsigned short*)dwOriginAddress = usValue;
+	VirtualProtect((LPVOID)dwOriginAddress, sizeof(unsigned short), dwOldProtect, &dwOldProtect);
 }
 
 void Memory::WriteInt(const DWORD dwOriginAddress, const unsigned int dwValue) {
-    if (UseVirtuProtect) {
-        DWORD dwOldProtect;
-        VirtualProtect((LPVOID)dwOriginAddress, sizeof(unsigned int), PAGE_EXECUTE_READWRITE, &dwOldProtect);
-        *(unsigned int*)dwOriginAddress = dwValue;
-        VirtualProtect((LPVOID)dwOriginAddress, sizeof(unsigned int), dwOldProtect, &dwOldProtect);
-    }
-    else { *(unsigned int*)dwOriginAddress = dwValue; }
+	DWORD dwOldProtect = 0;
+	if (!VirtualProtect((LPVOID)dwOriginAddress, sizeof(unsigned int), PAGE_EXECUTE_READWRITE, &dwOldProtect)) {
+		return;
+	}
+	*(unsigned int*)dwOriginAddress = dwValue;
+	VirtualProtect((LPVOID)dwOriginAddress, sizeof(unsigned int), dwOldProtect, &dwOldProtect);
 }
 
 void Memory::WriteDouble(const DWORD dwOriginAddress, const double dwValue) {
-    if (UseVirtuProtect) {
-        DWORD dwOldProtect;
-        VirtualProtect((LPVOID)dwOriginAddress, sizeof(double), PAGE_EXECUTE_READWRITE, &dwOldProtect);
-        *(double*)dwOriginAddress = dwValue;
-        VirtualProtect((LPVOID)dwOriginAddress, sizeof(double), dwOldProtect, &dwOldProtect);
-    }
-    else { *(double*)dwOriginAddress = dwValue; }
+	DWORD dwOldProtect = 0;
+	if (!VirtualProtect((LPVOID)dwOriginAddress, sizeof(double), PAGE_EXECUTE_READWRITE, &dwOldProtect)) {
+		return;
+	}
+	*(double*)dwOriginAddress = dwValue;
+	VirtualProtect((LPVOID)dwOriginAddress, sizeof(double), dwOldProtect, &dwOldProtect);
 }
 
 void Memory::WriteByteArray(const DWORD dwOriginAddress, unsigned char* ucValue, const int ucValueSize) {
-    if (UseVirtuProtect) {
-        for (int i = 0; i < ucValueSize; i++) {
-            const DWORD newAddr = dwOriginAddress + i;
-            DWORD dwOldProtect;
-            VirtualProtect((LPVOID)newAddr, sizeof(unsigned char), PAGE_EXECUTE_READWRITE, &dwOldProtect);
-            *(unsigned char*)newAddr = ucValue[i];
-            VirtualProtect((LPVOID)newAddr, sizeof(unsigned char), dwOldProtect, &dwOldProtect);
-        }
-    }
-    else {
-        for (int i = 0; i < ucValueSize; i++) { const DWORD newAddr = dwOriginAddress + i; *(unsigned char*)newAddr = ucValue[i]; }
-    }
+	if (ucValueSize <= 0 || !ucValue) {
+		return;
+	}
+	DWORD dwOldProtect = 0;
+	if (!VirtualProtect((LPVOID)dwOriginAddress, ucValueSize, PAGE_EXECUTE_READWRITE, &dwOldProtect)) {
+		return;
+	}
+	memcpy((void*)dwOriginAddress, ucValue, ucValueSize);
+	VirtualProtect((LPVOID)dwOriginAddress, ucValueSize, dwOldProtect, &dwOldProtect);
 }
 
 void Memory::CodeCave(void* ptrCodeCave, const DWORD dwOriginAddress, const int nNOPCount) { //tested and working

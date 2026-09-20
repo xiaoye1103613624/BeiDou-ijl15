@@ -2,8 +2,10 @@
 #include "BootLog.h"
 #include "LoadTraceApi.h"
 #include "CrashDiag.h"
+#include "DeferredBootPatches.h"
 #include "../Memory.h"
 #include "../Client.h"
+#include "../compat/rs/rs.h"
 #include "../gamedata/MapEnterNullGuardApi.h"
 
 #include <cstring>
@@ -78,16 +80,32 @@ static void LogInitSeh(EXCEPTION_POINTERS* ep) {
     if (ctx) {
         BootLog("*** Init SEH EIP=0x%08X ESP=0x%08X EBP=0x%08X", ctx->Eip, ctx->Esp, ctx->Ebp);
     }
-    if (i0) {
+    // MSVC C++ EH: ExceptionInformation[0]=0x19930520 magic,
+    // [1]=pExceptionObject, [2]=pThrowInfo. Never dereference i0 as object.
+    if (i1) {
         __try {
-            const BYTE* p = reinterpret_cast<const BYTE*>(i0);
+            const BYTE* p = reinterpret_cast<const BYTE*>(i1);
             BootLog("*** exception object @0x%p : %02X %02X %02X %02X %02X %02X %02X %02X | %02X %02X %02X %02X %02X %02X %02X %02X | %02X %02X %02X %02X",
                     reinterpret_cast<const void*>(p),
                     p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
                     p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15],
                     p[16], p[17], p[18], p[19]);
+            // _com_error layout (MSVC): vptr+0, HRESULT+4, IErrorInfo*+8
+            const DWORD hr = *reinterpret_cast<const DWORD*>(p + 4);
+            BootLog("*** com_error HRESULT=0x%08X IErrorInfo*=0x%08X",
+                    hr, *reinterpret_cast<const DWORD*>(p + 8));
+            IErrorInfo* pei = *reinterpret_cast<IErrorInfo* const*>(p + 8);
+            if (pei) {
+                BSTR desc = nullptr;
+                if (SUCCEEDED(pei->GetDescription(&desc)) && desc) {
+                    char narrow[512]{};
+                    WideCharToMultiByte(CP_UTF8, 0, desc, -1, narrow, sizeof(narrow) - 1, nullptr, nullptr);
+                    BootLog("*** IErrorInfo.Description: %s", narrow);
+                    SysFreeString(desc);
+                }
+            }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            BootLog("*** exception object @0x%p <unreadable>", reinterpret_cast<const void*>(i0));
+            BootLog("*** exception object @0x%p <unreadable>", reinterpret_cast<const void*>(i1));
         }
     }
     if (ctx) {
@@ -150,6 +168,48 @@ static auto g_CxxThrow = reinterpret_cast<CxxThrow_t>(0x00A60BB7);
 static void __cdecl Hook_CxxThrow(void* pObj, void* pThrowInfo) {
     BootLog("*** _CxxThrowException obj=0x%p throwInfo=0x%p stage=%s",
             pObj, pThrowInfo, BootLog_LastStage());
+    if (pObj) {
+        __try {
+            const BYTE* p = reinterpret_cast<const BYTE*>(pObj);
+            // Best-effort: _com_error has HRESULT at +4; std::exception has vptr only.
+            const DWORD maybeHr = *reinterpret_cast<const DWORD*>(p + 4);
+            BootLog("*** throw obj+0=+0x%08X +4=0x%08X +8=0x%08X",
+                    *reinterpret_cast<const DWORD*>(p),
+                    maybeHr,
+                    *reinterpret_cast<const DWORD*>(p + 8));
+            if ((maybeHr & 0xFFFF0000u) == 0x80000000u ||
+                (maybeHr & 0xFFFF0000u) == 0x80070000u ||
+                maybeHr == 0x80004005u || maybeHr == 0x80004003u) {
+                BootLog("*** throw likely HRESULT=0x%08X", maybeHr);
+                IErrorInfo* pei = *reinterpret_cast<IErrorInfo* const*>(p + 8);
+                if (pei) {
+                    BSTR desc = nullptr;
+                    if (SUCCEEDED(pei->GetDescription(&desc)) && desc) {
+                        char narrow[512]{};
+                        WideCharToMultiByte(CP_UTF8, 0, desc, -1, narrow,
+                                            sizeof(narrow) - 1, nullptr, nullptr);
+                        BootLog("*** throw IErrorInfo: %s", narrow);
+                        SysFreeString(desc);
+                    }
+                }
+                IErrorInfo* threadInfo = nullptr;
+                if (SUCCEEDED(GetErrorInfo(0, &threadInfo)) && threadInfo) {
+                    BSTR desc = nullptr;
+                    if (SUCCEEDED(threadInfo->GetDescription(&desc)) && desc) {
+                        char narrow[512]{};
+                        WideCharToMultiByte(CP_UTF8, 0, desc, -1, narrow,
+                                            sizeof(narrow) - 1, nullptr, nullptr);
+                        BootLog("*** throw thread IErrorInfo: %s", narrow);
+                        SysFreeString(desc);
+                    }
+                    SetErrorInfo(0, threadInfo);
+                    threadInfo->Release();
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            BootLog("*** throw obj dump SEH");
+        }
+    }
     void* frames[24]{};
     const USHORT n = CaptureStackBackTrace(1, 24, frames, nullptr);
     BootLog("*** throw real callers (%u):", n);
@@ -458,11 +518,18 @@ static int __fastcall Hook_InitGr2D(void* pThis, void* edx) {
             *reinterpret_cast<void**>(0x00BF0CC0),
             *reinterpret_cast<void**>(0x00BF14EC),
             *reinterpret_cast<void**>(0x00BEC33C));
+    // Install IWzGr2D::Initialize hook before native InitGr2D (not in DllMain —
+    // loader lock). It passes through to the native COM method with an arg guard;
+    // it must never write to the object head, which is the vptr.
+    rs_install_early_findscreenmode_hook();
     const int r = g_InitGr2D(pThis, edx);
     BootLog("Gr2D post BF14EC=%p BEC33C=%p rc=%d",
             *reinterpret_cast<void**>(0x00BF14EC),
             *reinterpret_cast<void**>(0x00BEC33C), r);
-    if (r == 0) {
+    // InitializeGr2D is void in the EXE; reaching here means it did not throw.
+    // Apply deferred .text patches only after Gr2D is live.
+    ApplyDeferredBootPatches();
+    {
         // IWzGr2D* is valid only after InitializeGr2D; DllMain RefreshRate caused E_FAIL.
         static bool refreshRateInstalled = false;
         if (!refreshRateInstalled) {

@@ -6,6 +6,7 @@
 #include "compat/wvs/util.h"
 #include "compat/ztl/ztl.h"
 #include "../potentialscroll/PotentialScrollApi.h"
+#include "../coloringprism/ColoringPrismApi.h"
 
 #include <windows.h>
 #include <cstring>
@@ -208,7 +209,7 @@ static void SendOutPacket(COutPacket& oPacket) {
 // ===========================================================================
 // CUIFusionAnvil dialog — CWnd subclass.
 // Loads UI.wz/UIWindow.img/Synthesizing sprites, renders 2 item slots +
-// OK/Cancel/Exit buttons. Routes drops via the CDraggableItem::OnDropped hook.
+// OK/Cancel/Restore/Exit buttons. Routes drops via CDraggableItem::OnDropped.
 // ===========================================================================
 
 typedef int(__cdecl* t_get_bodypart)(int nItemID, int nGender, int* pnBodyPart, int bAll);
@@ -217,6 +218,56 @@ static auto get_bodypart_from_item =
     reinterpret_cast<t_get_bodypart>(kAddr_get_bodypart_from_item);
 static auto get_weapon_type =
     reinterpret_cast<t_get_weapon_type>(kAddr_get_weapon_type);
+
+// WzFont ctor (same address as worldmapinfo / coloringprism — PE-verified).
+static constexpr uintptr_t kAddr_WzFontCreate = 0x0046341A;
+// GBK: 还原 (narrow UI text; never UTF-8 literals).
+static constexpr char kLabelRestoreGbk[] = "\xBB\xB9\xD4\xAD";
+
+static int32_t SafeGetAnvilItemId(GW_ItemSlotBase* pItem) {
+    if (!pItem) {
+        return 0;
+    }
+    int nType = 0;
+    __try {
+        nType = pItem->GetType();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    if (nType != 1) {
+        return 0;
+    }
+    int32_t id = 0;
+    __try {
+        id = reinterpret_cast<GW_ItemSlotEquip*>(pItem)->nAnvilItemID;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return id;
+}
+
+static IWzFontPtr EnsureRestoreFont() {
+    static IWzFontPtr s_font;
+    static bool s_tried = false;
+    if (s_tried) {
+        return s_font;
+    }
+    s_tried = true;
+    try {
+        PcCreateObject<IWzFontPtr>(L"Canvas#Font", s_font, nullptr);
+        if (s_font) {
+            HRESULT hr = reinterpret_cast<HRESULT(__thiscall*)(
+                IWzFont*, Ztl_bstr_t, unsigned long, unsigned long, const Ztl_variant_t&)>(
+                kAddr_WzFontCreate)(s_font, L"Dotum", 12, 0xFF000000u, Ztl_variant_t(L""));
+            if (FAILED(hr)) {
+                s_font = nullptr;
+            }
+        }
+    } catch (...) {
+        s_font = nullptr;
+    }
+    return s_font;
+}
 
 class CUIFusionAnvil : public CWnd {
 public:
@@ -246,13 +297,14 @@ public:
     int               m_anItemID[2];
 
     int               m_bBtOkEnable;
-    int               m_nPressedBtn; // 0=none, 1=OK, 2=Cancel, 3=Exit
-    int               m_nHoveredBtn; // 0=none, 1=OK, 2=Cancel, 3=Exit
+    int               m_bBtRestoreEnable; // right slot has nAnvilItemID != 0
+    int               m_nPressedBtn; // 0=none, 1=OK, 2=Cancel, 3=Exit, 4=Restore
+    int               m_nHoveredBtn; // 0=none, 1=OK, 2=Cancel, 3=Exit, 4=Restore
     int               m_bDragging;
     int               m_nDragAnchorX;
     int               m_nDragAnchorY;
     RECT              m_rcSlot[2];
-    RECT              m_rcBtOk, m_rcBtCancel, m_rcBtExit;
+    RECT              m_rcBtOk, m_rcBtCancel, m_rcBtExit, m_rcBtRestore;
 
     CUIFusionAnvil(int nPOS, int nID);
     virtual ~CUIFusionAnvil() override;
@@ -268,8 +320,10 @@ public:
         return ms_RTTI.IsKindOf(pRTTI);
     }
 
+    void RefreshRestoreEnable();
     int  PutItem(GW_ItemSlotBase* pItem, int nTI, int nSlotPos, int rx, int ry);
     void SendRequestPacket();
+    void SendRestorePacket();
 
     static IWzCanvasPtr LoadSprite(const wchar_t* sPath);
 };
@@ -295,8 +349,8 @@ IWzCanvasPtr CUIFusionAnvil::LoadSprite(const wchar_t* sPath) {
 }
 
 CUIFusionAnvil::CUIFusionAnvil(int nPOS, int nID)
-    : m_nItemPOS(nPOS), m_nItemID(nID), m_bBtOkEnable(0), m_nPressedBtn(0),
-      m_nHoveredBtn(0),
+    : m_nItemPOS(nPOS), m_nItemID(nID), m_bBtOkEnable(0), m_bBtRestoreEnable(0),
+      m_nPressedBtn(0), m_nHoveredBtn(0),
       m_bDragging(0), m_nDragAnchorX(0), m_nDragAnchorY(0)
 {
     m_apItem[0] = m_apItem[1] = nullptr;
@@ -360,6 +414,8 @@ CUIFusionAnvil::CUIFusionAnvil(int nPOS, int nID)
     m_rcBtOk     = RectFromCanvas(m_pBtOkN,      43, 171, 40, 17);
     m_rcBtCancel = RectFromCanvas(m_pBtCancelN,  97, 171, 40, 17);
     m_rcBtExit   = RectFromCanvas(m_pBtExitN,   166,   6, 13, 13);
+    // Self-drawn restore (no Synthesizing WZ node); left of OK.
+    m_rcBtRestore = { 3, 171, 40, 188 };
 
     // 43x43 hit rects at (37,98) and (106,98); icon draw baseline at y=135.
     m_rcSlot[0] = { 37,  98,  80, 141 };
@@ -424,6 +480,37 @@ void CUIFusionAnvil::Draw(const RECT* pRect) {
                         true, m_nPressedBtn == 3,
                         m_nHoveredBtn == 3 && m_nPressedBtn == 0));
 
+    // Restore — plate + GBK label (enabled when right-slot equip has anvil).
+    {
+        const bool en = m_bBtRestoreEnable != 0;
+        const bool pressed = m_nPressedBtn == 4;
+        const bool hover = m_nHoveredBtn == 4 && m_nPressedBtn == 0;
+        const int l = m_rcBtRestore.left;
+        const int t = m_rcBtRestore.top;
+        const unsigned w = static_cast<unsigned>(m_rcBtRestore.right - m_rcBtRestore.left);
+        const unsigned h = static_cast<unsigned>(m_rcBtRestore.bottom - m_rcBtRestore.top);
+        unsigned fill = en ? (pressed ? 0xFFB0B0B0u : (hover ? 0xFFE8E8E8u : 0xFFD0D0D0u))
+                           : 0xFF909090u;
+        try {
+            pCanvas->DrawRectangle(l, t, w, h, fill);
+            pCanvas->DrawRectangle(l, t, w, 1, 0xFF606060u);
+            pCanvas->DrawRectangle(l, t + static_cast<int>(h) - 1, w, 1, 0xFF606060u);
+            pCanvas->DrawRectangle(l, t, 1, h, 0xFF606060u);
+            pCanvas->DrawRectangle(l + static_cast<int>(w) - 1, t, 1, h, 0xFF606060u);
+        } catch (...) {}
+        IWzFontPtr font = EnsureRestoreFont();
+        if (font) {
+            try {
+                int tw = static_cast<int>(font->CalcTextWidth(
+                    Ztl_bstr_t(kLabelRestoreGbk), Ztl_variant_t()));
+                int tx = l + (static_cast<int>(w) - tw) / 2;
+                int ty = t + 2;
+                pCanvas->DrawTextA(tx, ty, Ztl_bstr_t(kLabelRestoreGbk), font,
+                                   Ztl_variant_t(), Ztl_variant_t());
+            } catch (...) {}
+        }
+    }
+
     // Item icons — baseline y=135 in the dialog; x-centers at 42 and 111.
     static constexpr int kIconX[2] = { 42, 111 };
     static constexpr int kIconY    = 135;
@@ -443,6 +530,10 @@ void CUIFusionAnvil::Draw(const RECT* pRect) {
 void CUIFusionAnvil::OnMouseButton(unsigned int msg, unsigned int wParam, int rx, int ry) {
     POINT pt{rx, ry};
     if (msg == WM_LBUTTONDOWN) {
+        if (m_bBtRestoreEnable && PtInRect(&m_rcBtRestore, pt)) {
+            m_nPressedBtn = 4; play_ui_sound(L"BtMouseClick");
+            InvalidateRect(nullptr); return;
+        }
         if (m_bBtOkEnable && PtInRect(&m_rcBtOk, pt)) {
             m_nPressedBtn = 1; play_ui_sound(L"BtMouseClick");
             InvalidateRect(nullptr); return;
@@ -470,6 +561,10 @@ void CUIFusionAnvil::OnMouseButton(unsigned int msg, unsigned int wParam, int rx
         int pressed = m_nPressedBtn;
         m_nPressedBtn = 0;
         InvalidateRect(nullptr);
+        if (pressed == 4 && PtInRect(&m_rcBtRestore, pt)) {
+            if (m_bBtRestoreEnable) SendRestorePacket();
+            return;
+        }
         if (pressed == 1 && PtInRect(&m_rcBtOk, pt)) {
             if (m_bBtOkEnable) SendRequestPacket();
             return;
@@ -498,14 +593,20 @@ int CUIFusionAnvil::OnMouseMove(int rx, int ry) {
     // Button hover-sound: play only on a 0 → button transition.
     POINT pt{rx, ry};
     int nNow = 0;
-    if (m_bBtOkEnable && PtInRect(&m_rcBtOk, pt))          nNow = 1;
-    else if (PtInRect(&m_rcBtCancel, pt))                  nNow = 2;
-    else if (PtInRect(&m_rcBtExit, pt))                    nNow = 3;
+    if (m_bBtRestoreEnable && PtInRect(&m_rcBtRestore, pt)) nNow = 4;
+    else if (m_bBtOkEnable && PtInRect(&m_rcBtOk, pt))      nNow = 1;
+    else if (PtInRect(&m_rcBtCancel, pt))                   nNow = 2;
+    else if (PtInRect(&m_rcBtExit, pt))                     nNow = 3;
     if (nNow != m_nHoveredBtn) {
         if (nNow != 0) play_ui_sound(L"BtMouseOver");
         m_nHoveredBtn = nNow;
     }
     return 0;
+}
+
+void CUIFusionAnvil::RefreshRestoreEnable() {
+    // Right slot = base; restore when that equip already carries anvil skin.
+    m_bBtRestoreEnable = (m_apItem[1] != nullptr && SafeGetAnvilItemId(m_apItem[1]) != 0) ? 1 : 0;
 }
 
 int CUIFusionAnvil::PutItem(GW_ItemSlotBase* pItem, int nTI, int nSlotPos, int rx, int ry) {
@@ -536,6 +637,7 @@ int CUIFusionAnvil::PutItem(GW_ItemSlotBase* pItem, int nTI, int nSlotPos, int r
     m_apItem[nIndex]    = pItem;
     m_anItemPos[nIndex] = nSlotPos;
     m_anItemID[nIndex]  = nItemID;
+    RefreshRestoreEnable();
     play_ui_sound(L"DragEnd");
     InvalidateRect(nullptr);
     return 1;
@@ -548,13 +650,28 @@ void CUIFusionAnvil::SendRequestPacket() {
     // only the leaf node name is needed here.
     play_ui_sound(L"anvil");
 
-    // Body matches Cosmic's UseCashItemHandler layout (no tick prefix):
-    //   short position, int itemId, short basePos, short skinPos
+    // C→S UseCashItem (0x4F) after cash slot/itemId:
+    //   short skinPos (left / appearance source), short basePos (right / keep stats)
+    // Restore uses skinPos = -1 (see SendRestorePacket).
     COutPacket oPacket(kOpcode_UseCashItem);
     oPacket.Encode2(static_cast<unsigned short>(m_nItemPOS));
     oPacket.Encode4(m_nItemID);
     oPacket.Encode2(static_cast<unsigned short>(pos0));
     oPacket.Encode2(static_cast<unsigned short>(pos1));
+    SendOutPacket(oPacket);
+    Destroy();
+}
+
+void CUIFusionAnvil::SendRestorePacket() {
+    if (!m_apItem[1] || SafeGetAnvilItemId(m_apItem[1]) == 0) {
+        return;
+    }
+    play_ui_sound(L"anvil");
+    COutPacket oPacket(kOpcode_UseCashItem);
+    oPacket.Encode2(static_cast<unsigned short>(m_nItemPOS));
+    oPacket.Encode4(m_nItemID);
+    oPacket.Encode2(static_cast<unsigned short>(-1)); // skinPos = restore
+    oPacket.Encode2(static_cast<unsigned short>(m_anItemPos[1]));
     SendOutPacket(oPacket);
     Destroy();
 }
@@ -721,6 +838,11 @@ static auto CWvsContext__SendConsumeCashItemUseRequest =
 void __fastcall CWvsContext__SendConsumeCashItemUseRequest_hook(
     CWvsContext* pThis, void* /*edx*/, int nPOS, int nItemID, int a4, ZXString<char> a5)
 {
+    // Coloring Prism (5782000): open dye UI; server consumes on confirm.
+    if (ColorPrism_IsPrismItem(nItemID)) {
+        ColorPrism_OnUse(nPOS, nItemID);
+        return;
+    }
     if (nItemID != kFusionAnvilItemID) {
         CWvsContext__SendConsumeCashItemUseRequest(pThis, nPOS, nItemID, a4, a5);
         return;
@@ -742,6 +864,10 @@ static auto CWvsContext__SendEtcCashItemUseRequest =
 void __fastcall CWvsContext__SendEtcCashItemUseRequest_hook(
     CWvsContext* pThis, void* /*edx*/, int nPOS, int nItemID)
 {
+    if (ColorPrism_IsPrismItem(nItemID)) {
+        ColorPrism_OnUse(nPOS, nItemID);
+        return;
+    }
     if (nItemID == kFusionAnvilItemID && !CUIFusionAnvil::ms_pInstance) {
         new CUIFusionAnvil(nPOS, nItemID);
         return;
@@ -757,6 +883,10 @@ static auto get_consume_cash_item_type =
     reinterpret_cast<int32_t(__cdecl*)(int32_t)>(kAddr_get_consume_cash_item_type);
 
 int32_t __cdecl get_consume_cash_item_type_hook(int32_t nItemID) {
+    // Group 578 is outside stock 500..561 — without this, prism clicks are dropped.
+    if (ColorPrism_IsPrismItem(nItemID)) {
+        return 1;
+    }
     if (nItemID == kFusionAnvilItemID) {
         // Any nonzero classification token works — the client just checks truthiness.
         return 1;
@@ -788,6 +918,21 @@ int __fastcall CDraggableItem__OnDropped_hook(
     if (pThis && PotentialScroll_TryHandleCashCubeDrop(
             pThis->m_nItemTI, pThis->m_nSlotPosition, pFrom, pTo, rx, ry)) {
         return 1;
+    }
+    // Coloring Prism well: inv type/pos live on the drag source, not OnDropped args.
+    if (pThis) {
+        int invType = 0;
+        int invPos = 0;
+        __try {
+            invType = pThis->m_nItemTI;
+            invPos = pThis->m_nSlotPosition;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            invType = 0;
+            invPos = 0;
+        }
+        if (invType != 0 && ColorPrism_HandleItemDrop(pTo, invType, invPos)) {
+            return 1;
+        }
     }
     if (pTo && pTo->IsKindOf(&CUIFusionAnvil::ms_RTTI)) {
         // `pTo` arrives as the IUIMsgHandler sub-object pointer (offset +4
